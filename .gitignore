@@ -1,0 +1,21 @@
+# Credenciales y configuración local
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Archivos locales y temporales
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Las Bases pertenecen a cada instalación y quedan fuera del repositorio
+/Base/
