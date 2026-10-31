@@ -19,3 +19,10 @@ Thumbs.db
 
 # Las Bases pertenecen a cada instalación y quedan fuera del repositorio
 /Base/
+
+# Datos técnicos y temporales, si se intentan colocar dentro del repositorio
+record-*.json
+.mind-*.tmp
+.mind-test-*/
+node_modules/
+coverage/
