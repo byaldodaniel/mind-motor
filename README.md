@@ -1,5 +1,17 @@
 # Mind 1.0 — Motor
 
+> **Producto portable (candidato 1.0.0-rc.1).** Mind se distribuye como una carpeta
+> que el usuario extrae y abre desde un agente de IA compatible: el agente inicia
+> `mind mcp`, el usuario autoriza carpetas en un formulario de su cliente o en la
+> consola de Mind, y la sesión mantiene los índices al día mientras dura. Véanse
+> [docs/PRODUCTO.md](docs/PRODUCTO.md) (estructura, experiencia, herramientas,
+> garantías y límites) y [docs/AVANCE.md](docs/AVANCE.md) (estado por componente,
+> decisiones vigentes y criterios de terminado). Prueba con un agente real:
+> [docs/evidencia/AGENTE_REAL_2026-11-01.md](docs/evidencia/AGENTE_REAL_2026-11-01.md).
+>
+> En desarrollo, el punto de entrada del producto es `node bin/mind.js <orden> --base <ruta>`
+> (`mind ayuda` lista las órdenes). La CLI del núcleo descrita abajo (`src/cli.js`) se conserva.
+
 Núcleo local construido desde cero. Utiliza JavaScript con módulos ESM y Node.js
 24 LTS. La lectura segura de originales requiere además Python 3.12 o posterior;
 usa su biblioteca estándar, sin paquetes adicionales ni compilación.
