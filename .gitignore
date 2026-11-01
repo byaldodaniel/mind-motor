@@ -26,6 +26,8 @@ record-*.json
 .mind-test-*/
 node_modules/
 coverage/
+__pycache__/
+*.pyc
 
 # Autorizaciones locales de carpetas
 folder-authorization-*.json

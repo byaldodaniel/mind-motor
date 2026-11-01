@@ -61,7 +61,9 @@ test('registra la ruta física, deduplica alias y no modifica los originales', a
   assert.deepEqual(await fs.readdir(folder), ['original.txt']);
   assert.deepEqual(await fs.readdir(base), [path.basename(filename(base, registered.id))]);
   const stored = JSON.parse(await fs.readFile(filename(base, registered.id), 'utf8'));
-  assert.deepEqual(Object.keys(stored).sort(), ['format', 'id', 'path', 'version']);
+  assert.deepEqual(Object.keys(stored).sort(), ['format', 'generation', 'id', 'path', 'version']);
+  assert.equal(stored.version, 2);
+  assert.match(stored.generation, /^[a-f0-9-]{36}$/);
 });
 
 test('el registro y la retirada persisten entre procesos CLI terminados', async (t) => {
