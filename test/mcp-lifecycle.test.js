@@ -105,7 +105,15 @@ test('una Base de una versión más reciente no se abre ni se modifica', async (
   const marker = `${JSON.stringify({ format: 'mind-base', version: 99, baseId: '00000000-0000-4000-8000-000000000000', createdAt: '2030-01-01T00:00:00.000Z' })}\n`;
   await fs.writeFile(path.join(base, 'mind-base.json'), marker);
   const client = start();
-  const exit = await client.exited;
+  // El servidor responde igualmente para que el agente pueda explicar el motivo.
+  const init = await client.initialize();
+  assert.match(init.result.instructions, /BASE_TOO_NEW/);
+  const tools = (await client.request('tools/list')).result.tools.map((tool) => tool.name);
+  assert.deepEqual(tools, ['estado']);
+  const status = await client.call('estado');
+  assert.equal(status.data.error.codigo, 'BASE_TOO_NEW');
+  assert.match(status.data.que_hacer, /mind actualizar/);
+  const exit = await client.close();
   assert.equal(exit.code, 1);
   assert.match(client.stderr(), /BASE_TOO_NEW/);
   assert.deepEqual(await fs.readdir(base), ['mind-base.json']);
