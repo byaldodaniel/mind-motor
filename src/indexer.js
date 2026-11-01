@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { contains } from './paths.js';
-import { inspectRoot, scanFolder } from './index-scan.js';
+import { scanFolder } from './index-scan.js';
 import { createIndexStore, validateScopeId } from './index-store.js';
 
 const DEFAULT_MAX_ENTRIES = 100_000;
@@ -77,8 +77,12 @@ function summarize(entries, issues) {
  * @param {string} options.baseDirectory Ruta física de la Base ya abierta por el Motor.
  * @param {ScopeResolver} options.resolveScope
  * @param {number} [options.maxEntries]
+ * @param {string} [options.pythonExecutable] Intérprete del recorrido seguro.
  */
-export function createFolderIndexer({ baseDirectory, resolveScope, maxEntries = DEFAULT_MAX_ENTRIES } = {}) {
+export function createFolderIndexer({
+  baseDirectory, resolveScope, maxEntries = DEFAULT_MAX_ENTRIES,
+  pythonExecutable = process.platform === 'win32' ? 'python' : 'python3',
+} = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica la ruta absoluta de la Base del Motor.');
   }
@@ -127,9 +131,8 @@ export function createFolderIndexer({ baseDirectory, resolveScope, maxEntries = 
       return exclusive(scopeId, async () => {
         const scope = await authorized(scopeId);
         const previous = await store.load(scopeId);
-        const rootStats = await inspectRoot(scope.path);
         const { entries, issues } = await scanFolder(scope.path, {
-          rootStats, previous: previous?.entries ?? [], maxEntries,
+          previous: previous?.entries ?? [], maxEntries, pythonExecutable,
         });
         // La autorización se vuelve a consultar: una retirada durante el recorrido no se publica.
         await authorized(scopeId);

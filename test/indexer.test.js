@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openMotor, MotorError } from '../src/motor.js';
 import { createFolderIndexer } from '../src/indexer.js';
+import { mergeScan } from '../src/index-scan.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const developmentDirectory = path.dirname(motorDirectory);
@@ -39,6 +40,27 @@ async function fixture(t, options = {}) {
     baseDirectory: motor.baseDirectory, resolveScope: registryResolver(motor), ...options,
   });
   return { root, base, folder: scope.path, motor, scope, indexer };
+}
+
+/** Denegación real del SO para listar una carpeta; devuelve cómo restaurarla. */
+async function denyListing(directory) {
+  if (process.platform === 'win32') {
+    // Rutas del sistema: evita herramientas homónimas de otros entornos en PATH.
+    const system = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+    const who = spawnSync(path.join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' });
+    const sid = who.stdout.trim().split(',').at(-1).replaceAll('"', '');
+    const icacls = (...args) => assert.equal(
+      spawnSync(path.join(system, 'icacls.exe'), [directory, ...args]).status, 0);
+    icacls('/deny', `*${sid}:(RD)`);
+    return async () => icacls('/remove:d', `*${sid}`);
+  }
+  await fs.chmod(directory, 0);
+  return () => fs.chmod(directory, 0o755);
+}
+
+function record(relative, values = {}) {
+  return { path: relative, type: 'file', size: 1, modifiedMs: 0, changedMs: 0,
+    createdMs: null, listing: null, ...values };
 }
 
 function paths(index) {
@@ -92,25 +114,10 @@ test('la indexación inicial guarda rutas relativas, tipos, tamaños y fechas', 
 
 test('no lee el contenido ni modifica, copia o mueve los originales', async (t) => {
   const { base, folder, scope, indexer } = await fixture(t);
+  // Que el auxiliar solo abre carpetas se verifica en test/native_index_test.py.
   const before = await snapshot(folder);
-  const listed = [];
-  const opendir = fs.opendir;
-  t.mock.method(fs, 'opendir', async (location, ...args) => {
-    listed.push(location);
-    return opendir(location, ...args);
-  });
-  for (const method of ['open', 'readFile', 'writeFile', 'copyFile', 'rename', 'rm', 'unlink', 'utimes']) {
-    const original = fs[method];
-    t.mock.method(fs, method, async (location, ...args) => {
-      assert.ok(!String(location).startsWith(folder), `${method} no puede tocar originales`);
-      return original(location, ...args);
-    });
-  }
   await indexer.indexFolder(scope.id);
   await indexer.indexFolder(scope.id);
-  t.mock.restoreAll();
-  assert.deepEqual(new Set(listed), new Set([folder, path.join(folder, 'Proyectos'),
-    path.join(folder, 'Proyectos', 'Fotos')]));
   assert.deepEqual(await snapshot(folder), before);
   const stored = await fs.readFile(path.join(base, `folder-index-${scope.id}.json`), 'utf8');
   assert.ok(!stored.includes('ficticio'), 'El índice no contiene texto de los documentos');
@@ -210,14 +217,14 @@ test('registra los enlaces sin seguirlos ni guardar su destino', async (t) => {
 test('una subcarpeta inaccesible no se confunde con una eliminación', async (t) => {
   const { folder, scope, indexer } = await fixture(t);
   await indexer.indexFolder(scope.id);
-  const projects = path.join(folder, 'Proyectos');
-  const opendir = fs.opendir;
-  t.mock.method(fs, 'opendir', async (location, ...args) => {
-    if (location === projects) throw Object.assign(new Error('Acceso denegado simulado'), { code: 'EACCES' });
-    return opendir(location, ...args);
-  });
   await fs.writeFile(path.join(folder, 'otro.txt'), 'ficticio');
-  const denied = await indexer.indexFolder(scope.id);
+  const restore = await denyListing(path.join(folder, 'Proyectos'));
+  let denied;
+  try {
+    denied = await indexer.indexFolder(scope.id);
+  } finally {
+    await restore();
+  }
   assert.deepEqual(denied.changes, { added: ['otro.txt'], modified: [], removed: [] });
   assert.equal(denied.totals.notListed, 1);
   assert.equal(denied.totals.unverified, 2);
@@ -231,80 +238,67 @@ test('una subcarpeta inaccesible no se confunde con una eliminación', async (t)
   assert.equal(entry(index, 'Proyectos/plan.md').state, 'unverified');
   assert.equal(entry(index, 'Proyectos/plan.md').size, Buffer.byteLength('# Plan ficticio'));
 
-  t.mock.restoreAll();
   const restored = await indexer.indexFolder(scope.id);
   assert.deepEqual(restored.changes, { added: [], modified: [], removed: [] });
   assert.deepEqual(restored.issues, []);
   assert.equal(entry(await indexer.readFolderIndex(scope.id), 'Proyectos/plan.md').state, 'indexed');
 });
 
-test('una entrada cuyos metadatos no se pueden leer queda sin verificar', async (t) => {
-  const { folder, scope, indexer } = await fixture(t);
-  const target = path.join(folder, 'notas.txt');
-  const lstat = fs.lstat;
-  t.mock.method(fs, 'lstat', async (location, ...args) => {
-    if (location === target) throw Object.assign(new Error('Acceso denegado simulado'), { code: 'EPERM' });
-    return lstat(location, ...args);
-  });
-  const initial = await indexer.indexFolder(scope.id);
-  assert.deepEqual(initial.issues, [{ path: 'notas.txt', code: 'EPERM' }]);
-  const index = await indexer.readFolderIndex(scope.id);
-  assert.deepEqual(entry(index, 'notas.txt'), {
-    path: 'notas.txt', type: 'unknown', size: null, modifiedAt: null, changedAt: null,
-    createdAt: null, state: 'unverified', reason: 'EPERM',
-  });
-  t.mock.restoreAll();
-  assert.deepEqual((await indexer.indexFolder(scope.id)).changes.added, ['notas.txt']);
+test('los registros no comprobables del recorrido quedan sin verificar, sin falsas bajas', () => {
+  const previous = [
+    { path: 'A', type: 'directory', size: null, modifiedAt: null, changedAt: null, createdAt: null, state: 'indexed', reason: null },
+    { path: 'A/viejo.txt', type: 'file', size: 3, modifiedAt: null, changedAt: null, createdAt: null, state: 'indexed', reason: null },
+    { path: 'B', type: 'directory', size: null, modifiedAt: null, changedAt: null, createdAt: null, state: 'indexed', reason: null },
+    { path: 'B/dentro.txt', type: 'file', size: 1, modifiedAt: null, changedAt: null, createdAt: null, state: 'indexed', reason: null },
+  ];
+  const { entries, issues } = mergeScan({
+    records: [
+      { path: 'A', error: 'EPERM' },
+      record('B', { type: 'directory', size: null, listing: 'OTHER_VOLUME' }),
+      { path: 'nuevo', error: 'EACCES' },
+    ],
+    issues: [{ path: '', code: 'NAME_NOT_UTF8' }],
+  }, { previous, maxEntries: 10 });
+  assert.deepEqual(entries.map((item) => [item.path, item.type, item.state, item.reason]), [
+    ['A', 'directory', 'unverified', 'EPERM'],
+    ['A/viejo.txt', 'file', 'unverified', 'EPERM'],
+    ['B', 'directory', 'not-listed', 'OTHER_VOLUME'],
+    ['B/dentro.txt', 'file', 'unverified', 'OTHER_VOLUME'],
+    ['nuevo', 'unknown', 'unverified', 'EACCES'],
+  ]);
+  assert.equal(entries[1].size, 3);
+  assert.deepEqual(issues, [{ path: '', code: 'NAME_NOT_UTF8' }]);
+  assert.throws(() => mergeScan({ records: [{ path: 'A', error: 'EPERM' }], issues: [] },
+    { previous, maxEntries: 1 }), { code: 'INDEX_LIMIT_EXCEEDED' });
 });
 
-test('no recorre directorios de otro volumen', async (t) => {
-  const { folder, scope, indexer } = await fixture(t);
-  const projects = path.join(folder, 'Proyectos');
-  const lstat = fs.lstat;
-  t.mock.method(fs, 'lstat', async (location, ...args) => {
-    const stats = await lstat(location, ...args);
-    if (location !== projects) return stats;
-    return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { dev: stats.dev + 1n });
-  });
+test('una carpeta sustituida por un enlace hacia fuera no aporta nombres ajenos', async (t) => {
+  const { root, base, folder, scope, indexer } = await fixture(t);
+  await indexer.indexFolder(scope.id);
+  const outside = path.join(root, 'Fuera del ámbito');
+  await fs.mkdir(outside);
+  await fs.writeFile(path.join(outside, 'nombre-ajeno.txt'), 'ajeno');
+  await fs.rename(path.join(folder, 'Proyectos'), path.join(root, 'Proyectos movidos'));
+  await fs.symlink(outside, path.join(folder, 'Proyectos'), linkType);
   const result = await indexer.indexFolder(scope.id);
-  assert.deepEqual(result.issues, [{ path: 'Proyectos', code: 'OTHER_VOLUME' }]);
-  assert.deepEqual(paths(await indexer.readFolderIndex(scope.id)), ['Proyectos', 'notas.txt']);
-});
-
-test('descarta el listado de una carpeta sustituida durante el recorrido', async (t) => {
-  const { root, folder, scope, indexer } = await fixture(t);
-  const projects = path.join(folder, 'Proyectos');
-  const opendir = fs.opendir;
-  t.mock.method(fs, 'opendir', async (location, ...args) => {
-    if (location === projects) {
-      await fs.rename(projects, path.join(root, 'Proyectos movidos'));
-      await fs.mkdir(projects);
-      await fs.writeFile(path.join(projects, 'impostor.txt'), 'ficticio');
-    }
-    return opendir(location, ...args);
+  assert.deepEqual(result.changes, {
+    added: [], modified: ['Proyectos'], removed: ['Proyectos/Fotos', 'Proyectos/plan.md'],
   });
-  const result = await indexer.indexFolder(scope.id);
-  assert.deepEqual(result.issues, [{ path: 'Proyectos', code: 'ECHANGED' }]);
-  assert.ok(!paths(await indexer.readFolderIndex(scope.id)).includes('Proyectos/impostor.txt'));
+  const stored = await fs.readFile(path.join(base, `folder-index-${scope.id}.json`), 'utf8');
+  assert.ok(!stored.includes('nombre-ajeno'));
 });
 
-test('informa nombres que no son UTF-8 válido sin inventar rutas', async (t) => {
-  const { folder, scope, indexer } = await fixture(t);
-  const opendir = fs.opendir;
-  t.mock.method(fs, 'opendir', async (location, ...args) => {
-    const directory = await opendir(location, ...args);
-    if (location !== folder) return directory;
-    return (async function* listing() {
-      for await (const dirent of directory) yield dirent;
-      yield { name: Buffer.from([0x66, 0xff, 0x66]) };
-    }());
+test('sin el recorrido seguro se deniega la indexación y no se escribe nada', async (t) => {
+  const { base, motor, scope } = await fixture(t);
+  const unavailable = createFolderIndexer({
+    baseDirectory: base, resolveScope: registryResolver(motor),
+    pythonExecutable: path.join(base, 'python-inexistente'),
   });
-  const result = await indexer.indexFolder(scope.id);
-  assert.deepEqual(result.issues, [{ path: '', code: 'NAME_NOT_UTF8' }]);
-  assert.equal(result.totals.entries, 4);
+  await assert.rejects(unavailable.indexFolder(scope.id), { code: 'SAFE_SCAN_UNAVAILABLE' });
+  assert.deepEqual((await fs.readdir(base)).filter((name) => name.startsWith('folder-index-')), []);
 });
 
-test('una raíz desaparecida o redirigida falla sin alterar el índice anterior', async (t) => {
+test('una raíz desaparecida, redirigida o denegada falla sin alterar el índice anterior', async (t) => {
   const { root, base, folder, scope, indexer } = await fixture(t);
   await indexer.indexFolder(scope.id);
   const filename = path.join(base, `folder-index-${scope.id}.json`);
@@ -317,14 +311,14 @@ test('una raíz desaparecida o redirigida falla sin alterar el índice anterior'
   assert.equal(await fs.readFile(filename, 'utf8'), saved);
   assert.equal((await indexer.readFolderIndex(scope.id)).generation, 1);
 
-  const opendir = fs.opendir;
   await fs.unlink(folder).catch(() => fs.rmdir(folder));
   await fs.rename(moved, folder);
-  t.mock.method(fs, 'opendir', async (location, ...args) => {
-    if (location === folder) throw Object.assign(new Error('Acceso denegado simulado'), { code: 'EACCES' });
-    return opendir(location, ...args);
-  });
-  await assert.rejects(indexer.indexFolder(scope.id), { code: 'SCOPE_UNAVAILABLE' });
+  const restore = await denyListing(folder);
+  try {
+    await assert.rejects(indexer.indexFolder(scope.id), { code: 'SCOPE_UNAVAILABLE' });
+  } finally {
+    await restore();
+  }
   assert.equal(await fs.readFile(filename, 'utf8'), saved);
 });
 
