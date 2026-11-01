@@ -7,8 +7,8 @@ siendo exactamente esa versión. No hay movimiento, eliminación ni documentos
 complejos.
 
 Módulo independiente: `src/text-modifier.js` (JS) y `src/native_modifier.py`
-(auxiliar nativo, biblioteca estándar, reutiliza `native_reader.py`). Aún no
-está conectado a `openMotor`.
+(auxiliar nativo, biblioteca estándar, reutiliza `native_reader.py`). `openMotor`
+lo expone; véase [INTERFACES.md](INTERFACES.md) para la integración y el índice.
 
 ## Uso del anfitrión
 
@@ -85,8 +85,8 @@ instancia no autorizan modificar, ni al revés.
 ## Preparación del índice
 
 `indexEntry` tiene la forma exacta de una entrada de `index-scan.js`; la
-integración podrá reemplazar la entrada de esa ruta bajo la misma generación de
-autorización, sin recorrer de nuevo. Esta PR no escribe en el índice.
+`openMotor` la usa para sustituir la entrada de esa ruta en el índice vigente
+(véase [INTERFACES.md](INTERFACES.md)).
 
 ## Errores
 
