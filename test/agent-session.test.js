@@ -28,7 +28,7 @@ function connection({ onElicit = null, clientInfo = { name: 'cliente-de-prueba',
   };
 }
 
-const accept = (content) => () => ({ action: 'accept', content: { autorizar: true, ...content } });
+const accept = (acceso) => () => ({ action: 'accept', content: { acceso } });
 
 async function fixture(t, { observe = false } = {}) {
   const root = await fs.mkdtemp(path.join(development, '.mind-agent-session-test-'));
@@ -74,7 +74,7 @@ async function fixture(t, { observe = false } = {}) {
 test('el usuario decide en el formulario del cliente; el agente no puede ampliar lo concedido', async (t) => {
   const { folder, open, agent } = await fixture(t);
   const session = await open();
-  const conn = connection({ onElicit: accept({ leer: true, escribir: false }) });
+  const conn = connection({ onElicit: accept('leer') });
   const call = agent(session, conn);
   assert.deepEqual((await call('estado')).data.carpetas, []);
 
@@ -86,7 +86,11 @@ test('el usuario decide en el formulario del cliente; el agente no puede ampliar
   assert.equal(form.mode, 'form');
   assert.match(form.message, new RegExp(folder.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')));
   assert.match(form.message, /Resumir el presupuesto/);
-  assert.equal(form.requestedSchema.properties.autorizar.default, false);
+  assert.match(form.message, /todo lo que contiene/);
+  // Una sola elección (opción 1): se propone el nivel mínimo que cubre lo pedido.
+  assert.deepEqual(Object.keys(form.requestedSchema.properties), ['acceso']);
+  assert.equal(form.requestedSchema.properties.acceso.default, 'completo');
+  assert.deepEqual(form.requestedSchema.properties.acceso.oneOf.map((item) => item.const), ['encontrar', 'leer', 'completo']);
 
   const found = await call('buscar', { consulta: 'presupuesto' });
   assert.equal(found.data.total, 1);
@@ -111,7 +115,7 @@ test('rechazar, cancelar o no marcar la casilla no registra nada; cancelar deja 
   const session = await open();
   for (const [answer, expected, pending] of [
     [{ action: 'decline' }, 'rechazado', 0],
-    [{ action: 'accept', content: { autorizar: false, leer: true } }, 'rechazado', 0],
+    [{ action: 'accept', content: { acceso: 'todo' } }, 'rechazado', 0],
     [{ action: 'cancel' }, 'pendiente', 1],
   ]) {
     const call = agent(session, connection({ onElicit: () => answer }));
@@ -132,7 +136,7 @@ test('sin formularios, la solicitud queda pendiente hasta que el usuario la apru
   assert.equal((await call('leer', { carpeta: folder, ruta: 'notas.txt' })).code, 'FOLDER_NOT_AUTHORIZED');
   assert.equal((await call('estado')).data.solicitudes_pendientes.length, 1);
 
-  const answers = ['s', 's'];
+  const answers = ['2'];
   const lines = [];
   const prompt = {
     write: (line = '') => lines.push(line),
@@ -149,7 +153,7 @@ test('sin formularios, la solicitud queda pendiente hasta que el usuario la apru
 test('se rechazan ubicaciones demasiado amplias o internas antes de preguntar al usuario', async (t) => {
   const { mind, root, open, agent } = await fixture(t);
   const session = await open();
-  const conn = connection({ onElicit: accept({}) });
+  const conn = connection({ onElicit: accept('encontrar') });
   const call = agent(session, conn);
   const inside = path.join(mind, 'Datos');
   await fs.mkdir(inside);
@@ -173,9 +177,10 @@ test('se rechazan ubicaciones demasiado amplias o internas antes de preguntar al
 test('encontrar no permite leer; retirar y volver a autorizar no reactiva permisos anteriores', async (t) => {
   const { folder, open, agent } = await fixture(t);
   const session = await open();
-  const call = agent(session, connection({ onElicit: accept({}) }));
-  const granted = await call('solicitar_acceso', { ruta: folder, permisos: ['encontrar'] });
+  const call = agent(session, connection({ onElicit: accept('encontrar') }));
+  const granted = await call('solicitar_acceso', { ruta: folder, acceso: 'encontrar' });
   assert.deepEqual(granted.data.carpeta.permisos, ['encontrar']);
+  assert.equal((await call('estado')).data.carpetas[0].acceso, 'encontrar');
   assert.equal((await call('explorar', { profundidad: 2 })).data.total, 3);
   assert.equal((await call('leer', { ruta: 'notas.txt' })).code, 'ACCESS_NOT_GRANTED');
   assert.equal((await call('editar', { ruta: 'notas.txt', ediciones: [{ buscar: 'Notas', reemplazar: 'X' }] })).code, 'ACCESS_NOT_GRANTED');
@@ -193,9 +198,11 @@ test('encontrar no permite leer; retirar y volver a autorizar no reactiva permis
 test('reducir permisos conserva el resto; los parámetros desconocidos se rechazan', async (t) => {
   const { folder, open, agent } = await fixture(t);
   const session = await open();
-  const call = agent(session, connection({ onElicit: accept({ leer: true, escribir: true }) }));
+  const call = agent(session, connection({ onElicit: accept('completo') }));
   const id = (await call('solicitar_acceso', { ruta: folder, permisos: ['leer', 'escribir'] })).data.carpeta.id;
-  assert.deepEqual((await call('retirar_acceso', { carpeta: id, permisos: ['escribir'] })).data.permisos, ['encontrar', 'leer']);
+  assert.equal((await call('estado')).data.carpetas[0].acceso, 'completo');
+  assert.deepEqual((await call('retirar_acceso', { carpeta: id, permisos: ['escribir'] })).data.permisos, ['encontrar', 'leer', 'organizar']);
+  assert.equal((await call('estado')).data.carpetas[0].acceso, 'personalizado');
   assert.equal((await call('crear', { ruta: 'a.txt', contenido: 'x' })).code, 'ACCESS_NOT_GRANTED');
   assert.match((await call('leer', { ruta: 'notas.txt' })).text, /Notas/);
   assert.equal((await call('leer', { ruta: 'notas.txt', permiso: 'falso' })).code, 'INVALID_ARGUMENTS');
@@ -205,7 +212,7 @@ test('reducir permisos conserva el resto; los parámetros desconocidos se rechaz
 test('crear, modificar y editar con control de versiones; nunca se sobrescribe a ciegas', async (t) => {
   const { folder, open, agent } = await fixture(t);
   const session = await open();
-  const call = agent(session, connection({ onElicit: accept({ leer: true, escribir: true }) }));
+  const call = agent(session, connection({ onElicit: accept('completo') }));
   await call('solicitar_acceso', { ruta: folder, permisos: ['leer', 'escribir'] });
 
   const created = await call('crear', { ruta: 'Proyectos/acta.md', contenido: 'Acta ficticia\nPendiente: revisar\nPendiente: enviar\n' });

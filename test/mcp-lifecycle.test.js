@@ -29,7 +29,7 @@ async function fixture(t) {
   const start = (options = {}) => {
     const client = startMcp({
       args: ['--base', base],
-      onElicit: () => ({ action: 'accept', content: { autorizar: true, leer: true, escribir: true } }),
+      onElicit: () => ({ action: 'accept', content: { acceso: 'completo' } }),
       ...options,
     });
     clients.push(client);
@@ -84,7 +84,7 @@ test('sesión completa: primer uso, observación, cierre sin residuos y reconcil
   await second.initialize();
   assert.equal(JSON.parse(await fs.readFile(path.join(base, 'mind-base.json'), 'utf8')).baseId, marker.baseId);
   const status = await second.call('estado');
-  assert.deepEqual(status.data.carpetas[0].permisos, ['encontrar', 'leer', 'escribir']);
+  assert.deepEqual(status.data.carpetas[0].permisos, ['encontrar', 'leer', 'escribir', 'organizar']);
   const after = await eventually(async () => {
     const all = names(await second.call('buscar', { consulta: '' }));
     return all.includes('mientras-cerrado.md') && !all.includes('antiguo.txt') ? all : null;

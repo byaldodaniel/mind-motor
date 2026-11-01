@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { MotorError } from './errors.js';
 import { readJson, writeJson, removeJson } from './storage.js';
 import { contains } from './paths.js';
-import { ACCESS_LEVELS, CONTINUITY_LEVELS, normalizeAccess, describeAccess } from './access-policy.js';
+import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, PRESET_LABELS, minimumPreset, normalizeAccess, describeAccess } from './access-policy.js';
 
 /**
  * Consentimiento del usuario para lo que los agentes pueden hacer mediante Mind.
@@ -178,22 +178,22 @@ export function createConsent({ connection, requests }) {
         });
         return { status: 'pending', request: record };
       }
+      const suggested = minimumPreset(wanted);
       const lines = [
-        `${who} solicita, mediante Mind, acceso a esta carpeta:`,
+        `${who} solicita, mediante Mind, acceso a esta carpeta y a todo lo que contiene:`,
         folderPath,
         '',
-        `Permisos solicitados: ${asked.map((level) => LABELS[level].toLowerCase()).join('; ')}.`,
+        `Acceso solicitado: ${PRESET_LABELS[suggested]}.`,
         ...(why ? [`Motivo indicado por el agente (no verificado): «${why}»`] : []),
         '',
-        'Mind no copia los originales. Puedes retirar el acceso cuando quieras. Autoriza solo si reconoces esta solicitud.',
+        'Mind no copia los originales ni sigue enlaces que salgan de la carpeta. Puedes retirar el acceso cuando quieras. Autoriza solo si reconoces esta solicitud.',
       ];
-      const properties = {
-        autorizar: { type: 'boolean', title: 'Autorizar esta carpeta', description: LABELS.encontrar, default: false },
-      };
-      for (const level of asked.filter((item) => item !== 'encontrar')) {
-        properties[level] = { type: 'boolean', title: LABELS[level], default: true };
-      }
-      const response = await elicit(lines.join('\n'), properties, ['autorizar']);
+      const presets = Object.keys(ACCESS_PRESETS);
+      // 2025-11-25 usa oneOf con títulos; las versiones anteriores, enum con enumNames.
+      const choice = connection.protocolVersion === '2025-11-25'
+        ? { type: 'string', title: 'Acceso', oneOf: presets.map((name) => ({ const: name, title: PRESET_LABELS[name] })), default: suggested }
+        : { type: 'string', title: 'Acceso', enum: presets, enumNames: presets.map((name) => PRESET_LABELS[name]), default: suggested };
+      const response = await elicit(lines.join('\n'), { acceso: choice }, ['acceso']);
       if (response.action === 'decline') return { status: 'declined' };
       if (response.action !== 'accept') {
         // Cancelado: el usuario cerró el formulario o el cliente no pudo mostrarlo
@@ -203,12 +203,10 @@ export function createConsent({ connection, requests }) {
         });
         return { status: 'pending', request: record, cancelled: true };
       }
-      if (response.content?.autorizar !== true) return { status: 'declined' };
-      const access = { ...normalizeAccess(describeAccess(already)) };
-      access.encontrar = true;
-      for (const level of asked.filter((item) => item !== 'encontrar')) {
-        if (response.content?.[level] === true) access[level] = true;
-      }
+      const chosen = response.content?.acceso;
+      if (typeof chosen !== 'string' || !Object.hasOwn(ACCESS_PRESETS, chosen)) return { status: 'declined' };
+      // Lo ya concedido se conserva; reducir permisos se hace explícitamente al retirar.
+      const access = normalizeAccess([...describeAccess(already), ...ACCESS_PRESETS[chosen]]);
       return { status: 'approved', access, channel: 'formulario-del-cliente' };
     },
 

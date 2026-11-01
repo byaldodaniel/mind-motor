@@ -17,6 +17,34 @@ import { readJson, writeJson, removeJson } from './storage.js';
  */
 
 export const ACCESS_LEVELS = Object.freeze(['encontrar', 'leer', 'escribir', 'organizar']);
+
+/**
+ * Elección única que ve el usuario (decisión del 2026-11-01, opción 1). Internamente
+ * se conservan los permisos separados; encontrar nunca implica leer.
+ */
+export const ACCESS_PRESETS = Object.freeze({
+  encontrar: Object.freeze(['encontrar']),
+  leer: Object.freeze(['encontrar', 'leer']),
+  completo: Object.freeze(['encontrar', 'leer', 'escribir', 'organizar']),
+});
+export const PRESET_LABELS = Object.freeze({
+  encontrar: 'Solo encontrar (nombres, rutas y fechas; sin abrir archivos)',
+  leer: 'Encontrar y leer (sin cambiar nada)',
+  completo: 'Acceso completo (leer, crear, modificar y organizar; borrar pide confirmación cada vez)',
+});
+
+/** El nivel más bajo que cubre lo pedido. */
+export function minimumPreset(access) {
+  if (access.escribir || access.organizar) return 'completo';
+  return access.leer ? 'leer' : 'encontrar';
+}
+
+/** Nombre del nivel que corresponde exactamente a unos permisos, o "personalizado". */
+export function presetName(access) {
+  const granted = ACCESS_LEVELS.filter((level) => access?.[level] === true).join();
+  const found = Object.entries(ACCESS_PRESETS).find(([, levels]) => levels.join() === granted);
+  return found ? found[0] : granted === '' ? 'ninguno' : 'personalizado';
+}
 export const CONTINUITY_LEVELS = Object.freeze(['leer', 'registrar']);
 const FOLDER_ID = /^[a-f0-9]{64}$/;
 const CHANNELS = new Set(['formulario-del-cliente', 'consola', 'administracion-local']);

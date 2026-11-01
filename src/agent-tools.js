@@ -2,7 +2,7 @@ import path from 'node:path';
 import { MotorError } from './errors.js';
 import { textVersion } from './text-modifier.js';
 import { formatContinuityMarkdown } from './continuity.js';
-import { ACCESS_LEVELS, CONTINUITY_LEVELS, normalizeAccess, describeAccess } from './access-policy.js';
+import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, normalizeAccess, describeAccess, presetName } from './access-policy.js';
 import { createConsent, validateCandidateFolder, untrustedText } from './consent.js';
 
 /**
@@ -153,8 +153,9 @@ export const TOOL_DEFINITIONS = Object.freeze([
     title: 'Solicitar acceso del usuario',
     description: 'Pide al usuario que autorice una carpeta (o la continuidad) para los agentes. El usuario decide en un formulario de tu cliente o en la consola de Mind; esta herramienta nunca concede nada por sí sola. Pide solo los permisos necesarios.',
     inputSchema: schema({
-      ruta: { type: 'string', description: 'Ruta absoluta de una carpeta existente del usuario.' },
-      permisos: { type: 'array', items: { type: 'string', enum: ACCESS_LEVELS }, description: 'Para carpetas: encontrar (siempre incluido), leer, escribir, organizar.' },
+      ruta: { type: 'string', description: 'Ruta absoluta de una carpeta existente del usuario. El acceso cubre todo lo que contiene.' },
+      acceso: { type: 'string', enum: Object.keys(ACCESS_PRESETS), description: 'Nivel mínimo necesario: encontrar (solo metadatos), leer, o completo (leer, crear, modificar, organizar).' },
+      permisos: { type: 'array', items: { type: 'string', enum: ACCESS_LEVELS }, description: 'Alternativa a acceso, por permisos: encontrar, leer, escribir, organizar.' },
       continuidad: { type: 'array', items: { type: 'string', enum: CONTINUITY_LEVELS }, description: 'Para la continuidad entre agentes: leer, registrar. Úsalo en lugar de ruta.' },
       motivo: { type: 'string', description: 'Motivo breve que verá el usuario.' },
     }),
@@ -408,6 +409,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
           id: folder.id,
           ruta: folder.path,
           nombre: path.basename(folder.path),
+          acceso: decision ? presetName(decision.access) : 'ninguno',
           permisos: decision ? describeAccess(decision.access) : [],
           ...(decision ? {} : { aviso: 'Registrada sin permisos para agentes: solicita acceso.' }),
           indice: await indexSummary(folder),
@@ -432,10 +434,12 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
     },
 
     async solicitar_acceso(args) {
-      only(args, ['ruta', 'permisos', 'continuidad', 'motivo']);
+      only(args, ['ruta', 'acceso', 'permisos', 'continuidad', 'motivo']);
       const reason = text(args.motivo, 'motivo', { optional: true, max: 1000 });
       if (args.continuidad !== undefined) {
-        if (args.ruta !== undefined || args.permisos !== undefined) throw invalid('Usa continuidad o ruta/permisos, no ambos.');
+        if (args.ruta !== undefined || args.permisos !== undefined || args.acceso !== undefined) {
+          throw invalid('Usa continuidad o ruta con acceso, no ambos.');
+        }
         const requested = normalizeAccess(args.continuidad, CONTINUITY_LEVELS);
         const current = await policy.getContinuity();
         if (CONTINUITY_LEVELS.every((level) => !requested[level] || current[level])) {
@@ -449,7 +453,9 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         return { estado: 'autorizado', continuidad: describeAccess(saved, CONTINUITY_LEVELS) };
       }
       const folderPath = text(args.ruta, 'ruta');
-      const requested = normalizeAccess(args.permisos ?? ['encontrar']);
+      if (args.acceso !== undefined && args.permisos !== undefined) throw invalid('Usa acceso o permisos, no ambos.');
+      if (args.acceso !== undefined && !Object.hasOwn(ACCESS_PRESETS, args.acceso)) throw invalid('acceso debe ser encontrar, leer o completo.');
+      const requested = normalizeAccess(args.acceso !== undefined ? ACCESS_PRESETS[args.acceso] : args.permisos ?? ['encontrar']);
       requested.encontrar = true;
       const canonical = await validateCandidateFolder(folderPath, {
         protectedDirectories: session.layout.protectedDirectories,

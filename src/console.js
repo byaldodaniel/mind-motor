@@ -2,8 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 import { MotorError } from './errors.js';
-import { ACCESS_LEVELS, CONTINUITY_LEVELS, normalizeAccess, describeAccess } from './access-policy.js';
-import { ACCESS_LABELS, CONTINUITY_ACCESS_LABELS, validateCandidateFolder, untrustedText } from './consent.js';
+import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, PRESET_LABELS, minimumPreset, normalizeAccess, describeAccess } from './access-policy.js';
+import { CONTINUITY_ACCESS_LABELS, validateCandidateFolder, untrustedText } from './consent.js';
 import { liveSessions } from './session.js';
 
 /**
@@ -38,13 +38,21 @@ export function createPrompter({ input = process.stdin, output = process.stdout 
   };
 }
 
-async function chooseLevels(prompt, requested) {
-  const access = normalizeAccess([]);
-  access.encontrar = true;
-  for (const level of ACCESS_LEVELS.filter((item) => item !== 'encontrar' && requested.includes(item))) {
-    access[level] = await prompt.yes(`  ¿Permitir: ${ACCESS_LABELS[level].toLowerCase()}?`, false);
+/** Una sola elección (opción 1). Devuelve los permisos o null si el usuario no autoriza. */
+async function choosePreset(prompt, requested) {
+  const presets = Object.keys(ACCESS_PRESETS);
+  const suggested = minimumPreset(normalizeAccess(requested));
+  prompt.write(`Solicitado: ${PRESET_LABELS[suggested]}`);
+  presets.forEach((name, position) => prompt.write(`  ${position + 1}) ${PRESET_LABELS[name]}`));
+  prompt.write('  0) No autorizar');
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const answer = await prompt.ask('Elige una opción [0-3]: ');
+    if (answer === '0' || answer === '') return null;
+    const chosen = presets[Number(answer) - 1];
+    if (chosen) return normalizeAccess(ACCESS_PRESETS[chosen]);
+    prompt.write('Opción no válida.');
   }
-  return access;
+  return null;
 }
 
 /** Aprueba o rechaza las solicitudes pendientes y, opcionalmente, autoriza una carpeta indicada. */
@@ -57,9 +65,9 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
       baseDirectory: motor.baseDirectory,
       motorDirectory: session.layout.motorDirectory,
     });
-    prompt.write(`Carpeta: ${canonical}`);
-    if (await prompt.yes('¿Autorizar esta carpeta para los agentes que usen Mind?', false)) {
-      const access = await chooseLevels(prompt, requested ?? ['leer', 'escribir', 'organizar']);
+    prompt.write(`Carpeta (incluye todo lo que contiene): ${canonical}`);
+    const access = await choosePreset(prompt, requested ?? ['leer']);
+    if (access) {
       const folder = await motor.authorizeFolder(canonical);
       await policy.set(folder.id, access, { channel: 'consola' });
       await session.audit('carpeta-autorizada', { carpeta: folder.id, ruta: folder.path, permisos: describeAccess(access), canal: 'consola' });
@@ -74,8 +82,7 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
     prompt.write(`Solicitud de ${untrustedText(request.client, 120) || 'un agente'} (${request.createdAt})`);
     if (request.reason) prompt.write(`Motivo indicado por el agente (no verificado): «${untrustedText(request.reason)}»`);
     if (request.kind === 'carpeta') {
-      prompt.write(`Carpeta: ${request.path}`);
-      prompt.write(`Permisos solicitados: ${request.requested.join(', ')}`);
+      prompt.write(`Carpeta (incluye todo lo que contiene): ${request.path}`);
       let canonical;
       try {
         canonical = await validateCandidateFolder(request.path, {
@@ -88,8 +95,8 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
         await requests.remove(request.id);
         continue;
       }
-      if (await prompt.yes('¿Autorizar?', false)) {
-        const access = await chooseLevels(prompt, request.requested);
+      const access = await choosePreset(prompt, request.requested);
+      if (access) {
         const folder = await motor.authorizeFolder(canonical);
         const previous = (await policy.get(folder.id))?.access ?? {};
         for (const level of ACCESS_LEVELS) access[level] ||= previous[level] === true;
