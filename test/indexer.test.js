@@ -356,7 +356,7 @@ test('una retirada durante el recorrido impide publicar el índice', async (t) =
   let calls = 0;
   const indexer = createFolderIndexer({ baseDirectory: base, resolveScope: async (id) => {
     calls += 1;
-    if (calls === 2) await motor.revokeFolder(id);
+    if (calls === 3) await motor.revokeFolder(id);
     return resolve(id);
   } });
   await assert.rejects(indexer.indexFolder(scope.id), { code: 'FOLDER_NOT_AUTHORIZED' });
@@ -413,7 +413,7 @@ test('serializa indexaciones del mismo ámbito y detecta escrituras de otra inst
   let calls = 0;
   const racing = createFolderIndexer({ baseDirectory: base, resolveScope: async (id) => {
     calls += 1;
-    if (calls === 2) await other.indexFolder(id);
+    if (calls === 3) await other.indexFolder(id);
     return resolve(id);
   } });
   await assert.rejects(racing.indexFolder(scope.id), { code: 'INDEX_CONFLICT' });

@@ -148,10 +148,15 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
     },
 
     async revokeFolder(id) {
-      // Primero se retira la autoridad. Un fallo de limpieza no la restaura.
-      const removed = await folders.revokeFolder(id);
-      await indexer.removeFolderIndex(id);
-      return removed;
+      // Coordinado con publicaciones. Dentro del bloqueo se revoca antes de limpiar;
+      // un fallo de limpieza no restaura la autoridad ya retirada.
+      try {
+        return await indexer.removeFolderIndex(id, () => folders.revokeFolder(id));
+      } catch (error) {
+        // Conserva el error público de validación del registro, sin hacer E/S.
+        if (error.code === 'INVALID_SCOPE_ID') return folders.revokeFolder(id);
+        throw error;
+      }
     },
 
     async writeRecord(id, value) {
