@@ -7,6 +7,7 @@ const TYPES = new Set(['file', 'directory', 'link', 'other', 'unknown']);
 const STATES = new Set(['indexed', 'not-listed', 'unverified']);
 const ENTRY_KEYS = ['changedAt', 'createdAt', 'modifiedAt', 'path', 'reason', 'size', 'state', 'type'];
 const RECORD_KEYS = ['createdAt', 'entries', 'format', 'generation', 'issues', 'root', 'scopeId', 'updatedAt', 'version'];
+const BOUND_RECORD_KEYS = ['authorizationGeneration', ...RECORD_KEYS];
 
 /**
  * Índice persistido de una carpeta autorizada.
@@ -14,6 +15,7 @@ const RECORD_KEYS = ['createdAt', 'entries', 'format', 'generation', 'issues', '
  * @property {string} scopeId
  * @property {string} root Ruta física indexada.
  * @property {number} generation Aumenta con cada indexación guardada.
+ * @property {string | null} [authorizationGeneration] Generación del registro; ausente en índices v1.
  * @property {string} createdAt Primera indexación.
  * @property {string} updatedAt Última indexación o reconciliación.
  * @property {import('./index-scan.js').IndexEntry[]} entries
@@ -61,7 +63,11 @@ function validIssue(issue) {
 }
 
 function validRecord(data, scopeId) {
-  if (!hasKeys(data, RECORD_KEYS) || data.format !== 'mind-folder-index' || data.version !== 1
+  const shape = (hasKeys(data, RECORD_KEYS) && data.version === 1)
+    || (hasKeys(data, BOUND_RECORD_KEYS) && data.version === 2
+      && (data.authorizationGeneration === null || (typeof data.authorizationGeneration === 'string'
+        && /^[a-f0-9-]{36}$/.test(data.authorizationGeneration))));
+  if (!shape || data.format !== 'mind-folder-index'
       || data.scopeId !== scopeId || typeof data.root !== 'string' || data.root.includes('\0')
       || !path.isAbsolute(data.root) || !Number.isSafeInteger(data.generation) || data.generation < 1
       || !isDate(data.createdAt) || !isDate(data.updatedAt)
@@ -95,7 +101,7 @@ export function createIndexStore(baseDirectory) {
 
     /** @param {FolderIndex} index */
     async save(index) {
-      const record = { format: 'mind-folder-index', version: 1, ...index };
+      const record = { format: 'mind-folder-index', version: 2, ...index };
       if (!validRecord(record, index.scopeId)) {
         throw new MotorError('INDEX_INVALID', 'El índice generado no cumple el formato persistente.');
       }

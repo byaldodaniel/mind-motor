@@ -24,3 +24,15 @@ No construir un gestor adicional para aplicar esta decisión.
 - Ni el id de carpeta, ni una ruta, ni un nombre de agente constituyen un permiso.
 - No sustituir la apertura por descriptores por `checkFolderScope` seguido de una
   apertura convencional. Si falta el auxiliar seguro, denegar la operación.
+
+## Módulos integrados
+
+- `indexFolder(id)` y `readFolderIndex(id)` son operaciones administrativas del
+  anfitrión. No entregarlas a agentes junto con su función de lectura de originales.
+- Resolver ámbitos exclusivamente con el registro de carpetas del Motor. No
+  introducir rutas proporcionadas por agentes ni otro sistema de permisos.
+- Retirar una carpeta revoca primero el registro y después elimina su índice.
+  Los índices deben conservar el vínculo a la generación del registro, también
+  para rechazar publicaciones tardías de una autorización anterior.
+- Continuidad y definiciones de funciones permanecen como módulos internos.
+  Integrarlos no concede a agentes acceso a sus registros ni ejecución de funciones.

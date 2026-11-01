@@ -346,7 +346,7 @@ test('solo indexa ámbitos que el Motor resuelve como autorizados', async (t) =>
   assert.equal(await motor.revokeFolder(scope.id), true);
   await assert.rejects(indexer.indexFolder(scope.id), { code: 'FOLDER_NOT_AUTHORIZED' });
   await assert.rejects(indexer.readFolderIndex(scope.id), { code: 'FOLDER_NOT_AUTHORIZED' });
-  assert.equal(await indexer.removeFolderIndex(scope.id), true);
+  assert.equal(await indexer.removeFolderIndex(scope.id), false); // Motor ya lo eliminó al retirar.
   assert.equal(await indexer.removeFolderIndex(scope.id), false);
 });
 
@@ -380,7 +380,7 @@ test('los índices corruptos o enlazados fallan de forma explícita y no se repa
   const valid = JSON.parse(await fs.readFile(filename, 'utf8'));
   const variants = [
     '{incompleto', 'null', '{}',
-    JSON.stringify({ ...valid, version: 2 }),
+    JSON.stringify({ ...valid, version: 3 }),
     JSON.stringify({ ...valid, scopeId: 'd'.repeat(64) }),
     JSON.stringify({ ...valid, entries: [...valid.entries].reverse() }),
     JSON.stringify({ ...valid, entries: [{ ...valid.entries[0], path: '../fuera' }] }),

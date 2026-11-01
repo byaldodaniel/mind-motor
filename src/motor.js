@@ -6,6 +6,7 @@ import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
+import { createFolderIndexer } from './indexer.js';
 
 export { MotorError } from './errors.js';
 
@@ -26,6 +27,8 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextRead Solo anfitrión administrativo.
  * @property {(authorization: object) => boolean} revokeTextRead Solo antes del intento.
  * @property {(request: {requester: object, authorization: object}) => Promise<{folderId: string, relativePath: string, content: string}>} readTextFile
+ * @property {(folderId: string) => Promise<import('./indexer.js').IndexResult>} indexFolder Solo administración local.
+ * @property {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} readFolderIndex Solo administración local.
  */
 
 function validateId(id) {
@@ -67,10 +70,28 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
   }
 
   const { loadAuthorizedFolder, ...folders } = createFolderRegistry(base, motor);
+  const indexer = createFolderIndexer({
+    baseDirectory: base,
+    pythonExecutable,
+    resolveScope: async (id) => {
+      const folder = await loadAuthorizedFolder(id);
+      if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'La carpeta no está autorizada o fue retirada.');
+      return folder;
+    },
+  });
   return Object.freeze({
     baseDirectory: base,
     ...folders,
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
+    indexFolder: indexer.indexFolder,
+    readFolderIndex: indexer.readFolderIndex,
+
+    async revokeFolder(id) {
+      // Primero se retira la autoridad. Un fallo de limpieza no la restaura.
+      const removed = await folders.revokeFolder(id);
+      await indexer.removeFolderIndex(id);
+      return removed;
+    },
 
     async writeRecord(id, value) {
       const target = filename(id);

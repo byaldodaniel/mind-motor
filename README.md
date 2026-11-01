@@ -136,6 +136,26 @@ directamente a otras herramientas cuando sea suficiente, respetando siempre las
 autorizaciones aplicables. Esta decisión se recoge en las instrucciones de uso;
 no añade un gestor ni un paso obligatorio a todas las tareas.
 
+## Módulos integrados
+
+El anfitrión administrativo puede crear/reconciliar y consultar el índice de
+metadatos mediante `motor.indexFolder(folderId)` y
+`motor.readFolderIndex(folderId)`. El id debe existir en el registro de carpetas;
+no se aceptan rutas como ámbitos. El recorrido usa el mismo intérprete configurado
+para el lector seguro y no abre el contenido de los archivos.
+
+`revokeFolder` retira primero la autorización y después elimina el índice. Los
+índices se ligan además a la generación del registro: retirar y reautorizar la
+misma ubicación no recupera información de una concesión anterior, incluso si
+queda un índice publicado tarde por otro proceso. Los índices antiguos sin ese
+vínculo se consideran no vigentes y se reconstruyen al indexar.
+
+La indexación y la consulta del índice son administrativas; registrar una carpeta
+no concede estas operaciones a un agente. No se añaden comandos CLI ni permisos
+paralelos. Continuidad y definiciones de funciones están integradas en el código
+como módulos internos, sin métodos públicos en Motor ni ejecución de funciones.
+Detalles en [docs/INTEGRACION_MODULOS.md](docs/INTEGRACION_MODULOS.md).
+
 ## Pruebas
 
 ```sh
@@ -155,8 +175,9 @@ la misma suite en Windows, macOS y Linux con Node.js 24 y Python 3.12.
 ## Interfaces y alcance
 
 La API programática y los límites para extender el núcleo están documentados en
-[docs/INTERFACES.md](docs/INTERFACES.md). Todavía no hay indexación, integración de agentes,
-automatizaciones, continuidad, servidores ni interfaz gráfica. Los registros
+[docs/INTERFACES.md](docs/INTERFACES.md). Hay indexación administrativa y núcleos
+internos de continuidad y definiciones de funciones. Todavía no hay integración de
+agentes, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
 actuales son datos técnicos de prueba, no una estructura obligatoria para organizar
 la información del usuario.
 
