@@ -14,7 +14,7 @@ function validateId(id) {
 }
 
 // Copia solo datos JSON, sin invocar getters ni toJSON ni perder valores al serializar.
-function copyJson(value, ancestors = new Set()) {
+export function copyJson(value, ancestors = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'object' || ancestors.has(value)) throw new TypeError();
