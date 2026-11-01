@@ -52,9 +52,15 @@ instancia no autorizan modificar, ni al revés.
 2. Adquiere raíz, carpetas y archivo por componentes sin seguir enlaces, con las
    clases del lector seguro. El archivo debe ser regular, con un solo enlace,
    del mismo volumen y no un punto de reanálisis.
-   - Windows: el archivo se abre compartiendo solo lectura y borrado. Mientras
-     Mind lo mantiene abierto nadie puede escribirlo; si otro programa ya lo
-     tiene abierto para escribir, se rechaza con `FILE_IN_USE`.
+   - Windows: se solicita explícitamente FILE_WRITE_DATA además de los derechos
+     existentes, compartiendo solo lectura y borrado. Otra apertura de Mind para
+     modificar el mismo archivo falla con `FILE_IN_USE` mientras se mantiene
+     este handle; también se rechazan escritores incompatibles ya abiertos.
+   - macOS/Linux: inmediatamente después de abrir se adquiere
+     `fcntl.flock(LOCK_EX | LOCK_NB)`. Si está ocupado, `FILE_IN_USE`. Tras
+     adquirirlo se comprueba que la ruta sigue designando el inode abierto:
+     un descriptor anterior a otro reemplazo da `VERSION_CONFLICT`, aunque el
+     bloqueo del inode antiguo ya se haya liberado.
 3. Lee el contenido actual por ese handle (≤ 1 MiB, UTF-8 estricto) y compara su
    SHA-256 con la versión esperada. Si difiere: `VERSION_CONFLICT`.
 4. Comprueba que los metadatos de seguridad se pueden conservar; si no, rechaza.
@@ -74,6 +80,10 @@ instancia no autorizan modificar, ni al revés.
    borrado pendiente). Si no, `MODIFY_UNCONFIRMED`.
 10. Ante cualquier fallo anterior a publicar, descarta el temporal; el original
     queda intacto. Nunca se trunca ni se escribe sobre el original.
+
+El bloqueo del original permanece durante la versión, preparación y publicación;
+se libera al cerrar su descriptor, también ante excepciones o cancelación. No se
+crean archivos de bloqueo, servicios ni dependencias externas.
 
 ## Metadatos conservados o motivo de rechazo
 
@@ -98,9 +108,11 @@ instancia no autorizan modificar, ni al revés.
 
 ## Límites
 
-- POSIX no tiene bloqueos obligatorios. Entre la última comprobación (paso 7) y
-  `renameat` queda una ventana de microsegundos en la que un cambio ajeno puede
-  perderse. Una escritura ajena antes de esa comprobación se detecta.
+- En macOS/Linux `flock` es consultivo. Excluye a los modificadores cooperativos
+  de Mind; un programa externo que no lo respete puede escribir o reemplazar el
+  archivo. Se conservan las comprobaciones de identidad, tamaño, mtime y ctime,
+  pero la comprobación final y `renameat` no forman un compare-and-swap atómico
+  frente a esos programas. No se declara seguridad absoluta ante sus escrituras.
 - Windows impide escribir el contenido mientras dura la operación, pero permite
   renombrar o borrar el archivo: queda la misma ventana mínima entre la
   comprobación del nombre y el rename.
@@ -111,7 +123,8 @@ instancia no autorizan modificar, ni al revés.
 - Si el proceso muere a mitad puede quedar un temporal oculto; el original sigue
   intacto. Si muere justo después de publicar, el cambio existe aunque se informe
   un fallo.
-- Solo volúmenes locales fijos con letra en Windows; POSIX necesita `renameat`.
+- Solo volúmenes locales fijos con letra en Windows; POSIX necesita `renameat`
+  y un sistema de archivos que admita `flock`. No hay fallback sin bloqueo.
 - Modelo de confianza igual que la lectura: anfitrión, intérprete y código de
   confianza; no aísla código hostil del mismo usuario.
 - El contenido nunca se guarda en la Base.
@@ -122,3 +135,42 @@ instancia no autorizan modificar, ni al revés.
 `test/native_modifier_test.py` cubre las carreras deterministas y la
 publicación. Lo ejecuta `test/native-modifier.test.js`, de modo que CI lo
 incluye sin modificar `scripts/test.mjs`.
+
+### Regresión de concurrencia entre procesos
+
+La corrección parte de main `29f5cce5536d45a4798c3b92508d7a013139c209`, en un
+clon independiente. La regresión determinista falló en ese código en Windows:
+el segundo proceso publicó mientras el primero estaba detenido antes de leer,
+tras verificar la versión y con el temporal preparado (tres subcasos).
+
+`test/fixtures/modifier_process.py` ejecuta el mismo auxiliar nativo en procesos
+independientes. Las tuberías confirman cada barrera antes de lanzar el competidor
+y solo lo liberan tras observar su resultado; no se usan sleeps. Las barreras
+están únicamente en la prueba, mediante el backend de prueba ya existente, y
+no pueden activarse desde la API o el protocolo productivo.
+
+Se comprueba que únicamente uno publica y el otro obtiene FILE_IN_USE antes de
+leer, después de verificar SHA-256 y con el temporal preparado; versiones viejas
+fallan y las actualizadas permiten modificaciones secuenciales. En POSIX se
+detiene otro proceso justo después de abrir el descriptor y antes del flock,
+se publica un reemplazo y después se le permite adquirir el bloqueo antiguo:
+debe devolver VERSION_CONFLICT. También se comprueban limpieza y liberación
+tras error, cancelación, EOF y terminación antes de escribir.
+
+La prueba JS adicional mantiene un proceso nativo en la barrera de publicación
+y modifica desde otra invocación del Motor: FILE_IN_USE consume su permiso de
+un intento, y una identidad diferente no puede utilizarlo. La suite completa
+conserva las regresiones de lectura, creación, indexación y actualización del
+índice. No se modifica su mecanismo de concurrencia.
+
+Verificación local Windows, Node 24.18.0 y Python 3.12: `npm.cmd test`,
+153 casos JS (152 aprobados, 1 omitido FIFO POSIX), incluida la ejecución del
+auxiliar modificador con 16 casos nativos (15 aprobados, 1 caso de inode solo
+POSIX). También pasan lectura nativa 10/10, indexación 11/12 (1 omisión POSIX) y
+creación 12/12. Cero fallos. Los checks de la PR verifican además macOS y Linux,
+incluido el caso del descriptor obsoleto, que en Windows no puede abrirse con
+esa intercalación porque la exclusión se adquiere durante la propia apertura.
+
+Referencias:
+[Python flock](https://docs.python.org/3.12/library/fcntl.html#fcntl.flock) y
+[Windows: derechos y compartición](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew).

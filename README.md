@@ -173,9 +173,11 @@ y no escribe nada: hay que releer y volver a pedir permiso. El contenido se escr
 completo en un temporal y se publica con un rename atómico; nunca se trunca el
 original. Se rechazan enlaces, archivos protegidos o con metadatos que no se
 pueden conservar. Tras publicar, el Motor sustituye la entrada del índice cuando
-es seguro (`index.status: 'updated'`); si no, `needs-reconciliation`. Queda una
-ventana de microsegundos entre la última comprobación y el rename en la que un
-cambio ajeno simultáneo podría perderse. Solo texto UTF-8 de hasta 1 MiB; no hay
+es seguro (`index.status: 'updated'`); si no, `needs-reconciliation`. Los
+modificadores de Mind se excluyen mediante flock en macOS/Linux y derechos de
+apertura sin compartir escritura en Windows. Un competidor obtiene FILE_IN_USE
+o VERSION_CONFLICT. En POSIX el bloqueo es consultivo: programas externos que
+no lo respeten todavía pueden interferir. Solo texto UTF-8 de hasta 1 MiB; no hay
 movimiento ni eliminación. Detalles en
 [docs/FUNCION_03_MODIFICAR.md](docs/FUNCION_03_MODIFICAR.md) y
 [docs/INTERFACES.md](docs/INTERFACES.md).

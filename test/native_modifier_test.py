@@ -5,11 +5,13 @@ import importlib.util
 import io
 import json
 import os
+import queue
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -24,6 +26,57 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+class ModifierProcess:
+    """Cada barrera se confirma por una tubería; no hay sleeps ni carreras probabilísticas."""
+    def __init__(self, request, mode='normal'):
+        self.process = subprocess.Popen(
+            [sys.executable, '-I', '-B', str(MOTOR / 'test' / 'fixtures' / 'modifier_process.py'), mode],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8')
+        self.phases, self.output, self.diagnostics = queue.Queue(), [], []
+
+        def stderr():
+            for line in self.process.stderr:
+                self.diagnostics.append(line)
+                self.phases.put(json.loads(line))
+
+        self.readers = [threading.Thread(target=stderr, daemon=True),
+                        threading.Thread(target=lambda: self.output.append(self.process.stdout.read()), daemon=True)]
+        for reader in self.readers:
+            reader.start()
+        self.process.stdin.write(json.dumps(request) + '\n')
+        self.process.stdin.flush()
+
+    def wait_for(self, phase):
+        event = self.phases.get(timeout=10)
+        if event['phase'] != phase or event['pid'] != self.process.pid:
+            raise AssertionError(event)
+
+    def release(self, command='go'):
+        self.process.stdin.write(command + '\n')
+        self.process.stdin.flush()
+
+    def finish(self):
+        self.process.stdin.close()
+        self.process.wait(timeout=10)
+        for reader in self.readers:
+            reader.join(timeout=2)
+        result = json.loads(''.join(self.output))
+        if self.process.returncode != (0 if result['ok'] else 1):
+            raise AssertionError((self.process.returncode, result, self.diagnostics))
+        return result
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=10)
+        for reader in self.readers:
+            reader.join(timeout=2)
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if not stream.closed:
+                stream.close()
+
+
 class ModifierTest(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp(prefix='.mind-native-modify-test-', dir=DEVELOPMENT))
@@ -34,8 +87,11 @@ class ModifierTest(unittest.TestCase):
         self.target = self.folder / 'nota.txt'
         self.target.write_bytes(b'original')
         (self.outside / 'nota.txt').write_bytes(b'SECRETO FICTICIO')
+        self.processes = []
 
     def tearDown(self):
+        for process in self.processes:
+            process.close()
         self.assertEqual(self.temp.parent, DEVELOPMENT)
         self.assertTrue(self.temp.name.startswith('.mind-native-modify-test-'))
         shutil.rmtree(self.temp)
@@ -167,6 +223,84 @@ class ModifierTest(unittest.TestCase):
     def request(self, data, expected=None):
         return {'root': str(self.folder), 'relativePath': 'nota.txt',
                 'expected': expected or digest(b'original'), 'content': base64.b64encode(data).decode()}
+
+    def worker(self, data=b'nuevo', mode='normal', expected=None):
+        process = ModifierProcess(self.request(data, expected), mode)
+        self.processes.append(process)
+        return process
+
+    def test_independent_processes_exclude_before_version_and_before_publish(self):
+        for phase in ('before_read', 'verified', 'prepared'):
+            with self.subTest(phase=phase):
+                self.target.write_bytes(b'original')
+                first = self.worker(b'primero', phase)
+                first.wait_for(phase)
+                second = self.worker(b'segundo')
+                self.assertNotEqual(first.process.pid, second.process.pid)
+                rejected = second.finish()
+                self.assertFalse(rejected['ok'])
+                self.assertEqual(rejected['code'], 'FILE_IN_USE')
+                self.assertEqual(self.target.read_bytes(), b'original')
+                first.release()
+                published = first.finish()
+                self.assertTrue(published['ok'])
+                self.assertEqual(sum(result['ok'] for result in (published, rejected)), 1)
+                self.assertEqual(self.target.read_bytes(), b'primero')
+                self.assertEqual(self.names(), ['nota.txt'])
+
+    @unittest.skipIf(os.name == 'nt', 'Windows adquiere la exclusión durante la apertura, no después.')
+    def test_descriptor_opened_before_replacement_cannot_publish_after_lock_release(self):
+        delayed = self.worker(b'obsoleto', 'opened')
+        delayed.wait_for('opened')
+        current = self.worker(b'primero')
+        self.assertTrue(current.finish()['ok'])
+        delayed.release()
+        result = delayed.finish()
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'VERSION_CONFLICT')
+        self.assertEqual(self.target.read_bytes(), b'primero')
+        self.assertEqual(self.names(), ['nota.txt'])
+
+    def test_old_version_conflicts_and_updated_versions_work_sequentially(self):
+        self.assertTrue(self.worker(b'primero').finish()['ok'])
+        stale = self.worker(b'obsoleto').finish()
+        self.assertFalse(stale['ok'])
+        self.assertEqual(stale['code'], 'VERSION_CONFLICT')
+        self.assertEqual(self.target.read_bytes(), b'primero')
+        self.assertTrue(self.worker(b'segundo', expected=digest(b'primero')).finish()['ok'])
+        self.assertTrue(self.worker(b'tercero', expected=digest(b'segundo')).finish()['ok'])
+        self.assertEqual(self.target.read_bytes(), b'tercero')
+        self.assertEqual(self.names(), ['nota.txt'])
+
+    def test_failure_and_cancellation_clean_temporaries_and_release_exclusion(self):
+        for mode, command, code in (('fail', 'go', 'NO_SPACE'), ('prepared', 'cancel', 'MODIFY_FAILED')):
+            with self.subTest(mode=mode):
+                self.target.write_bytes(b'original')
+                failing = self.worker(b'no publicar', mode)
+                failing.wait_for('prepared')
+                self.assertEqual(len([name for name in self.names() if name.startswith('.mind-modify-')]), 1)
+                failing.release(command)
+                result = failing.finish()
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['code'], code)
+                self.assertEqual(self.target.read_bytes(), b'original')
+                self.assertEqual(self.names(), ['nota.txt'])
+                self.assertTrue(self.worker(b'recuperado').finish()['ok'])
+                self.assertEqual(self.target.read_bytes(), b'recuperado')
+
+    def test_eof_or_process_termination_before_writing_releases_exclusion(self):
+        for terminated in (False, True):
+            with self.subTest(terminated=terminated):
+                self.target.write_bytes(b'original')
+                waiting = self.worker(b'no publicar', 'verified')
+                waiting.wait_for('verified')
+                if terminated:
+                    waiting.close()
+                else:
+                    self.assertEqual(waiting.finish()['code'], 'MODIFY_FAILED')
+                self.assertEqual(self.target.read_bytes(), b'original')
+                self.assertEqual(self.names(), ['nota.txt'])
+                self.assertTrue(self.worker(b'recuperado').finish()['ok'])
 
     def test_protocol_writes_only_after_confirmation(self):
         self.assertEqual(self.run_protocol(self.request(b'x'), answer=b''), (1, '', 'READY\nMODIFY_FAILED\n'))
