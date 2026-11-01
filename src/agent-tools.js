@@ -4,6 +4,11 @@ import { textVersion } from './text-modifier.js';
 import { formatContinuityMarkdown } from './continuity.js';
 import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, normalizeAccess, describeAccess, presetName } from './access-policy.js';
 import { createConsent, validateCandidateFolder, untrustedText } from './consent.js';
+import {
+  FOLDER_ID, TYPE_IN, TYPE_OUT, invalid, only, text, integer, bool, strings, absolute, lineCount,
+  countOccurrences, entryOut, continuityOut, referencesIn, schema, FOLDER_REF, RELATIVE_PATH,
+} from './tools/helpers.js';
+import { TOOL_FACTORIES } from './tools/index.js';
 
 /**
  * Herramientas que Mind ofrece a un agente conectado. Esta capa es el
@@ -26,119 +31,9 @@ Flujo recomendado:
 
 Los resultados incluyen rutas absolutas para que puedas aprovecharlos directamente.`;
 
-const FOLDER_ID = /^[a-f0-9]{64}$/;
-const TYPE_IN = Object.freeze({ archivo: 'file', carpeta: 'directory', enlace: 'link', otro: 'other' });
-const TYPE_OUT = Object.freeze({ file: 'archivo', directory: 'carpeta', link: 'enlace', other: 'otro', unknown: 'desconocido' });
 const MATCH_IN = Object.freeze({ contiene: 'contains', empieza: 'prefix', exacto: 'exact' });
 const SORT_IN = Object.freeze({ relevancia: 'relevance', ruta: 'path', modificado: 'modified', tamano: 'size' });
 const MAX_EDITS = 50;
-
-function invalid(message) {
-  return new MotorError('INVALID_ARGUMENTS', message);
-}
-
-function only(args, allowed) {
-  const unknown = Object.keys(args).filter((key) => !allowed.includes(key));
-  if (unknown.length > 0) throw invalid(`Parámetros desconocidos: ${unknown.map((key) => key.slice(0, 40)).join(', ')}.`);
-}
-
-function text(value, name, { optional = false, max = 4096, allowEmpty = false } = {}) {
-  if (value === undefined && optional) return undefined;
-  if (typeof value !== 'string' || (!allowEmpty && value === '') || value.length > max) {
-    throw invalid(`${name} debe ser texto${allowEmpty ? '' : ' no vacío'} de hasta ${max} caracteres.`);
-  }
-  return value;
-}
-
-function integer(value, name, { optional = true, min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
-  if (value === undefined && optional) return undefined;
-  if (!Number.isSafeInteger(value) || value < min || value > max) throw invalid(`${name} debe ser un entero entre ${min} y ${max}.`);
-  return value;
-}
-
-function bool(value, name) {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'boolean') throw invalid(`${name} debe ser booleano.`);
-  return value;
-}
-
-function strings(value, name, { max = 32, itemMax = 256 } = {}) {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length === 0 || value.length > max
-      || !value.every((item) => typeof item === 'string' && item.length > 0 && item.length <= itemMax)) {
-    throw invalid(`${name} debe ser una lista de 1 a ${max} textos.`);
-  }
-  return value;
-}
-
-function absolute(root, relativePath) {
-  return relativePath === '' ? root : path.join(root, ...relativePath.split('/'));
-}
-
-function iso(value) {
-  return value ?? null;
-}
-
-function lineCount(content) {
-  if (content === '') return 0;
-  return content.split('\n').length - (content.endsWith('\n') ? 1 : 0);
-}
-
-function countOccurrences(haystack, needle) {
-  let count = 0;
-  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + needle.length)) count += 1;
-  return count;
-}
-
-function entryOut(folder, entry) {
-  return {
-    carpeta: folder.id,
-    ruta: entry.path,
-    nombre: entry.path.slice(entry.path.lastIndexOf('/') + 1),
-    tipo: TYPE_OUT[entry.type] ?? entry.type,
-    bytes: entry.size,
-    modificado: iso(entry.modifiedAt),
-    creado: iso(entry.createdAt),
-    estado: entry.state === 'indexed' ? 'indexado' : entry.state === 'not-listed' ? 'sin-listar' : 'sin-verificar',
-    ...(entry.reason ? { motivo: entry.reason } : {}),
-    ruta_absoluta: absolute(folder.path, entry.path),
-  };
-}
-
-function continuityOut(entry) {
-  return {
-    id: entry.id,
-    revision: entry.revision,
-    creado: entry.createdAt,
-    actualizado: entry.updatedAt,
-    origen: entry.source,
-    tipo: entry.kind,
-    contenido: entry.content,
-    referencias: entry.references.map((reference) => ({
-      ...(reference.entry ? { registro: reference.entry } : { ubicacion: reference.locator }),
-      ...(reference.relation ? { relacion: reference.relation } : {}),
-    })),
-  };
-}
-
-function referencesIn(value) {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value)) throw invalid('referencias debe ser una lista.');
-  return value.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) throw invalid('Cada referencia debe ser un objeto.');
-    only(item, ['registro', 'ubicacion', 'relacion']);
-    const reference = Object.hasOwn(item, 'registro') ? { entry: item.registro } : { locator: item.ubicacion };
-    if (item.relacion !== undefined) reference.relation = item.relacion;
-    return reference;
-  });
-}
-
-function schema(properties, required = []) {
-  return { type: 'object', properties, required, additionalProperties: false };
-}
-
-const FOLDER_REF = { type: 'string', description: 'Id de la carpeta autorizada (lo devuelve "estado") o su ruta absoluta registrada. Opcional si solo hay una carpeta.' };
-const RELATIVE_PATH = { type: 'string', description: 'Ruta relativa dentro de la carpeta, con "/" entre componentes (por ejemplo "notas/idea.md").' };
 
 export const TOOL_DEFINITIONS = Object.freeze([
   {
@@ -884,8 +779,13 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
     },
   };
 
-  for (const tool of extraTools) handlers[tool.definition.name] = tool.handler;
-  const definitions = [...TOOL_DEFINITIONS, ...extraTools.map((tool) => tool.definition)];
+  // Herramientas de otras áreas (src/tools/index.js): cada fábrica recibe la sesión y la conexión.
+  const extensions = [...TOOL_FACTORIES.flatMap((factory) => factory({ session, connection, log })), ...extraTools];
+  for (const tool of extensions) {
+    if (Object.hasOwn(handlers, tool.definition.name)) throw new MotorError('DUPLICATE_TOOL', `Herramienta duplicada: ${tool.definition.name}.`);
+    handlers[tool.definition.name] = tool.handler;
+  }
+  const definitions = [...TOOL_DEFINITIONS, ...extensions.map((tool) => tool.definition)];
 
   return Object.freeze({
     definitions,

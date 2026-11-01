@@ -8,6 +8,7 @@ import { ensureBase } from './base-format.js';
 import { createAccessPolicy } from './access-policy.js';
 import { createConsentRequests } from './consent.js';
 import { createRemovalLog } from './removals.js';
+import { SESSION_EXTENSIONS } from './session-extensions.js';
 
 const SYNC_INTERVAL_MS = 30_000;
 const SESSIONS_DIRECTORY = 'sesiones';
@@ -158,7 +159,8 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     return syncing;
   }
 
-  return Object.freeze({
+  const extensions = [];
+  const api = Object.freeze({
     id: sessionId,
     motorVersion,
     removals,
@@ -182,6 +184,15 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
         sync().catch((error) => log('aviso', 'Sincronización del registro fallida', { error: String(error) }));
       }, SYNC_INTERVAL_MS);
       syncTimer.unref?.();
+      for (const factory of SESSION_EXTENSIONS) {
+        try {
+          const extension = factory(api);
+          extensions.push(extension);
+          await extension.start?.();
+        } catch (error) {
+          log('error', 'No se pudo iniciar una extensión de la sesión', { error: String(error?.stack ?? error) });
+        }
+      }
     },
 
     sync,
@@ -244,6 +255,9 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       if (closed) return;
       closed = true;
       clearInterval(syncTimer);
+      for (const extension of extensions.reverse()) {
+        await Promise.resolve().then(() => extension.close?.()).catch((error) => log('error', 'Fallo al cerrar una extensión', { error: String(error) }));
+      }
       listeners.clear();
       try {
         await observer?.close();
@@ -252,6 +266,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       }
     },
   });
+  return api;
 }
 
 /** Sesiones registradas en la Base cuyo proceso sigue vivo en este equipo. */

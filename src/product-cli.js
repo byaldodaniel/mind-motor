@@ -1,6 +1,7 @@
 import { MotorError } from './errors.js';
 import { resolveLayout } from './layout.js';
 import { MOTOR_VERSION } from './version.js';
+import { COMMANDS } from './commands/index.js';
 
 export { MOTOR_VERSION };
 
@@ -60,9 +61,9 @@ function report(error) {
 }
 
 /** Sesión sin observación: cada operación reconcilia bajo demanda lo que necesita. */
-async function withSession(options, task) {
+async function withSession(options, task, { observe = false } = {}) {
   const { openSession } = await import('./session.js');
-  const session = await openSession({ layout: await resolveLayout({ base: options.base }), motorVersion: MOTOR_VERSION, observe: false });
+  const session = await openSession({ layout: await resolveLayout({ base: options.base }), motorVersion: MOTOR_VERSION, observe });
   try {
     await session.start();
     return await task(session);
@@ -98,7 +99,7 @@ export async function main(args) {
       case 'ayuda':
       case '--help':
       case '-h':
-        print(USAGE);
+        print(USAGE + Object.entries(COMMANDS).map(([name, entry]) => `  ${name.padEnd(26)} ${entry.ayuda ?? ''}`).join('\n'));
         return 0;
       case 'version':
       case '--version': {
@@ -167,8 +168,16 @@ export async function main(args) {
           return 0;
         });
       }
-      default:
-        throw new MotorError('INVALID_ARGUMENTS', `Orden desconocida: ${command}. Usa "mind ayuda".`);
+      default: {
+        // Órdenes de otras áreas (src/commands/index.js).
+        const entry = Object.hasOwn(COMMANDS, command) ? COMMANDS[command] : null;
+        if (!entry) throw new MotorError('INVALID_ARGUMENTS', `Orden desconocida: ${command}. Usa "mind ayuda".`);
+        const module = await entry.load();
+        return await module.run({
+          parameters, options, print, layout: () => resolveLayout({ base: options.base }),
+          withSession: (task, sessionOptions) => withSession(options, task, sessionOptions),
+        });
+      }
     }
   } catch (error) {
     return report(error);
