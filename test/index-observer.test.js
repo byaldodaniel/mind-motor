@@ -262,8 +262,16 @@ test('desbordamiento, eventos perdidos y fallo del observador se recuperan recon
 test('el intervalo de seguridad reconcilia aunque el sistema no notifique nada', async (t) => {
   const { folder, motor, scope } = await fixture(t);
   const recorder = recordingWatch({ drop: () => true });
-  const h = harness(t, motor, { watch: recorder.watch, safetyIntervalMs: 600 });
+  const h = harness(t, motor, { watch: recorder.watch, safetyIntervalMs: 1_000 });
   await h.observer.observe(scope.id);
+  // Con observación por directorio, las carpetas abiertas tras el recorrido inicial
+  // programan una pasada `verify`; el cambio se hace después para que solo el
+  // intervalo de seguridad pueda detectarlo.
+  await h.idle(scope.id);
+  if (h.observer.status(scope.id).strategy === 'directories') {
+    assert.ok(h.reconciled().some((r) => r.reasons.includes('verify')));
+  }
+  assert.ok(h.reconciled().every((r) => !r.reasons.includes('event')));
   const mark = h.reports.length;
   await fs.writeFile(path.join(folder, 'silencioso.txt'), 'Sin notificación');
   const safety = await h.next((r) => has(r.changes?.added, 'silencioso.txt'), mark, 'reconciliación de seguridad');
