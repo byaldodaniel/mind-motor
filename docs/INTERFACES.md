@@ -185,11 +185,16 @@ Un cambio durante la operación produce `INDEX_SCOPE_CHANGED`; una retirada
 produce `FOLDER_NOT_AUTHORIZED`. Permanecen los errores del indexador y del
 almacenamiento: corrupción o enlaces no se reparan silenciosamente.
 
-La retirada revoca antes de limpiar; si limpiar falla, el error se informa y la
-carpeta sigue retirada. Una publicación tardía puede dejar físicamente un índice
-viejo, pero el vínculo de generación impide ofrecerlo con una nueva autorización.
-No hay transacciones ni bloqueo entre procesos; se conserva el modelo local de
-confianza. Solo se descartan índices, nunca originales.
+Las mutaciones del mismo índice se coordinan entre procesos con un lockfile
+exclusivo por id; las carpetas distintas no comparten bloqueo. La retirada toma
+el mismo bloqueo y revoca antes de limpiar; si limpiar falla, la carpeta sigue
+retirada. Si no consigue adquirirlo en dos segundos, falla con
+`INDEX_LOCK_TIMEOUT` antes de retirar la autorización. Una operación pendiente
+no puede publicar bajo otra `authorizationGeneration`. Los recorridos se hacen
+fuera del bloqueo y se rechazan con `INDEX_CONFLICT` si el índice base cambió
+antes de publicar. Recuperación y límites en
+[CONCURRENCIA_INDICES.md](CONCURRENCIA_INDICES.md). Solo se descartan índices,
+nunca originales.
 
 ## Creación de un archivo de texto nuevo — Función 03 integrada
 
@@ -290,8 +295,11 @@ sustituido, borrado o cambiado entretanto, también da `VERSION_CONFLICT`.
   Si no se puede confirmar qué archivo se sustituyó: `MODIFY_UNCONFIRMED`.
 - Dos agentes con la misma versión: se publica uno y el otro recibe
   `FILE_IN_USE` durante la exclusión o `VERSION_CONFLICT` si ya se publicó el cambio.
-- No hay transacciones ni bloqueo entre procesos para el índice. Una publicación
-  concurrente del índice da `INDEX_CONFLICT` y pide reconciliación.
+- Las actualizaciones incrementales del índice se serializan entre procesos y
+  parten de la última generación publicada. Un recorrido que coincide con otra
+  publicación da `INDEX_CONFLICT`; un bloqueo ocupado durante dos segundos da
+  `INDEX_LOCK_TIMEOUT`. En creación/modificación el original ya puede estar
+  publicado: `index.status` informa `needs-reconciliation` con ese código.
 
 ### Coherencia del índice
 

@@ -197,11 +197,14 @@ metadatos mediante `motor.indexFolder(folderId)` y
 no se aceptan rutas como ámbitos. El recorrido usa el mismo intérprete configurado
 para el lector seguro y no abre el contenido de los archivos.
 
-`revokeFolder` retira primero la autorización y después elimina el índice. Los
-índices se ligan además a la generación del registro: retirar y reautorizar la
-misma ubicación no recupera información de una concesión anterior, incluso si
-queda un índice publicado tarde por otro proceso. Los índices antiguos sin ese
-vínculo se consideran no vigentes y se reconstruyen al indexar.
+Las mutaciones de un mismo índice se coordinan entre procesos mediante un
+bloqueo exclusivo en la Base. Las carpetas distintas conservan su paralelismo.
+`revokeFolder` adquiere esa misma coordinación, retira la autorización y elimina
+el índice. Los índices se ligan además a la generación del registro: retirar y
+reautorizar la misma ubicación no recupera información de una concesión anterior.
+Los índices antiguos sin ese vínculo se consideran no vigentes y se reconstruyen
+al indexar. Política de espera, recuperación y límites en
+[docs/CONCURRENCIA_INDICES.md](docs/CONCURRENCIA_INDICES.md).
 
 `motor.searchFiles({ folderIds, query, ... })` busca archivos por nombre, con
 coincidencias parciales y filtros de metadatos, en los índices vigentes de las

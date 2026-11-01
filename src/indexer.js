@@ -148,31 +148,37 @@ export function createFolderIndexer({
       validateScopeId(scopeId);
       return exclusive(scopeId, async () => {
         const scope = await authorized(scopeId);
-        const previous = boundIndex(await store.load(scopeId), scope);
+        const previous = await store.exclusive(scopeId, async () => {
+          requireSameAuthorization(scope, await authorized(scopeId));
+          return boundIndex(await store.load(scopeId), scope);
+        });
         const { entries, issues } = await scanFolder(scope.path, {
           previous: previous?.entries ?? [], maxEntries, pythonExecutable,
         });
-        // La autorización se vuelve a consultar: una retirada durante el recorrido no se publica.
+        // El recorrido no retiene el bloqueo. Se descarta si cambió su base.
         requireSameAuthorization(scope, await authorized(scopeId));
-        const latest = boundIndex(await store.load(scopeId), scope);
-        if ((latest?.generation ?? 0) !== (previous?.generation ?? 0)) {
-          throw new MotorError('INDEX_CONFLICT', 'Otro proceso actualizó este índice durante el recorrido.');
-        }
-        const indexedAt = new Date().toISOString();
-        const generation = (previous?.generation ?? 0) + 1;
-        await store.save({
-          scopeId, root: scope.path, authorizationGeneration: scope.generation ?? null,
-          generation, createdAt: previous?.createdAt ?? indexedAt,
-          updatedAt: indexedAt, entries, issues,
+        return store.exclusive(scopeId, async () => {
+          requireSameAuthorization(scope, await authorized(scopeId));
+          const latest = boundIndex(await store.load(scopeId), scope);
+          if (JSON.stringify(latest) !== JSON.stringify(previous)) {
+            throw new MotorError('INDEX_CONFLICT', 'Otro proceso actualizó este índice durante el recorrido.');
+          }
+          const indexedAt = new Date().toISOString();
+          const generation = (previous?.generation ?? 0) + 1;
+          await store.save({
+            scopeId, root: scope.path, authorizationGeneration: scope.generation ?? null,
+            generation, createdAt: previous?.createdAt ?? indexedAt,
+            updatedAt: indexedAt, entries, issues,
+          });
+          return {
+            scopeId,
+            mode: previous ? 'reconciliation' : 'initial',
+            generation,
+            indexedAt,
+            ...summarize(entries, issues),
+            changes: previous ? compare(previous.entries, entries) : null,
+          };
         });
-        return {
-          scopeId,
-          mode: previous ? 'reconciliation' : 'initial',
-          generation,
-          indexedAt,
-          ...summarize(entries, issues),
-          changes: previous ? compare(previous.entries, entries) : null,
-        };
       });
     },
 
@@ -200,12 +206,14 @@ export function createFolderIndexer({
      */
     async recordCreatedFile(scopeId, entry) {
       validateScopeId(scopeId);
-      return exclusive(scopeId, async () => {
+      const requestedScope = await authorized(scopeId);
+      return exclusive(scopeId, () => store.exclusive(scopeId, async () => {
+        const scope = await authorized(scopeId);
+        requireSameAuthorization(requestedScope, scope);
         const reconcile = (code, generation = null) => ({ status: 'needs-reconciliation', generation, code });
         if (entry?.type !== 'file' || entry.state !== 'indexed' || typeof entry.path !== 'string') {
           return reconcile('INVALID_CREATED_ENTRY');
         }
-        const scope = await authorized(scopeId);
         const index = boundIndex(await store.load(scopeId), scope);
         if (!index) return { status: 'not-indexed', generation: null, code: null };
         const known = new Map(index.entries.map((item) => [item.path, item]));
@@ -232,7 +240,7 @@ export function createFolderIndexer({
         // save valida la forma completa; una entrada mal formada no se publica.
         await store.save({ ...index, generation, entries });
         return { status: 'updated', generation, code: null };
-      });
+      }));
     },
 
     /**
@@ -247,12 +255,14 @@ export function createFolderIndexer({
      */
     async recordModifiedFile(scopeId, entry) {
       validateScopeId(scopeId);
-      return exclusive(scopeId, async () => {
+      const requestedScope = await authorized(scopeId);
+      return exclusive(scopeId, () => store.exclusive(scopeId, async () => {
+        const scope = await authorized(scopeId);
+        requireSameAuthorization(requestedScope, scope);
         const reconcile = (code, generation = null) => ({ status: 'needs-reconciliation', generation, code });
         if (entry?.type !== 'file' || entry.state !== 'indexed' || typeof entry.path !== 'string') {
           return reconcile('INVALID_MODIFIED_ENTRY');
         }
-        const scope = await authorized(scopeId);
         const index = boundIndex(await store.load(scopeId), scope);
         if (!index) return { status: 'not-indexed', generation: null, code: null };
         const position = index.entries.findIndex((item) => item.path === entry.path);
@@ -270,13 +280,17 @@ export function createFolderIndexer({
         // save valida la forma completa; una entrada mal formada no se publica.
         await store.save({ ...index, generation, entries });
         return { status: 'updated', generation, code: null };
-      });
+      }));
     },
 
-    /** Retira solo el índice de la Base; admite ámbitos ya retirados. */
-    async removeFolderIndex(scopeId) {
+    /** Retira el índice; revoke permite al Motor retirar primero el registro bajo el mismo bloqueo. */
+    async removeFolderIndex(scopeId, revoke) {
       validateScopeId(scopeId);
-      return exclusive(scopeId, () => store.remove(scopeId));
+      return exclusive(scopeId, () => store.exclusive(scopeId, async () => {
+        const revoked = revoke ? await revoke() : undefined;
+        const removed = await store.remove(scopeId);
+        return revoke ? revoked : removed;
+      }));
     },
   });
 }

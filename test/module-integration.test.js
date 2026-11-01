@@ -131,7 +131,7 @@ test('un ciclo de retirada y concesión durante el recorrido impide publicar', a
   const { base, folder, motor, scope, filename } = await fixture(t);
   let calls = 0;
   const indexer = createFolderIndexer({ baseDirectory: base, resolveScope: async (id) => {
-    if (++calls === 2) {
+    if (++calls === 3) {
       await motor.revokeFolder(id);
       await motor.authorizeFolder(folder);
     }

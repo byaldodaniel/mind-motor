@@ -190,8 +190,8 @@ personal, eliminadas al terminar.
   agotan, la carpeta queda `not-listed` (`EMFILE`).
 - En sistemas sin distinción de mayúsculas, renombrar solo mayúsculas aparece como
   baja y alta. macOS puede devolver nombres en NFD; se guardan tal como llegan.
-- La serialización por ámbito vale dentro de una instancia. Entre procesos solo se
-  detecta el conflicto por generación justo antes de escribir; no hay bloqueo.
+- El incremento original solo serializaba dentro de una instancia. La corrección
+  posterior incorpora [coordinación entre procesos](CONCURRENCIA_INDICES.md).
 - Retirar una carpeta en el Incremento 02 no elimina hoy su índice: la integración
   deberá llamar a `removeFolderIndex`.
 

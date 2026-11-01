@@ -30,6 +30,8 @@ export async function readJson(filename) {
   }
 }
 
+// Sustitución atómica del JSON, no una transacción de lectura-modificación.
+// El indexador coordina esa secuencia completa mediante el bloqueo por ámbito.
 export async function writeJson(filename, data) {
   await rejectLink(filename);
   const temporary = path.join(path.dirname(filename), `.mind-${randomUUID()}.tmp`);

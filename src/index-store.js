@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { readJson, writeJson, removeJson } from './storage.js';
+import { withIndexLock } from './index-lock.js';
 
 const VALID_SCOPE_ID = /^[a-f0-9]{64}$/;
 const TYPES = new Set(['file', 'directory', 'link', 'other', 'unknown']);
@@ -88,6 +89,11 @@ export function createIndexStore(baseDirectory) {
   }
 
   return {
+    /** Protege la secuencia completa de lectura, preparación y publicación. */
+    exclusive(scopeId, task) {
+      validateScopeId(scopeId);
+      return withIndexLock(baseDirectory, scopeId, task);
+    },
     /** @returns {Promise<FolderIndex | null>} */
     async load(scopeId) {
       const stored = await readJson(filename(scopeId));
