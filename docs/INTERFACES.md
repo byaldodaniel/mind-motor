@@ -170,8 +170,9 @@ crearlo; véase la sección de creación) o `unverified`. Detalle en
 Son operaciones del anfitrión administrativo, como registrar y retirar carpetas.
 No se exponen al agente por poseer un permiso de lectura puntual. El Motor inyecta
 su `loadAuthorizedFolder`, la Base física y `pythonExecutable`; no se crea un
-registro de permisos adicional. Continuidad y definiciones de funciones conservan
-sus interfaces internas y no se agregan al objeto Motor ni a la CLI.
+registro de permisos adicional. Las definiciones de funciones conservan su
+interfaz interna y no se agregan al objeto Motor ni a la CLI; la continuidad se
+integra en su propia sección.
 
 El índice v2 añade `authorizationGeneration`, distinto del contador numérico
 `generation` del índice. Debe coincidir con la generación de la autorización y
@@ -196,6 +197,45 @@ fuera del bloqueo y se rechazan con `INDEX_CONFLICT` si el índice base cambió
 antes de publicar. Recuperación y límites en
 [CONCURRENCIA_INDICES.md](CONCURRENCIA_INDICES.md). Solo se descartan índices,
 nunca originales.
+
+## Continuidad entre agentes — Función 05 integrada
+
+`openMotor` crea el núcleo `src/continuity.js` sobre su Base física y la capa de
+acceso `src/continuity-access.js` sobre ese núcleo. No hay otro almacenamiento:
+los registros siguen siendo `continuity-<id>.json`. Formatos y garantías en
+[CONTINUIDAD.md](CONTINUIDAD.md) y [CONTINUIDAD_AGENTES.md](CONTINUIDAD_AGENTES.md).
+
+| Operación de Motor | Quién | Resultado |
+|---|---|---|
+| `recordContinuity`, `getContinuity`, `updateContinuity`, `relateContinuity`, `retireContinuity`, `listContinuityIds`, `exportContinuity`, `importContinuity` | Anfitrión | Las del núcleo, sin cambios. |
+| `grantContinuityAccess({ requester, ids?, includeReferenced?, allowRecord?, source? })` | Anfitrión | Permiso opaco para ese solicitante. |
+| `describeContinuityAccess(permiso)` | Anfitrión | `{ ids, allowRecord, source, revoked }` o `null`. |
+| `revokeContinuityAccess(permiso)` | Anfitrión | `boolean`. |
+| `bindContinuityAgent({ requester, authorization })` | Anfitrión, para entregar | Vista congelada `{ readContext, recordResult }`. |
+| `parseContinuityExport`, `formatContinuityMarkdown` (exportadas) | Cualquiera | Validar o mostrar un paquete portable. |
+
+Separación: el agente recibe únicamente la vista. `readContinuityContext` y
+`recordContinuityResult` no son métodos del Motor; solo se alcanzan a través de
+la vista ligada a la identidad del agente.
+
+Garantías conservadas de la PR #11:
+- **Selección explícita.** Se conceden ids concretos, sin listado ni búsqueda para
+  el agente. `includeReferenced` se resuelve al conceder.
+- **Contexto restringido.** `readContext` devuelve el paquete `mind-continuity-export`
+  v1 limitado a la selección. Las referencias externas a ella quedan como ids sin
+  contenido.
+- **Resultados.** `recordResult` exige `allowRecord`. El `source` lo fija el
+  anfitrión, y las referencias `entry` solo pueden apuntar a la selección o a
+  resultados propios: lo ajeno o inexistente da `CONTINUITY_ACCESS_DENIED`, sin
+  revelar qué hay en la Base.
+- **Identidad.** `requester` se compara por identidad de objeto y el permiso es
+  clave de un `WeakMap` privado de esta instancia de Motor. Otra instancia, una
+  copia del permiso u otro agente con el mismo nombre no obtienen nada.
+
+Tras `revokeContinuityAccess`, la lectura y el registro se rechazan. Los permisos
+están en memoria y no persisten entre procesos; los registros sí. No hay
+servidor, transporte ni autenticación de agentes remotos: es una frontera de
+capacidades dentro del proceso confiable del anfitrión, como la lectura puntual.
 
 ## Creación de un archivo de texto nuevo — Función 03 integrada
 
