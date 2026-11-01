@@ -7,6 +7,7 @@ import { openMotor } from './motor.js';
 import { ensureBase } from './base-format.js';
 import { createAccessPolicy } from './access-policy.js';
 import { createConsentRequests } from './consent.js';
+import { createRemovalLog } from './removals.js';
 
 const SYNC_INTERVAL_MS = 30_000;
 const SESSIONS_DIRECTORY = 'sesiones';
@@ -44,6 +45,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   });
   const policy = createAccessPolicy({ baseDirectory: motor.baseDirectory, getAuthorizedFolder: motor.getAuthorizedFolder });
   const requests = createConsentRequests(motor.baseDirectory);
+  const removals = createRemovalLog({ baseDirectory: motor.baseDirectory, getAuthorizedFolder: motor.getAuthorizedFolder });
   const audit = createAudit(motor.baseDirectory);
   const sessionId = randomUUID();
   const sessionsDirectory = path.join(motor.baseDirectory, SESSIONS_DIRECTORY);
@@ -65,14 +67,30 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   function track(folderId) {
     let state = folders.get(folderId);
     if (!state) {
-      state = { ready: null, lastReport: null, lastError: null, lastChanges: null };
+      state = { ready: null, lastReport: null, lastError: null, lastChanges: null, entries: null, chain: Promise.resolve() };
       folders.set(folderId, state);
     }
     return state;
   }
 
+  async function indexedEntries(folderId) {
+    const index = await motor.readFolderIndex(folderId).catch(() => null);
+    return index ? new Map(index.entries.map((entry) => [entry.path, entry])) : null;
+  }
+
+  /** Anota lo desaparecido usando el índice anterior y avanza al nuevo, en orden por carpeta. */
+  function trackRemovals(folderId, removed) {
+    const state = track(folderId);
+    state.chain = state.chain.then(async () => {
+      if (removed.length > 0 && state.entries) await removals.record(folderId, removed, state.entries);
+      state.entries = await indexedEntries(folderId);
+    }).catch((error) => log('aviso', 'No se pudo anotar lo eliminado', { carpeta: folderId, error: String(error) }));
+    return state.chain;
+  }
+
   function onReport(report) {
     const state = track(report.folderId);
+    if (report.type === 'reconciled') trackRemovals(report.folderId, report.changes?.removed ?? []);
     state.lastReport = { type: report.type, at: new Date().toISOString(), ...(report.code ? { code: report.code } : {}) };
     if (report.type === 'error' || report.type === 'degraded') {
       state.lastError = report.code ?? null;
@@ -103,7 +121,11 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       state.ready = Promise.resolve(null);
       return state.ready;
     }
-    state.ready = observer.observe(folderId).then((status) => {
+    // El índice anterior permite describir lo que desapareció mientras Mind estuvo cerrado.
+    state.ready = indexedEntries(folderId).then((entries) => {
+      state.entries ??= entries;
+      return observer.observe(folderId);
+    }).then((status) => {
       state.lastError = null;
       return status;
     }, (error) => {
@@ -139,6 +161,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   return Object.freeze({
     id: sessionId,
     motorVersion,
+    removals,
     layout,
     base,
     motor,
@@ -182,7 +205,10 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
         if (result === 'timeout') return { status: 'reconciling' };
         if (await motor.readFolderIndex(folderId)) return { status: 'current' };
       }
+      const state = track(folderId);
+      state.entries ??= await indexedEntries(folderId);
       const indexed = await motor.indexFolder(folderId);
+      await trackRemovals(folderId, indexed.changes?.removed ?? []);
       return { status: 'reconciled', generation: indexed.generation };
     },
 
@@ -203,7 +229,13 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       return () => listeners.delete(listener);
     },
 
+    /** Espera a que se anote lo eliminado en las reconciliaciones ya informadas. */
+    async settled(folderId) {
+      await folders.get(folderId)?.chain;
+    },
+
     async forget(folderId) {
+      await removals.remove(folderId).catch(() => {});
       folders.delete(folderId);
       await observer?.unobserve(folderId).catch(() => {});
     },

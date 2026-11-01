@@ -90,6 +90,12 @@ test('sesión completa: primer uso, observación, cierre sin residuos y reconcil
     return all.includes('mientras-cerrado.md') && !all.includes('antiguo.txt') ? all : null;
   });
   assert.deepEqual(after, ['Proyectos/externo.txt', 'Proyectos/plan.txt', 'mientras-cerrado.md']);
+  // Lo eliminado con Mind cerrado queda en el rastro, sin contenido.
+  const removed = await eventually(async () => {
+    const result = await second.call('eliminados');
+    return result.data.eliminados.some((item) => item.ruta === 'antiguo.txt') ? result : null;
+  });
+  assert.ok(removed, 'el rastro debía incluir antiguo.txt');
   assert.deepEqual(await second.close(), { code: 0, signal: null });
 });
 

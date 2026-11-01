@@ -316,3 +316,45 @@ test('exclusiones: el usuario las elige al autorizar; el agente puede añadir m�
   assert.equal((await call('retirar_acceso', { carpeta: granted.data.carpeta.id, incluir: ['Privado'] })).code, 'INVALID_ARGUMENTS');
   assert.equal(await fs.readFile(path.join(folder, 'Privado', 'claves.txt'), 'utf8'), 'Datos privados ficticios\n');
 });
+
+test('eliminados: rastro de solo metadatos y referencias de continuidad marcadas como rotas', async (t) => {
+  const { folder, open, agent } = await fixture(t);
+  const session = await open();
+  const call = agent(session, connection({ onElicit: (params) => (params.requestedSchema.properties.acceso
+    ? { action: 'accept', content: { acceso: 'completo' } } : { action: 'accept', content: { leer: true, registrar: true } }) }));
+  await call('solicitar_acceso', { ruta: folder, acceso: 'completo' });
+  await call('solicitar_acceso', { continuidad: ['leer', 'registrar'] });
+  assert.equal((await call('eliminados')).data.total, 0);
+  const recorded = await call('continuidad_registrar', {
+    tipo: 'decisión', contenido: 'Usar el presupuesto ficticio',
+    referencias: [
+      { ubicacion: 'Proyectos/presupuesto.md', relacion: 'fuente' },
+      { ubicacion: path.join(folder, 'notas.txt') },
+      { ubicacion: 'https://ejemplo.invalid/doc' },
+    ],
+  });
+  assert.deepEqual(recorded.data.registro.referencias.map((item) => item.estado), ['existe', 'existe', undefined]);
+
+  await fs.rm(path.join(folder, 'Proyectos', 'presupuesto.md'));
+  const gone = await call('eliminados');
+  assert.equal(gone.data.total, 1);
+  const [entry] = gone.data.eliminados;
+  assert.equal(entry.ruta, 'Proyectos/presupuesto.md');
+  assert.equal(entry.por, 'externo');
+  assert.equal(entry.bytes, Buffer.byteLength('# Presupuesto ficticio\nTotal: 100\n'));
+  assert.ok(Number.isFinite(Date.parse(entry.eliminado)));
+  const audit = JSON.stringify(gone.data);
+  assert.doesNotMatch(audit, /Total: 100/);
+
+  const query = await call('continuidad_consultar', { texto: 'presupuesto' });
+  const references = query.data.registros[0].referencias;
+  assert.equal(references[0].estado, 'eliminado');
+  assert.equal(references[0].eliminado, entry.eliminado);
+  assert.equal(references[1].estado, 'existe');
+  assert.equal(references[2].estado, undefined);
+
+  // Si vuelve a existir, deja de figurar como eliminado.
+  await fs.writeFile(path.join(folder, 'Proyectos', 'presupuesto.md'), 'Nuevo presupuesto ficticio\n');
+  assert.equal((await call('eliminados')).data.total, 0);
+  assert.equal((await call('continuidad_consultar', { texto: 'presupuesto' })).data.registros[0].referencias[0].estado, 'existe');
+});

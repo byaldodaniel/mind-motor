@@ -208,6 +208,17 @@ export const TOOL_DEFINITIONS = Object.freeze([
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
+    name: 'eliminados',
+    title: 'Eliminados recientemente',
+    description: 'Lista lo que desapareció de las carpetas autorizadas en los últimos 30 días: nombre, ruta, tamaño, fechas y cuándo se detectó. Mind no guarda el contenido de lo eliminado. Requiere "encontrar".',
+    inputSchema: schema({
+      carpeta: FOLDER_REF,
+      desde: { type: 'string', description: 'Fecha ISO: solo lo eliminado desde entonces.' },
+      limite: { type: 'integer', minimum: 1, maximum: 500 },
+    }),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
     name: 'leer',
     title: 'Leer un archivo de texto',
     description: 'Lee un archivo de texto UTF-8 (hasta 1 MiB) de una carpeta autorizada. Devuelve el contenido y su versión (necesaria para modificar). Requiere "leer".',
@@ -370,6 +381,56 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
     const authorization = await motor.grantTextRead({ requester, folderId: folder.id, relativePath });
     const read = await motor.readTextFile({ requester, authorization });
     return { content: read.content, version: textVersion(read.content) };
+  }
+
+  /** Carpetas en las que el agente puede encontrar, con su índice y su rastro de eliminados. */
+  async function findableContext() {
+    const context = [];
+    for (const folder of await folders()) {
+      if (!(await policy.get(folder.id))?.access.encontrar) continue;
+      const index = await motor.readFolderIndex(folder.id).catch(() => null);
+      const existing = new Set(index?.entries.map((entry) => entry.path) ?? []);
+      const removed = new Map((await session.removals.list(folder.id, { existing })).map((entry) => [entry.path, entry]));
+      context.push({ folder, existing, removed });
+    }
+    return context;
+  }
+
+  /** existe | eliminado | desconocido, según los índices que el agente puede consultar. */
+  function locatorStatus(locator, context) {
+    if (typeof locator !== 'string' || /^[a-z][a-z0-9+.-]*:\/\//iu.test(locator)) return null;
+    const candidates = [];
+    if (path.isAbsolute(locator)) {
+      for (const item of context) {
+        const relative = path.relative(item.folder.path, path.normalize(locator));
+        if (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+          candidates.push([item, relative.split(path.sep).join('/')]);
+        }
+      }
+    } else {
+      const relative = locator.replace(/\\/g, '/').replace(/^\.\/+/u, '');
+      for (const item of context) candidates.push([item, relative]);
+    }
+    for (const [item, relative] of candidates) {
+      if (item.existing.has(relative)) return { estado: 'existe' };
+    }
+    for (const [item, relative] of candidates) {
+      const gone = item.removed.get(relative);
+      if (gone) return { estado: 'eliminado', eliminado: gone.removedAt };
+    }
+    return { estado: 'desconocido' };
+  }
+
+  async function withReferenceStatus(entries) {
+    if (!entries.some((entry) => entry.referencias.some((reference) => reference.ubicacion !== undefined))) return entries;
+    const context = await findableContext();
+    return entries.map((entry) => ({
+      ...entry,
+      referencias: entry.referencias.map((reference) => {
+        const status = reference.ubicacion === undefined ? null : locatorStatus(reference.ubicacion, context);
+        return status ? { ...reference, ...status } : reference;
+      }),
+    }));
   }
 
   async function indexSummary(folder) {
@@ -602,6 +663,36 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       };
     },
 
+    async eliminados(args) {
+      only(args, ['carpeta', 'desde', 'limite']);
+      const since = args.desde === undefined ? null : Date.parse(text(args.desde, 'desde', { max: 64 }));
+      if (since !== null && !Number.isFinite(since)) throw invalid('desde debe ser una fecha ISO.');
+      const limit = integer(args.limite, 'limite', { min: 1, max: 500 }) ?? 100;
+      const selected = args.carpeta !== undefined ? [await resolveFolder(args.carpeta)] : await folders();
+      const result = [];
+      for (const folder of selected) {
+        if (args.carpeta !== undefined) await requireAccess(folder, 'encontrar');
+        else if (!(await policy.get(folder.id))?.access.encontrar) continue;
+        // Reconciliar antes permite detectar lo que se eliminó hace un momento.
+        await session.ensureIndex(folder.id, { timeoutMs: 30_000 });
+        await session.settled(folder.id);
+        const index = await motor.readFolderIndex(folder.id).catch(() => null);
+        const existing = new Set(index?.entries.map((entry) => entry.path) ?? []);
+        for (const entry of await session.removals.list(folder.id, { since, existing })) {
+          result.push({
+            carpeta: folder.id, ruta: entry.path, nombre: entry.path.slice(entry.path.lastIndexOf('/') + 1),
+            tipo: TYPE_OUT[entry.type] ?? entry.type, bytes: entry.size, modificado: entry.modifiedAt,
+            eliminado: entry.removedAt, por: entry.by, ruta_absoluta: absolute(folder.path, entry.path),
+          });
+        }
+      }
+      result.sort((a, b) => (a.eliminado < b.eliminado ? 1 : a.eliminado > b.eliminado ? -1 : 0));
+      return {
+        total: result.length, mostrados: Math.min(limit, result.length), eliminados: result.slice(0, limit),
+        nota: 'Solo metadatos. Mind no guarda copias: para recuperar el contenido de algo borrado fuera de Mind, usa la papelera del sistema o un respaldo.',
+      };
+    },
+
     async leer(args) {
       only(args, ['carpeta', 'ruta', 'desde_linea', 'lineas']);
       const folder = await resolveFolder(args.carpeta);
@@ -714,7 +805,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         source,
         ...(args.referencias !== undefined ? { references: referencesIn(args.referencias) } : {}),
       });
-      return { estado: 'registrado', registro: continuityOut(entry) };
+      return { estado: 'registrado', registro: (await withReferenceStatus([continuityOut(entry)]))[0] };
     },
 
     async continuidad_consultar(args) {
@@ -756,8 +847,8 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       }
       return {
         total: found.length, mostrados: page.length,
-        registros: page.map(continuityOut),
-        ...(args.relacionados === true ? { relacionados: related } : {}),
+        registros: await withReferenceStatus(page.map(continuityOut)),
+        ...(args.relacionados === true ? { relacionados: await withReferenceStatus(related) } : {}),
       };
     },
 
