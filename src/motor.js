@@ -8,6 +8,7 @@ import { createContinuity } from './continuity.js';
 import { createContinuityAccess } from './continuity-access.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
+import { createDocumentReader } from './document-reader.js';
 import { createFunctionRegistry } from './functions.js';
 import { createFunctionRunner } from './function-runner.js';
 import { createTextCreator } from './text-creator.js';
@@ -185,6 +186,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
       return indexer.applyExclusions(id, () => setExclusions(id, exclusions));
     },
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
+    // Texto de documentos de oficina (docx, xlsx, pptx, odt, ods, odp), con permisos propios.
+    ...createDocumentReader({ loadAuthorizedFolder, pythonExecutable }),
     // Funciones: administración y ejecución manual del anfitrión. getFunctionVersion
     // queda interno del ejecutor; no se entregan a agentes.
     createFunction: functions.createFunction,

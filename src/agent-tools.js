@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { textVersion } from './text-modifier.js';
+import { documentFormat } from './document-reader.js';
 import { formatContinuityMarkdown } from './continuity.js';
 import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, normalizeAccess, describeAccess, presetName } from './access-policy.js';
 import { createConsent, validateCandidateFolder, untrustedText } from './consent.js';
@@ -116,7 +117,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
   {
     name: 'leer',
     title: 'Leer un archivo de texto',
-    description: 'Lee un archivo de texto UTF-8 (hasta 1 MiB) de una carpeta autorizada. Devuelve el contenido y su versión (necesaria para modificar). Requiere "leer".',
+    description: 'Lee un archivo de texto UTF-8 (hasta 1 MiB) de una carpeta autorizada y devuelve el contenido y su versión (necesaria para modificar). También extrae el texto de documentos de oficina (.docx, .xlsx, .pptx, .odt, .ods, .odp; hasta 16 MiB), solo para leer. Requiere "leer".',
     inputSchema: schema({
       carpeta: FOLDER_REF,
       ruta: RELATIVE_PATH,
@@ -598,6 +599,20 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const relativePath = text(args.ruta, 'ruta');
       const from = integer(args.desde_linea, 'desde_linea', { min: 1 });
       const count = integer(args.lineas, 'lineas', { min: 1 });
+      const slice = (content) => (from === undefined && count === undefined ? content
+        : content.split('\n').slice((from ?? 1) - 1, count === undefined ? undefined : (from ?? 1) - 1 + count).join('\n'));
+      const format = documentFormat(relativePath);
+      if (format) {
+        const authorization = await motor.grantDocumentRead({ requester, folderId: folder.id, relativePath });
+        const document = await motor.readDocument({ requester, authorization });
+        const shown = slice(document.text);
+        const metadata = {
+          carpeta: folder.id, ruta: relativePath, ruta_absoluta: absolute(folder.path, relativePath), formato: format,
+          bytes: document.bytes, lineas: lineCount(document.text), truncado: document.truncated,
+          nota: 'Texto extraído para leer. Mind no modifica este formato; para cambiarlo usa la aplicación correspondiente.',
+        };
+        return { ...metadata, contenido: shown, __mcpText: `${JSON.stringify(metadata)}\n--- contenido ---\n${shown}` };
+      }
       const { content, version } = await readFile(folder, relativePath);
       const total = lineCount(content);
       let shown = content;

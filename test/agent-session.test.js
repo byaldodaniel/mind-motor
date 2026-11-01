@@ -380,3 +380,37 @@ test('con varias carpetas, la observación inicial las indexa todas respetando e
   const status = await call('estado');
   assert.equal(status.data.mind.runtime.node, process.execPath);
 });
+
+test('leer extrae el texto de documentos de oficina sin abrirlos fuera del ámbito', async (t) => {
+  const { folder, open, agent } = await fixture(t);
+  const zlib = await import('node:zlib');
+  // Construye un .docx mínimo (ZIP con un miembro deflate) solo con datos ficticios.
+  const xml = Buffer.from('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Informe ficticio de gastos</w:t></w:r></w:p><w:p><w:r><w:t>Total: 312 EUR</w:t></w:r></w:p></w:body></w:document>');
+  const name = Buffer.from('word/document.xml');
+  const data = zlib.deflateRawSync(xml);
+  const crc = zlib.crc32(xml);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(8, 8);
+  local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(xml.length, 22); local.writeUInt16LE(name.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(crc, 16); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(xml.length, 24); central.writeUInt16LE(name.length, 28);
+  const offset = local.length + name.length + data.length;
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + name.length, 12); end.writeUInt32LE(offset, 16);
+  await fs.writeFile(path.join(folder, 'Proyectos', 'gastos.docx'), Buffer.concat([local, name, data, central, name, end]));
+  await fs.writeFile(path.join(folder, 'Proyectos', 'roto.docx'), 'no es un documento');
+  const session = await open();
+  const call = agent(session, connection({ onElicit: accept('leer') }));
+  await call('solicitar_acceso', { ruta: folder, acceso: 'leer' });
+  const read = await call('leer', { ruta: 'Proyectos/gastos.docx' });
+  assert.equal(read.data.formato, 'docx');
+  assert.equal(read.data.contenido, 'Informe ficticio de gastos\nTotal: 312 EUR');
+  assert.equal(read.data.version, undefined);
+  assert.match(read.data.nota, /no modifica este formato/);
+  assert.equal((await call('leer', { ruta: 'Proyectos/roto.docx' })).code, 'DOCUMENT_INVALID');
+  // Encontrar no basta para extraer contenido.
+  await call('retirar_acceso', { carpeta: folder, permisos: ['leer'] });
+  assert.equal((await call('leer', { ruta: 'Proyectos/gastos.docx' })).code, 'ACCESS_NOT_GRANTED');
+});
