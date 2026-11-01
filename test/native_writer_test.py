@@ -262,8 +262,10 @@ class WriterTest(unittest.TestCase):
         try:
             self.assert_code('ACCESS_DENIED', 'protegido.txt')
         finally:
-            subprocess.run(['icacls', str(target), '/remove:d', f'*{sid}'], capture_output=True, check=True)
+            # Primero la carpeta: con el listado permitido, NTFS vuelve a conceder
+            # la consulta de atributos que icacls necesita para abrir el archivo.
             subprocess.run(['icacls', str(self.folder), '/remove:d', f'*{sid}'], capture_output=True, check=True)
+            subprocess.run(['icacls', str(target), '/remove:d', f'*{sid}'], capture_output=True, check=True)
         self.assertEqual(target.read_bytes(), b'ajeno')
         self.assertEqual(self.names(), ['protegido.txt'])
 
