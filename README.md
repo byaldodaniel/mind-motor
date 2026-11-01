@@ -150,7 +150,12 @@ misma ubicación no recupera información de una concesión anterior, incluso si
 queda un índice publicado tarde por otro proceso. Los índices antiguos sin ese
 vínculo se consideran no vigentes y se reconstruyen al indexar.
 
-La indexación y la consulta del índice son administrativas; registrar una carpeta
+`motor.searchFiles({ folderIds, query, ... })` busca archivos por nombre, con
+coincidencias parciales y filtros de metadatos, en los índices vigentes de las
+carpetas indicadas por el anfitrión. No vuelve a recorrer las carpetas ni abre
+contenido. Detalles en [docs/INCREMENTO_09.md](docs/INCREMENTO_09.md).
+
+La indexación, la consulta del índice y la búsqueda son administrativas; registrar una carpeta
 no concede estas operaciones a un agente. No se añaden comandos CLI ni permisos
 paralelos. Continuidad y definiciones de funciones están integradas en el código
 como módulos internos, sin métodos públicos en Motor ni ejecución de funciones.
