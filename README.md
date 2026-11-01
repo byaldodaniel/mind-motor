@@ -129,6 +129,30 @@ escrituras concurrentes, ni procedencia histórica del archivo, ni protección a
 cambios privilegiados de montajes. Si falta una primitiva segura, se deniega sin
 recurrir a una apertura más débil. Véase [docs/INCREMENTO_03.md](docs/INCREMENTO_03.md).
 
+## Creación segura de un archivo de texto — Función 03
+
+El anfitrión concede, tras la autorización explícita del usuario, un permiso de un
+solo intento para crear un archivo concreto. El agente recibe solo una función
+ligada a su identidad:
+
+```js
+const authorization = await motor.grantTextCreate({ requester, folderId, relativePath: 'notas/nueva.txt' });
+const created = await motor.createTextFile({ requester, authorization, content: 'Texto ficticio\n' });
+// { folderId, relativePath, size, indexEntry, index: { status, generation, code } }
+```
+
+Usa el mismo registro de carpetas y el mismo modelo de permisos que la lectura;
+un permiso de lectura no sirve para crear ni al revés. Solo crea archivos nuevos
+de texto UTF-8 de hasta 1 MiB en carpetas existentes; nunca reemplaza
+(`FILE_EXISTS`) ni crea carpetas. Tras crear, el Motor incorpora el archivo al
+índice vigente cuando es seguro (`index.status: 'updated'`), de modo que
+`searchFiles` lo encuentra sin recorrer la carpeta. Si el índice no conoce las
+carpetas padre, tenía otra entrada con ese nombre o no se pudo actualizar, no se
+publica nada y `index.status` es `needs-reconciliation`: se reconcilia con
+`motor.indexFolder(folderId)`. No hay modificación, movimiento ni eliminación.
+Detalles en [docs/FUNCION_03_CREAR.md](docs/FUNCION_03_CREAR.md) y
+[docs/INTERFACES.md](docs/INTERFACES.md).
+
 ## Uso selectivo
 
 Mind es opcional. Los agentes pueden usarlo cuando aporte valor y acudir
@@ -180,7 +204,8 @@ la misma suite en Windows, macOS y Linux con Node.js 24 y Python 3.12.
 ## Interfaces y alcance
 
 La API programática y los límites para extender el núcleo están documentados en
-[docs/INTERFACES.md](docs/INTERFACES.md). Hay indexación administrativa y núcleos
+[docs/INTERFACES.md](docs/INTERFACES.md). Hay lectura y creación de texto con
+permiso explícito, indexación y búsqueda administrativas, y núcleos
 internos de continuidad y definiciones de funciones. Todavía no hay integración de
 agentes, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
 actuales son datos técnicos de prueba, no una estructura obligatoria para organizar

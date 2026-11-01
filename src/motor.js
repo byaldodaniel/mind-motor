@@ -6,6 +6,7 @@ import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
+import { createTextCreator } from './text-creator.js';
 import { createFolderIndexer } from './indexer.js';
 import { createIndexSearch } from './search.js';
 
@@ -31,6 +32,17 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(folderId: string) => Promise<import('./indexer.js').IndexResult>} indexFolder Solo administración local.
  * @property {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} readFolderIndex Solo administración local.
  * @property {(request: import('./search.js').SearchRequest) => Promise<object>} searchFiles Solo anfitrión, sobre ámbitos que él autoriza.
+ * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextCreate Solo anfitrión administrativo.
+ * @property {(authorization: object) => boolean} revokeTextCreate Solo antes del intento.
+ * @property {(request: {requester: object, authorization: object, content: string}) => Promise<CreatedTextFile>} createTextFile
+ */
+/**
+ * @typedef {object} CreatedTextFile
+ * @property {string} folderId
+ * @property {string} relativePath
+ * @property {number} size
+ * @property {import('./index-scan.js').IndexEntry} indexEntry Metadatos leídos del archivo creado.
+ * @property {{ status: 'updated' | 'current' | 'not-indexed' | 'needs-reconciliation', generation: number | null, code: string | null }} index
  */
 
 function validateId(id) {
@@ -81,6 +93,7 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
       return folder;
     },
   });
+  const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   return Object.freeze({
     baseDirectory: base,
     ...folders,
@@ -88,6 +101,20 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
     indexFolder: indexer.indexFolder,
     readFolderIndex: indexer.readFolderIndex,
     ...createIndexSearch({ readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder }),
+    grantTextCreate: creator.grantTextCreate,
+    revokeTextCreate: creator.revokeTextCreate,
+
+    async createTextFile(request) {
+      const created = await creator.createTextFile(request);
+      let index;
+      try {
+        index = await indexer.recordCreatedFile(created.folderId, created.indexEntry);
+      } catch (error) {
+        // El archivo ya existe: un fallo del índice no anula la creación ni publica datos dudosos.
+        index = { status: 'needs-reconciliation', generation: null, code: error?.code ?? 'INDEX_UPDATE_FAILED' };
+      }
+      return { ...created, index };
+    },
 
     async revokeFolder(id) {
       // Primero se retira la autoridad. Un fallo de limpieza no la restaura.

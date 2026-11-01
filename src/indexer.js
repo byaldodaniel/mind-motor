@@ -188,6 +188,53 @@ export function createFolderIndexer({
       return boundIndex(index, scope);
     },
 
+    /**
+     * Incorpora el archivo recién creado por el Motor sin recorrer la carpeta.
+     * Solo publica si el índice vigente ya contiene sus carpetas padre listadas y
+     * no tiene otra entrada con ese nombre; si no, deja el índice intacto y pide
+     * una reconciliación explícita con indexFolder. updatedAt sigue siendo la
+     * fecha del último recorrido: la entrada aporta sus propias fechas.
+     * @param {string} scopeId
+     * @param {import('./index-scan.js').IndexEntry} entry
+     * @returns {Promise<{ status: 'updated' | 'current' | 'not-indexed' | 'needs-reconciliation', generation: number | null, code: string | null }>}
+     */
+    async recordCreatedFile(scopeId, entry) {
+      validateScopeId(scopeId);
+      return exclusive(scopeId, async () => {
+        const reconcile = (code, generation = null) => ({ status: 'needs-reconciliation', generation, code });
+        if (entry?.type !== 'file' || entry.state !== 'indexed' || typeof entry.path !== 'string') {
+          return reconcile('INVALID_CREATED_ENTRY');
+        }
+        const scope = await authorized(scopeId);
+        const index = boundIndex(await store.load(scopeId), scope);
+        if (!index) return { status: 'not-indexed', generation: null, code: null };
+        const known = new Map(index.entries.map((item) => [item.path, item]));
+        const existing = known.get(entry.path);
+        if (existing) {
+          const same = ['type', 'size', 'modifiedAt', 'changedAt', 'createdAt', 'state', 'reason']
+            .every((field) => existing[field] === entry[field]);
+          return same ? { status: 'current', generation: index.generation, code: null }
+            : reconcile('INDEX_ENTRY_CONFLICT', index.generation);
+        }
+        const parts = entry.path.split('/');
+        for (let depth = 1; depth < parts.length; depth += 1) {
+          const parent = known.get(parts.slice(0, depth).join('/'));
+          if (parent?.type !== 'directory' || parent.state !== 'indexed') {
+            return reconcile('INDEX_PARENT_NOT_CURRENT', index.generation);
+          }
+        }
+        if (index.entries.length + 1 > maxEntries) return reconcile('INDEX_LIMIT_EXCEEDED', index.generation);
+        requireSameAuthorization(scope, await authorized(scopeId));
+        const latest = boundIndex(await store.load(scopeId), scope);
+        if (latest?.generation !== index.generation) return reconcile('INDEX_CONFLICT');
+        const entries = [...index.entries, entry].sort((a, b) => (a.path < b.path ? -1 : 1));
+        const generation = index.generation + 1;
+        // save valida la forma completa; una entrada mal formada no se publica.
+        await store.save({ ...index, generation, entries });
+        return { status: 'updated', generation, code: null };
+      });
+    },
+
     /** Retira solo el índice de la Base; admite ámbitos ya retirados. */
     async removeFolderIndex(scopeId) {
       validateScopeId(scopeId);

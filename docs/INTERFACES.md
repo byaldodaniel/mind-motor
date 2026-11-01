@@ -1,4 +1,4 @@
-# Interfaces mínimas — Incrementos 01 a 03
+# Interfaces mínimas del Motor
 
 ## Contrato ejecutable
 
@@ -162,7 +162,8 @@ recorrer las carpetas ni abrir archivos. Cada resultado es `{ folderId,
 relativePath, name, type, size, modifiedAt, changedAt, createdAt, status, reason,
 indexedAt }`; `folderId` y `relativePath` tienen la forma que espera
 `grantTextRead`, pero la búsqueda no concede la lectura. `status` es `indexed`
-(confirmado en `indexedAt`) o `unverified`. Detalle en
+(confirmado por el recorrido de `indexedAt` o, si lo creó el Motor después, al
+crearlo; véase la sección de creación) o `unverified`. Detalle en
 [INCREMENTO_09.md](INCREMENTO_09.md).
 
 Son operaciones del anfitrión administrativo, como registrar y retirar carpetas.
@@ -189,3 +190,56 @@ carpeta sigue retirada. Una publicación tardía puede dejar físicamente un ín
 viejo, pero el vínculo de generación impide ofrecerlo con una nueva autorización.
 No hay transacciones ni bloqueo entre procesos; se conserva el modelo local de
 confianza. Solo se descartan índices, nunca originales.
+
+## Creación de un archivo de texto nuevo — Función 03 integrada
+
+| Operación de Motor | Entrada | Resultado |
+|---|---|---|
+| `grantTextCreate` | `{ requester: object, folderId, relativePath }` | Permiso opaco de un solo intento. Solo anfitrión. |
+| `revokeTextCreate` | Objeto permiso original | `boolean`: retirado antes de comenzar el intento. Solo anfitrión. |
+| `createTextFile` | `{ requester: object, authorization: object, content: string }` | `Promise<{ folderId, relativePath, size, indexEntry, index }>` |
+
+El núcleo es `src/text-creator.js` + `src/native_writer.py`
+([FUNCION_03_CREAR.md](FUNCION_03_CREAR.md)). `openMotor` lo crea con el mismo
+`loadAuthorizedFolder` del registro y el mismo `pythonExecutable` que el lector:
+no hay otro registro de permisos. El permiso se liga por identidad de objeto al
+`requester`, a la carpeta (id + generación), a la ruta exacta y a la operación;
+los permisos de lectura y de creación viven en mapas distintos y no se
+intercambian. Se consume antes de cualquier E/S, no persiste entre procesos ni
+sirve en otra instancia de Motor. Retirar o reautorizar la carpeta invalida los
+permisos pendientes. El anfitrión entrega al agente solo una función ligada a su
+identidad que llama a `createTextFile`.
+
+Solo crea un archivo nuevo, UTF-8 sin NUL y de hasta 1 MiB, en una carpeta que ya
+existe. Nunca reemplaza: un nombre existente da `FILE_EXISTS`. No crea carpetas
+intermedias, ni modifica, mueve o elimina archivos.
+
+### Coherencia del índice
+
+Tras crear, el Motor intenta incorporar `indexEntry` (metadatos leídos del
+archivo creado) al índice vigente de la carpeta, en la misma cola por ámbito que
+`indexFolder`. `index.status` informa el resultado:
+
+| `status` | Significado |
+|---|---|
+| `updated` | Entrada incorporada; `generation` del índice aumenta en 1. |
+| `current` | El índice ya tenía exactamente esa entrada. |
+| `not-indexed` | La carpeta no tiene índice vigente; no se crea uno. |
+| `needs-reconciliation` | No se publicó nada; `code` explica el motivo. |
+
+Motivos de `needs-reconciliation`: `INDEX_ENTRY_CONFLICT` (el índice tenía otra
+entrada con ese nombre), `INDEX_PARENT_NOT_CURRENT` (alguna carpeta padre falta o
+no está listada y verificada), `INDEX_LIMIT_EXCEEDED`, `INDEX_CONFLICT` (otro
+proceso publicó a la vez) o el error de lectura del índice (p. ej.
+`RECORD_CORRUPT`). La reconciliación explícita es `indexFolder(folderId)`. Un fallo
+del índice nunca convierte en error una creación ya realizada.
+
+`updatedAt` del índice (el `indexedAt` de `searchFiles`) sigue siendo la fecha del
+último recorrido completo. Una entrada incorporada por creación lleva sus propias
+fechas, posteriores, leídas del archivo creado; las demás entradas, incluida la
+fecha de su carpeta padre, siguen siendo las de ese recorrido.
+
+Errores: los de [FUNCION_03_CREAR.md](FUNCION_03_CREAR.md) (`CREATE_NOT_AUTHORIZED`,
+`FILE_EXISTS`, `PARENT_NOT_FOUND`, `UNSAFE_PATH`, `CREATE_UNCONFIRMED`, …). Si el
+resultado es `CREATE_FAILED` por tiempo o `CREATE_UNCONFIRMED`, el archivo puede
+existir sin entrada en el índice: corresponde reconciliar.
