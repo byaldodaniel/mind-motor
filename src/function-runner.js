@@ -92,7 +92,7 @@ function grantCapabilities(entry, capabilities) {
  * @param {{ functions: ReturnType<import('./functions.js').createFunctionRegistry>, executors: object }} options
  */
 export function createFunctionRunner({ functions, executors } = {}) {
-  if (!functions || typeof functions.getFunction !== 'function') {
+  if (!functions || typeof functions.getFunctionVersion !== 'function') {
     throw new MotorError('INVALID_FUNCTION_REGISTRY', 'Se requiere el registro de funciones de una Base abierta por el Motor.');
   }
   const catalog = trustedCatalog(executors);
@@ -103,8 +103,11 @@ export function createFunctionRunner({ functions, executors } = {}) {
     async bindFunction({ functionId, executor } = {}) {
       const entry = validName(executor) ? catalog.get(executor) : undefined;
       if (!entry) throw new MotorError('EXECUTOR_NOT_FOUND', 'El ejecutor no forma parte del catálogo de confianza.');
-      const record = await functions.getFunction(functionId);
+      const record = await functions.getFunctionVersion(functionId);
       if (!record) throw new MotorError('FUNCTION_NOT_FOUND', 'No existe una definición con ese identificador.');
+      if (typeof record.generation !== 'string') {
+        throw new MotorError('FUNCTION_GENERATION_REQUIRED', 'Actualiza explícitamente la definición heredada antes de autorizar su ejecución.');
+      }
       if (entry.acceptsDefinition) {
         let accepted;
         try {
@@ -116,7 +119,8 @@ export function createFunctionRunner({ functions, executors } = {}) {
       }
       const binding = Object.freeze(Object.create(null));
       bindings.set(binding, {
-        functionId, executor, fingerprint: fingerprint(record.definition), revoked: false,
+        functionId, executor, generation: record.generation,
+        fingerprint: fingerprint(record.definition), revoked: false,
       });
       return binding;
     },
@@ -137,13 +141,13 @@ export function createFunctionRunner({ functions, executors } = {}) {
       if (!measured || measured.bytes > MAX_INPUT_BYTES) throw invalidInput();
       const granted = grantCapabilities(entry, capabilities);
 
-      const record = await functions.getFunction(bound.functionId);
+      const record = await functions.getFunctionVersion(bound.functionId);
       if (bound.revoked) throw notBound();
       if (!record) {
         bound.revoked = true;
         throw new MotorError('FUNCTION_NOT_FOUND', 'La definición vinculada fue retirada.');
       }
-      if (fingerprint(record.definition) !== bound.fingerprint) {
+      if (record.generation !== bound.generation || fingerprint(record.definition) !== bound.fingerprint) {
         bound.revoked = true;
         throw new MotorError('FUNCTION_CHANGED', 'La definición cambió después de vincularla; se requiere un nuevo vínculo.');
       }

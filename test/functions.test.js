@@ -80,16 +80,53 @@ test('persiste creación, actualización y retirada entre procesos terminados', 
     return result.stdout.trim();
   }
   run("await registry.createFunction('ejemplo', { instruction: 'Persistente ficticio' });");
+  const created = JSON.parse(await readFile(recordPath(base), 'utf8'));
+  assert.equal(created.version, 2);
   assert.deepEqual(JSON.parse(run("console.log(JSON.stringify(await registry.getFunction('ejemplo')));")), {
     id: 'ejemplo', definition: { instruction: 'Persistente ficticio' },
   });
   run("await registry.updateFunction('ejemplo', { instruction: 'Actualizado' });");
+  const updated = JSON.parse(await readFile(recordPath(base), 'utf8'));
+  assert.notEqual(updated.generation, created.generation);
   assert.deepEqual(JSON.parse(run('console.log(JSON.stringify(await registry.listFunctions()));')), [
     { id: 'ejemplo', definition: { instruction: 'Actualizado' } },
   ]);
   assert.equal(run("console.log(await registry.retireFunction('ejemplo'));"), 'true');
   assert.equal(run("console.log(await registry.getFunction('ejemplo'));"), 'null');
   assert.deepEqual(await readdir(base), []);
+});
+
+test('cada creación y actualización, incluso idéntica, persiste un UUID nuevo sin cambiar resultados públicos', async (t) => {
+  const { base, registry } = await fixture(t);
+  const definition = { instruction: 'Ficticia', generation: 'dato opaco de la definición' };
+  const generations = new Set();
+  for (const operation of ['create', 'update', 'update', 'recreate']) {
+    if (operation === 'recreate') await registry.retireFunction('ejemplo');
+    const result = await registry[operation === 'update' ? 'updateFunction' : 'createFunction']('ejemplo', definition);
+    assert.deepEqual(result, { id: 'ejemplo', definition });
+    assert.deepEqual(await registry.getFunction('ejemplo'), result);
+    assert.deepEqual(await registry.listFunctions(), [result]);
+    const stored = JSON.parse(await readFile(recordPath(base), 'utf8'));
+    assert.equal(stored.version, 2);
+    assert.match(stored.generation, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u);
+    assert.ok(!generations.has(stored.generation));
+    generations.add(stored.generation);
+  }
+});
+
+test('v1 sigue legible sin migración implícita y solo actualizar publica v2', async (t) => {
+  const { base, registry } = await fixture(t);
+  const legacy = envelope();
+  const text = JSON.stringify(legacy);
+  await writeFile(recordPath(base), text);
+  assert.deepEqual(await registry.getFunction('ejemplo'), { id: legacy.id, definition: legacy.definition });
+  assert.deepEqual(await registry.listFunctions(), [{ id: legacy.id, definition: legacy.definition }]);
+  assert.equal(await readFile(recordPath(base), 'utf8'), text);
+  assert.deepEqual(await registry.updateFunction('ejemplo', legacy.definition), { id: legacy.id, definition: legacy.definition });
+  assert.equal(JSON.parse(await readFile(recordPath(base), 'utf8')).version, 2);
+  // Retirar un registro v1 tampoco exige migrarlo.
+  await writeFile(recordPath(base), text);
+  assert.equal(await registry.retireFunction('ejemplo'), true);
 });
 
 test('Bases independientes y otra instancia sobre la misma Base sin caché', async (t) => {
@@ -164,11 +201,15 @@ test('copia entradas y salidas sin compartir estado y conserva claves JSON espec
 test('corrupción explícita en consulta, listado y mutaciones sin reparar ni borrar', async (t) => {
   const { base, registry } = await fixture(t);
   const valid = envelope();
+  const v2 = { ...valid, version: 2, generation: '8f875ea4-d844-4ea9-804b-dc66ca9ac0da' };
   for (const content of [
     '{incompleto', 'null', '[]', '{}', JSON.stringify({ ...valid, version: 2 }),
     JSON.stringify({ ...valid, format: 'otro' }), JSON.stringify({ ...valid, id: 'otro' }),
     JSON.stringify({ ...valid, extra: 1 }), JSON.stringify({ ...valid, definition: [] }),
     JSON.stringify({ ...valid, definition: null }), JSON.stringify({ ...valid, definition: { n: Infinity } }).replace('null', '1e999'),
+    ...[null, 7, '', 'no-uuid', `${v2.generation}\n`].map((generation) => JSON.stringify({ ...v2, generation })),
+    JSON.stringify({ ...v2, version: 1 }), JSON.stringify({ ...v2, version: 3 }),
+    JSON.stringify({ ...v2, extra: 1 }),
   ]) {
     await writeFile(recordPath(base), content);
     for (const operation of [

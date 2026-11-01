@@ -76,14 +76,19 @@ lectura existentes; ni el id de función, ni el nombre del ejecutor, ni un objet
 con esos campos lo sustituyen. Un vínculo vale solo para el ejecutor manual que
 lo creó y se pierde al terminar el proceso.
 
-El vínculo guarda la huella SHA-256 de la definición aprobada. En cada ejecución:
+El vínculo guarda la generación UUID persistente y la huella SHA-256 de la
+definición aprobada. Cada creación y actualización cambia la generación, incluso
+con datos idénticos. Retirar/recrear y A → B → A invalidan el vínculo antiguo
+sin necesidad de ejecutar entre los cambios. En cada ejecución:
 
 1. Se comprueba que el vínculo sigue vigente, antes de cualquier E/S.
 2. La entrada debe ser un dato JSON (mismas reglas que las definiciones, ahora
    también texto, número, booleano, `null` o array) y ocupar como máximo 64 KiB.
-3. Se vuelve a leer la definición. Si fue retirada (`FUNCTION_NOT_FOUND`) o
-   cambió (`FUNCTION_CHANGED`), el vínculo queda retirado y hace falta otro
-   `bindFunction`, aunque luego se restaure el mismo contenido.
+3. Se vuelven a leer conjuntamente generación y definición. Si fue retirada
+   (`FUNCTION_NOT_FOUND`), cambió la generación o difiere la huella
+   (`FUNCTION_CHANGED`), el vínculo queda retirado y hace falta otro
+   `bindFunction`, aunque luego se restaure el mismo contenido. No basta
+   con que coincida una de las dos comprobaciones.
 4. `validateInput` debe devolver `true`.
 5. `run` recibe entrada y definición como copias congeladas, las capacidades
    de esta invocación y un `AbortSignal`.
@@ -92,6 +97,12 @@ El vínculo guarda la huella SHA-256 de la definición aprobada. En cada ejecuci
 
 La ejecución no escribe en la Base. Cada `runFunction` es una invocación manual
 del anfitrión; un vínculo puede reutilizarse mientras la definición no cambie.
+
+Los registros heredados v1 siguen siendo legibles con el contrato normal
+`{ id, definition }`, pero no tienen identidad suficiente para vincularse.
+`bindFunction` falla con `FUNCTION_GENERATION_REQUIRED` sin escribir en la Base.
+El anfitrión debe actualizar explícitamente la definición (puede conservar sus
+datos) para publicar v2 y luego autorizar un vínculo nuevo.
 
 ## Capacidades y archivos
 
@@ -110,7 +121,7 @@ intento, invalidado si la carpeta se retira.
 
 Propios: `INVALID_FUNCTION_REGISTRY`, `INVALID_EXECUTOR`, `EXECUTOR_NOT_FOUND`,
 `FUNCTION_DEFINITION_REJECTED`, `FUNCTION_NOT_BOUND`, `FUNCTION_NOT_FOUND`,
-`FUNCTION_CHANGED`, `INVALID_FUNCTION_INPUT`, `INVALID_CAPABILITIES`,
+`FUNCTION_CHANGED`, `FUNCTION_GENERATION_REQUIRED`, `INVALID_FUNCTION_INPUT`, `INVALID_CAPABILITIES`,
 `FUNCTION_FAILED`, `FUNCTION_TIMEOUT`, `FUNCTION_RESULT_INVALID` y
 `FUNCTION_RESULT_TOO_LARGE`. Del registro se conservan `INVALID_FUNCTION_ID`,
 `FUNCTION_CORRUPT`, `RECORD_CORRUPT` y `RECORD_LINK`.
@@ -124,9 +135,17 @@ reenviarlo a un agente sin revisarlo.
 - Los ejecutores corren en el proceso del anfitrión: son código de confianza.
   El tiempo máximo rechaza la invocación y activa `signal`, pero no interrumpe
   código síncrono ni deshace efectos ya producidos. Mind no los aísla del sistema.
-- Los vínculos están en memoria. Retirar y volver a crear exactamente la misma
-  definición sin una ejecución intermedia no es detectable sin una generación en
-  el registro; el contenido aprobado sigue siendo idéntico.
+- Los vínculos están en memoria. La generación es persistente y los antiguos
+  no recuperan validez mediante creación/actualización normales. La Base sigue
+  siendo de confianza: restaurar manualmente un registro con su UUID anterior
+  no equivale a crear una versión nueva mediante la API.
+- La revocación se comprueba con el registro releído para cada intento; no hay
+  una transacción entre esa comprobación y el despacho del ejecutor. Si el
+  registro cambia después de la lectura validada, una invocación ya admitida
+  puede comenzar o continuar. Retirar la definición o el vínculo no cancela
+  automáticamente una ejecución en curso, no activa su `AbortSignal` ni revierte
+  efectos. La prueba con barrera dentro de `run` demuestra que puede terminar;
+  los intentos posteriores con el vínculo antiguo se deniegan.
 - El anfitrión debe serializar las mutaciones de un mismo id, como en el registro.
 
 ## Siguiente paso
@@ -145,5 +164,10 @@ con apariencia de código y separación de capacidades y permisos de lectura,
 usando el lector seguro real. Las Bases usan datos ficticios en directorios
 temporales hermanos del repositorio.
 
-`src/functions.js` solo cambia para exportar `copyJson`, de modo que entradas y
-resultados usen las mismas reglas de datos JSON que las definiciones.
+La corrección de generaciones añade pruebas de retirada/recreación idéntica,
+A → B → A sin ejecución intermedia, actualización idéntica, autorización nueva
+de B, verificación de huella independiente de la generación, compatibilidad v1
+y el límite de revocación durante una ejecución. `test/functions.test.js`
+comprueba UUID nuevos, persistencia entre procesos, contrato normal intacto y
+rechazo de registros v2 mal formados. Las pruebas de código como datos y de
+capacidades del anfitrión se conservan sin añadir ejecutores de producción.

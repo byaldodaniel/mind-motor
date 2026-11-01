@@ -128,6 +128,120 @@ test('función inexistente, retirada o modificada no se ejecuta y exige un vínc
   await assert.rejects(runner.runFunction({ binding: renewed, input }), { code: 'FUNCTION_CORRUPT' });
 });
 
+test('retirar y recrear idéntica sin ejecutar entre medias no revive el vínculo anterior', async (t) => {
+  const { base, functions, runner, calls } = await fixture(t);
+  const original = await functions.getFunction('resumen');
+  const binding = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+  const other = createFunctionRegistry(await openMotor({ baseDirectory: base }));
+  await other.retireFunction('resumen');
+  await other.createFunction('resumen', original.definition);
+  assert.deepEqual(await functions.getFunction('resumen'), original);
+  await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_CHANGED' });
+  await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_NOT_BOUND' });
+  assert.equal(calls.length, 0);
+  const renewed = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+  assert.equal((await runner.runFunction({ binding: renewed, input: { text: 'uno' } })).result.count, 1);
+});
+
+for (const change of ['A → B → A', 'actualización idéntica']) {
+  test(`${change} sin ejecución intermedia exige una autorización nueva`, async (t) => {
+    const { base, functions, runner, calls } = await fixture(t);
+    const original = await functions.getFunction('resumen');
+    const binding = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+    const other = createFunctionRegistry(await openMotor({ baseDirectory: base }));
+    if (change === 'A → B → A') {
+      await other.updateFunction('resumen', { parameters: { maxWords: 9 } });
+    }
+    await other.updateFunction('resumen', original.definition);
+    assert.deepEqual(await functions.getFunction('resumen'), original);
+    await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_CHANGED' });
+    await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_NOT_BOUND' });
+    assert.equal(calls.length, 0);
+    const renewed = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+    assert.equal((await runner.runFunction({ binding: renewed, input: { text: 'uno dos' } })).result.count, 2);
+  });
+}
+
+test('la huella sigue comprobándose aunque un registro conserve su generación', async (t) => {
+  const { base, runner, calls } = await fixture(t);
+  const filename = path.join(base, 'function-definition-resumen.json');
+  const original = await readFile(filename, 'utf8');
+  const binding = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+  const changed = JSON.parse(original);
+  changed.definition.parameters.maxWords = 99;
+  await writeFile(filename, JSON.stringify(changed));
+  await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_CHANGED' });
+  await writeFile(filename, original);
+  await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_NOT_BOUND' });
+  assert.equal(calls.length, 0);
+});
+
+test('la definición B actualizada se puede autorizar de nuevo y ejecuta sus datos actuales', async (t) => {
+  const { functions, runner } = await fixture(t);
+  const old = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+  await functions.updateFunction('resumen', { parameters: { maxWords: 1 } });
+  await assert.rejects(runner.runFunction({ binding: old, input: { text: 'uno dos' } }), { code: 'FUNCTION_CHANGED' });
+  const binding = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+  assert.deepEqual((await runner.runFunction({ binding, input: { text: 'uno dos' } })).result,
+    { count: 2, first: ['uno'], truncated: true });
+});
+
+test('v1 permanece legible, no se vincula hasta actualizar y un descenso a v1 revoca el vínculo', async (t) => {
+  const { base, functions, runner, calls } = await fixture(t);
+  const filename = path.join(base, 'function-definition-resumen.json');
+  const { generation, ...legacy } = JSON.parse(await readFile(filename, 'utf8'));
+  legacy.version = 1;
+  const text = JSON.stringify(legacy);
+  await writeFile(filename, text);
+  assert.deepEqual(await functions.getFunction('resumen'), { id: 'resumen', definition: legacy.definition });
+  await assert.rejects(runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' }),
+    { code: 'FUNCTION_GENERATION_REQUIRED' });
+  assert.equal(await readFile(filename, 'utf8'), text, 'Vincular no migra ni escribe el registro');
+  await functions.updateFunction('resumen', legacy.definition);
+  assert.notEqual(JSON.parse(await readFile(filename, 'utf8')).generation, generation);
+  const binding = await runner.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+  assert.equal((await runner.runFunction({ binding, input: { text: 'uno' } })).result.count, 1);
+  await writeFile(filename, text);
+  await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_CHANGED' });
+  await functions.updateFunction('resumen', legacy.definition);
+  await assert.rejects(runner.runFunction({ binding, input: { text: 'uno' } }), { code: 'FUNCTION_NOT_BOUND' });
+  assert.equal(calls.length, 1);
+});
+
+test('retirar durante una ejecución ya iniciada no la cancela; impide nuevos intentos con ese vínculo', async (t) => {
+  let started;
+  let release;
+  let signal;
+  const entered = new Promise((resolve) => { started = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const { functions, runner } = await fixture(t, {
+    pausa: {
+      validateInput: () => true,
+      async run(context) {
+        signal = context.signal;
+        started();
+        await held;
+        return 'ejecución ficticia terminada';
+      },
+    },
+  });
+  const original = await functions.getFunction('resumen');
+  const binding = await runner.bindFunction({ functionId: 'resumen', executor: 'pausa' });
+  const running = runner.runFunction({ binding });
+  try {
+    await entered;
+    await functions.retireFunction('resumen');
+    await functions.createFunction('resumen', original.definition);
+    await assert.rejects(runner.runFunction({ binding }), { code: 'FUNCTION_CHANGED' });
+    assert.equal(signal.aborted, false, 'Retirar la definición no activa la señal de una ejecución en curso');
+  } finally {
+    release();
+    await running;
+  }
+  assert.equal((await running).result, 'ejecución ficticia terminada');
+  await assert.rejects(runner.runFunction({ binding }), { code: 'FUNCTION_NOT_BOUND' });
+});
+
 test('errores, tiempo excedido y resultados no válidos se informan con códigos estables', async (t) => {
   let signal;
   const fail = (value) => ({ validateInput: () => true, run: () => value });

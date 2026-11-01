@@ -1,4 +1,5 @@
 import { readdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { readJson, writeJson, removeJson } from './storage.js';
@@ -6,6 +7,7 @@ import { readJson, writeJson, removeJson } from './storage.js';
 const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const PREFIX = 'function-definition-';
 const FILENAME = /^function-definition-([a-z0-9][a-z0-9_-]{0,63})\.json$/;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 function validateId(id) {
   if (typeof id !== 'string' || VALID_ID.exec(id)?.[0] !== id) {
@@ -70,16 +72,20 @@ export function createFunctionRegistry(motor) {
     if (stored === null) return null;
     const data = stored.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)
-        || Object.keys(data).length !== 4 || data.format !== 'mind-function-definition'
-        || data.version !== 1 || data.id !== id || !Object.hasOwn(data, 'definition')) {
+        || !((data.version === 1 && Object.keys(data).length === 4)
+          || (data.version === 2 && Object.keys(data).length === 5
+            && typeof data.generation === 'string' && data.generation.length === 36 && UUID.test(data.generation)))
+        || data.format !== 'mind-function-definition'
+        || data.id !== id || !Object.hasOwn(data, 'definition')) {
       throw new MotorError('FUNCTION_CORRUPT', 'El registro de función no tiene el formato esperado.');
     }
-    return { id, definition: validateDefinition(data.definition, 'FUNCTION_CORRUPT') };
+    return { id, definition: validateDefinition(data.definition, 'FUNCTION_CORRUPT'),
+      generation: data.version === 2 ? data.generation : null };
   }
 
   async function save(id, definition) {
     await writeJson(filename(id), {
-      format: 'mind-function-definition', version: 1, id, definition,
+      format: 'mind-function-definition', version: 2, id, definition, generation: randomUUID(),
     });
     return { id, definition };
   }
@@ -95,7 +101,14 @@ export function createFunctionRegistry(motor) {
       return save(id, copied);
     },
 
-    getFunction: load,
+    async getFunction(id) {
+      const record = await load(id);
+      return record ? { id: record.id, definition: record.definition } : null;
+    },
+
+    // Solo consumo interno del ejecutor: definición e identidad de una misma lectura.
+    // Los v1 se pueden consultar, pero requieren actualización explícita antes de vincular.
+    getFunctionVersion: load,
 
     /** Orden por id; una corrupción produce un error, nunca una lista parcial. */
     async listFunctions() {
@@ -105,7 +118,7 @@ export function createFunctionRegistry(motor) {
         const match = FILENAME.exec(entry);
         if (!match) throw new MotorError('FUNCTION_CORRUPT', 'Nombre de registro de función no válido.');
         const record = await load(match[1]);
-        if (record) result.push(record);
+        if (record) result.push({ id: record.id, definition: record.definition });
       }
       return result;
     },
