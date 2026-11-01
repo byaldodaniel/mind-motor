@@ -11,6 +11,8 @@ import { createRemovalLog } from './removals.js';
 import { SESSION_EXTENSIONS } from './session-extensions.js';
 
 const SYNC_INTERVAL_MS = 30_000;
+/** Recorridos iniciales simultáneos: con muchas carpetas, el inicio no satura el equipo. */
+const INITIAL_SCANS = 2;
 const SESSIONS_DIRECTORY = 'sesiones';
 
 /** Registro de auditoría local: decisiones de acceso y operaciones sobre originales, sin contenido. */
@@ -114,6 +116,20 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     }
   }
 
+  // Semáforo sencillo para los recorridos iniciales.
+  let activeScans = 0;
+  const waitingScans = [];
+  async function scanSlot(task) {
+    if (activeScans >= INITIAL_SCANS) await new Promise((resolve) => waitingScans.push(resolve));
+    activeScans += 1;
+    try {
+      return await task();
+    } finally {
+      activeScans -= 1;
+      waitingScans.shift()?.();
+    }
+  }
+
   function begin(folderId) {
     const state = track(folderId);
     if (state.ready) return state.ready;
@@ -123,8 +139,8 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       return state.ready;
     }
     // El índice anterior permite describir lo que desapareció mientras Mind estuvo cerrado.
-    state.ready = indexedEntries(folderId).then((entries) => {
-      state.entries ??= entries;
+    state.ready = scanSlot(async () => {
+      state.entries ??= await indexedEntries(folderId);
       return observer.observe(folderId);
     }).then((status) => {
       state.lastError = null;

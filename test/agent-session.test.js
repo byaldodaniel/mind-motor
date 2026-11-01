@@ -358,3 +358,25 @@ test('eliminados: rastro de solo metadatos y referencias de continuidad marcadas
   assert.equal((await call('eliminados')).data.total, 0);
   assert.equal((await call('continuidad_consultar', { texto: 'presupuesto' })).data.registros[0].referencias[0].estado, 'existe');
 });
+
+test('con varias carpetas, la observación inicial las indexa todas respetando el límite de recorridos simultáneos', async (t) => {
+  const { root, open, agent } = await fixture(t, { observe: true });
+  const session = await open();
+  const ids = [];
+  for (let number = 1; number <= 5; number += 1) {
+    const folder = path.join(root, `Carpeta ficticia ${number}`);
+    await fs.mkdir(folder);
+    await fs.writeFile(path.join(folder, `nota-${number}.txt`), `Nota ficticia ${number}\n`);
+    const scope = await session.motor.authorizeFolder(folder);
+    await session.policy.set(scope.id, ['encontrar'], { channel: 'administracion-local' });
+    ids.push(scope.id);
+  }
+  await session.sync();
+  const results = await Promise.all(ids.map((id) => session.ensureIndex(id)));
+  assert.ok(results.every((result) => ['current', 'reconciled'].includes(result.status)), JSON.stringify(results));
+  const call = agent(session, connection());
+  const found = await call('buscar', { consulta: 'nota-' });
+  assert.equal(found.data.total, 5);
+  const status = await call('estado');
+  assert.equal(status.data.mind.runtime.node, process.execPath);
+});

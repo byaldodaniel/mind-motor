@@ -377,7 +377,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const continuity = await policy.getContinuity();
       const pending = await session.requests.list();
       return {
-        mind: { motor: session.motorVersion, base: motor.baseDirectory, producto: session.layout.product },
+        mind: {
+          motor: session.motorVersion, base: motor.baseDirectory, producto: session.layout.product,
+          runtime: { node: process.execPath, python: session.layout.pythonExecutable },
+        },
         sesion: { observacion: session.observing() ? 'activa' : 'bajo-demanda', cliente: source },
         consentimiento: consent.channel() === 'formulario-del-cliente'
           ? 'Tu cliente muestra formularios de autorización al usuario.'
