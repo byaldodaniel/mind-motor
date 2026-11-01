@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
+import { createContinuity } from './continuity.js';
+import { createContinuityAccess } from './continuity-access.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
 import { createTextCreator } from './text-creator.js';
@@ -13,6 +15,7 @@ import { createIndexSearch } from './search.js';
 
 export { MotorError } from './errors.js';
 export { textVersion } from './text-modifier.js';
+export { parseContinuityExport, formatContinuityMarkdown } from './continuity.js';
 
 const MOTOR_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
 const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -34,6 +37,18 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(folderId: string) => Promise<import('./indexer.js').IndexResult>} indexFolder Solo administración local.
  * @property {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} readFolderIndex Solo administración local.
  * @property {(request: import('./search.js').SearchRequest) => Promise<object>} searchFiles Solo anfitrión, sobre ámbitos que él autoriza.
+ * @property {(request: {content: unknown, kind?: string, source?: string, references?: object[]}) => Promise<import('./continuity.js').ContinuityEntry>} recordContinuity Solo anfitrión administrativo.
+ * @property {(id: string) => Promise<import('./continuity.js').ContinuityEntry | null>} getContinuity Solo anfitrión administrativo.
+ * @property {(id: string, changes: object, options?: {expectedRevision?: number}) => Promise<import('./continuity.js').ContinuityEntry>} updateContinuity Solo anfitrión administrativo.
+ * @property {(id: string, references: object[], options?: {expectedRevision?: number}) => Promise<import('./continuity.js').ContinuityEntry>} relateContinuity Solo anfitrión administrativo.
+ * @property {(id: string, options?: {expectedRevision?: number}) => Promise<boolean>} retireContinuity Solo anfitrión administrativo.
+ * @property {() => Promise<string[]>} listContinuityIds Solo anfitrión administrativo.
+ * @property {(request: {ids: string[], includeReferenced?: boolean}) => Promise<object>} exportContinuity Solo anfitrión administrativo.
+ * @property {(input: string | object) => Promise<{imported: string[], unchanged: string[]}>} importContinuity Solo anfitrión administrativo.
+ * @property {(request: {requester: object, ids?: string[], includeReferenced?: boolean, allowRecord?: boolean, source?: string | null}) => Promise<object>} grantContinuityAccess Solo anfitrión administrativo.
+ * @property {(authorization: object) => {ids: string[], allowRecord: boolean, source: string | null, revoked: boolean} | null} describeContinuityAccess Solo anfitrión administrativo.
+ * @property {(authorization: object) => boolean} revokeContinuityAccess Solo anfitrión administrativo.
+ * @property {(request: {requester: object, authorization: object}) => {readContext: Function, recordResult: Function}} bindContinuityAgent Vista que el anfitrión entrega al agente.
  * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextCreate Solo anfitrión administrativo.
  * @property {(authorization: object) => boolean} revokeTextCreate Solo antes del intento.
  * @property {(request: {requester: object, authorization: object, content: string}) => Promise<CreatedTextFile>} createTextFile
@@ -99,6 +114,9 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
   }
 
   const { loadAuthorizedFolder, ...folders } = createFolderRegistry(base, motor);
+  // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
+  const continuity = createContinuity({ baseDirectory: base });
+  const continuityAccess = createContinuityAccess(continuity);
   const indexer = createFolderIndexer({
     baseDirectory: base,
     pythonExecutable,
@@ -117,6 +135,20 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
     indexFolder: indexer.indexFolder,
     readFolderIndex: indexer.readFolderIndex,
     ...createIndexSearch({ readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder }),
+    // Continuidad: administración del anfitrión. El agente recibe solo la vista
+    // { readContext, recordResult } de bindContinuityAgent, nunca estas operaciones.
+    recordContinuity: continuity.recordContinuity,
+    getContinuity: continuity.getContinuity,
+    updateContinuity: continuity.updateContinuity,
+    relateContinuity: continuity.relateContinuity,
+    retireContinuity: continuity.retireContinuity,
+    listContinuityIds: continuity.listContinuityIds,
+    exportContinuity: continuity.exportContinuity,
+    importContinuity: continuity.importContinuity,
+    grantContinuityAccess: continuityAccess.grantContinuityAccess,
+    describeContinuityAccess: continuityAccess.describeContinuityAccess,
+    revokeContinuityAccess: continuityAccess.revokeContinuityAccess,
+    bindContinuityAgent: continuityAccess.bindContinuityAgent,
     grantTextCreate: creator.grantTextCreate,
     revokeTextCreate: creator.revokeTextCreate,
 

@@ -7,6 +7,11 @@ recibe después solo si su anfitrión los selecciona. Rama
 `funcion-05-continuidad-agentes`, creada desde `main` `36f2b52` en un clon
 independiente. Se entrega mediante PR sin fusionar.
 
+> Integración posterior: `openMotor` expone ahora estas operaciones de
+> anfitrión (`grantContinuityAccess`, `describeContinuityAccess`,
+> `revokeContinuityAccess`, `bindContinuityAgent`) sobre su propia Base; véase
+> [INTERFACES.md](INTERFACES.md). El resto de este documento describe la PR #11.
+
 ## Qué se implementó
 
 - `src/continuity-access.js`: `createContinuityAccess(continuity)`. Recibe el

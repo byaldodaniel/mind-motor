@@ -182,6 +182,35 @@ movimiento ni eliminación. Detalles en
 [docs/FUNCION_03_MODIFICAR.md](docs/FUNCION_03_MODIFICAR.md) y
 [docs/INTERFACES.md](docs/INTERFACES.md).
 
+## Continuidad entre agentes — Función 05
+
+El Motor conserva en la Base información útil de un trabajo (instrucciones,
+decisiones, resultados, referencias…) y permite que otro agente la recupere para
+continuarlo, solo con autorización del anfitrión:
+
+```js
+// Anfitrión: selecciona qué contexto recibe el agente y si puede registrar.
+const permiso = await motor.grantContinuityAccess({
+  requester: agente, ids: [idResultado], includeReferenced: true, allowRecord: true, source: 'Anfitrión B',
+});
+const vista = motor.bindContinuityAgent({ requester: agente, authorization: permiso });
+// Agente: solo recibe la vista { readContext, recordResult }.
+const contexto = await vista.readContext({ format: 'markdown' }); // json | markdown | object
+await vista.recordResult({ kind: 'resultado', content: '…', references: [{ entry: idResultado }] });
+motor.revokeContinuityAccess(permiso);
+```
+
+La administración (`recordContinuity`, `getContinuity`, `updateContinuity`,
+`relateContinuity`, `retireContinuity`, `listContinuityIds`, `exportContinuity`,
+`importContinuity`, conceder, describir y retirar accesos) es del anfitrión. El
+agente no lista la Base ni ve registros fuera de su selección. Los permisos se ligan
+a la identidad de objeto del agente y a esta instancia del Motor; los registros
+persisten entre procesos y el contenido es flexible, sin proyectos obligatorios.
+No se copian originales ni se accede a historiales de otras plataformas. Detalles
+en [docs/CONTINUIDAD.md](docs/CONTINUIDAD.md),
+[docs/CONTINUIDAD_AGENTES.md](docs/CONTINUIDAD_AGENTES.md) y
+[docs/INTERFACES.md](docs/INTERFACES.md).
+
 ## Uso selectivo
 
 Mind es opcional. Los agentes pueden usarlo cuando aporte valor y acudir
@@ -210,8 +239,9 @@ contenido. Detalles en [docs/INCREMENTO_09.md](docs/INCREMENTO_09.md).
 
 La indexación, la consulta del índice y la búsqueda son administrativas; registrar una carpeta
 no concede estas operaciones a un agente. No se añaden comandos CLI ni permisos
-paralelos. Continuidad y definiciones de funciones están integradas en el código
-como módulos internos, sin métodos públicos en Motor ni ejecución de funciones.
+paralelos. Las definiciones de funciones están integradas en el código como módulo
+interno, sin métodos públicos en Motor ni ejecución de funciones; la continuidad
+tiene su propia sección.
 Detalles en [docs/INTEGRACION_MODULOS.md](docs/INTEGRACION_MODULOS.md).
 
 ## Pruebas
@@ -234,9 +264,9 @@ la misma suite en Windows, macOS y Linux con Node.js 24 y Python 3.12.
 
 La API programática y los límites para extender el núcleo están documentados en
 [docs/INTERFACES.md](docs/INTERFACES.md). Hay lectura, creación y modificación de
-texto con permiso explícito, indexación y búsqueda administrativas, y núcleos
-internos de continuidad y definiciones de funciones. Todavía no hay integración de
-agentes, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
+texto con permiso explícito, indexación y búsqueda administrativas, continuidad
+entre agentes con acceso controlado y el núcleo interno de definiciones de
+funciones. Todavía no hay conexión con agentes externos, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
 actuales son datos técnicos de prueba, no una estructura obligatoria para organizar
 la información del usuario.
 

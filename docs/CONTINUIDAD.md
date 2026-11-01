@@ -2,8 +2,10 @@
 
 Primer núcleo de *Dar continuidad entre agentes y herramientas*. Conserva en la
 Base información útil de un trabajo y la devuelve después a otra conversación,
-agente o aplicación. Es un módulo independiente (`src/continuity.js`): todavía no
-está expuesto en `motor.js` ni en la CLI, y no decide quién puede llamarlo.
+agente o aplicación. El núcleo es `src/continuity.js`; `openMotor` expone sus
+operaciones como administración del anfitrión y el acceso de agentes se controla
+con [CONTINUIDAD_AGENTES.md](CONTINUIDAD_AGENTES.md) (véase
+[INTERFACES.md](INTERFACES.md)). No está en la CLI.
 
 ```js
 import { openMotor } from 'mind-motor';
