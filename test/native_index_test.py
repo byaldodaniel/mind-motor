@@ -112,6 +112,9 @@ class ScanTest(unittest.TestCase):
             # FILE_DIRECTORY_FILE y FILE_OPEN_REPARSE_POINT en cada apertura.
             self.assertTrue(options and all(value & 0x200001 == 0x200001 for value in options))
         else:
+            # El backend se crea antes de sustituir os.open: con una función que no
+            # admite dir_fd, el recorrido se deniega (SAFE_SCAN_UNAVAILABLE).
+            real = backend()
             flags = []
             original = os.open
 
@@ -120,7 +123,7 @@ class ScanTest(unittest.TestCase):
                 return original(path, flag, *args, **kwargs)
 
             with mock.patch.object(native.os, 'open', recording):
-                self.scan()
+                self.scan(using=real)
             self.assertTrue(flags and all(flag & os.O_DIRECTORY and flag & os.O_NOFOLLOW for flag in flags))
 
     def test_root_replaced_after_acquisition_keeps_scanning_held_directory(self):
