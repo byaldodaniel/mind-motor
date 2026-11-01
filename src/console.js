@@ -1,0 +1,177 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import readline from 'node:readline/promises';
+import { MotorError } from './errors.js';
+import { ACCESS_LEVELS, CONTINUITY_LEVELS, normalizeAccess, describeAccess } from './access-policy.js';
+import { ACCESS_LABELS, CONTINUITY_ACCESS_LABELS, validateCandidateFolder, untrustedText } from './consent.js';
+import { liveSessions } from './session.js';
+
+/**
+ * Consola de Mind para el usuario: aprobar solicitudes, autorizar carpetas,
+ * revisar y retirar permisos, y reparar la Base. Exige un terminal interactivo:
+ * es el canal de consentimiento para clientes que no muestran formularios.
+ *
+ * Límite: un programa con los permisos del usuario puede simular un terminal.
+ * Este canal evita autorizaciones accidentales o inducidas a través de Mind,
+ * pero no aísla frente a un agente con acceso libre al sistema.
+ */
+
+export function requireInteractive(stdin = process.stdin, stdout = process.stdout) {
+  if (!stdin.isTTY || !stdout.isTTY) {
+    throw new MotorError('CONSOLE_REQUIRED', 'Esta orden la ejecuta el usuario en un terminal interactivo (por ejemplo, con doble clic en "Autorizar Mind").');
+  }
+}
+
+export function createPrompter({ input = process.stdin, output = process.stdout } = {}) {
+  const rl = readline.createInterface({ input, output, terminal: Boolean(output.isTTY) });
+  return {
+    write: (line = '') => output.write(`${line}\n`),
+    async ask(question) {
+      return (await rl.question(question)).trim();
+    },
+    async yes(question, fallback = false) {
+      const answer = (await rl.question(`${question} ${fallback ? '[S/n]' : '[s/N]'} `)).trim().toLowerCase();
+      if (answer === '') return fallback;
+      return ['s', 'si', 'sí', 'y', 'yes'].includes(answer);
+    },
+    close: () => rl.close(),
+  };
+}
+
+async function chooseLevels(prompt, requested) {
+  const access = normalizeAccess([]);
+  access.encontrar = true;
+  for (const level of ACCESS_LEVELS.filter((item) => item !== 'encontrar' && requested.includes(item))) {
+    access[level] = await prompt.yes(`  ¿Permitir: ${ACCESS_LABELS[level].toLowerCase()}?`, false);
+  }
+  return access;
+}
+
+/** Aprueba o rechaza las solicitudes pendientes y, opcionalmente, autoriza una carpeta indicada. */
+export async function authorizeConsole({ session, prompt, folderPath = null, requested = null }) {
+  const { motor, policy, requests } = session;
+  let changes = 0;
+  if (folderPath !== null) {
+    const canonical = await validateCandidateFolder(folderPath, {
+      protectedDirectories: session.layout.protectedDirectories,
+      baseDirectory: motor.baseDirectory,
+      motorDirectory: session.layout.motorDirectory,
+    });
+    prompt.write(`Carpeta: ${canonical}`);
+    if (await prompt.yes('¿Autorizar esta carpeta para los agentes que usen Mind?', false)) {
+      const access = await chooseLevels(prompt, requested ?? ['leer', 'escribir', 'organizar']);
+      const folder = await motor.authorizeFolder(canonical);
+      await policy.set(folder.id, access, { channel: 'consola' });
+      await session.audit('carpeta-autorizada', { carpeta: folder.id, ruta: folder.path, permisos: describeAccess(access), canal: 'consola' });
+      prompt.write(`Autorizada con permisos: ${describeAccess(access).join(', ')}.`);
+      changes += 1;
+    }
+  }
+  const pending = await requests.list();
+  if (pending.length === 0 && folderPath === null) prompt.write('No hay solicitudes pendientes.');
+  for (const request of pending) {
+    prompt.write('');
+    prompt.write(`Solicitud de ${untrustedText(request.client, 120) || 'un agente'} (${request.createdAt})`);
+    if (request.reason) prompt.write(`Motivo indicado por el agente (no verificado): «${untrustedText(request.reason)}»`);
+    if (request.kind === 'carpeta') {
+      prompt.write(`Carpeta: ${request.path}`);
+      prompt.write(`Permisos solicitados: ${request.requested.join(', ')}`);
+      let canonical;
+      try {
+        canonical = await validateCandidateFolder(request.path, {
+          protectedDirectories: session.layout.protectedDirectories,
+          baseDirectory: motor.baseDirectory,
+          motorDirectory: session.layout.motorDirectory,
+        });
+      } catch (error) {
+        prompt.write(`No se puede autorizar: ${error.message}`);
+        await requests.remove(request.id);
+        continue;
+      }
+      if (await prompt.yes('¿Autorizar?', false)) {
+        const access = await chooseLevels(prompt, request.requested);
+        const folder = await motor.authorizeFolder(canonical);
+        const previous = (await policy.get(folder.id))?.access ?? {};
+        for (const level of ACCESS_LEVELS) access[level] ||= previous[level] === true;
+        await policy.set(folder.id, access, { channel: 'consola' });
+        await session.audit('carpeta-autorizada', { carpeta: folder.id, ruta: folder.path, permisos: describeAccess(access), canal: 'consola', cliente: request.client });
+        prompt.write(`Autorizada con permisos: ${describeAccess(access).join(', ')}.`);
+        changes += 1;
+      } else {
+        prompt.write('Rechazada.');
+      }
+    } else {
+      prompt.write(`Continuidad: ${request.requested.join(', ')}`);
+      if (await prompt.yes('¿Autorizar?', false)) {
+        const current = await policy.getContinuity();
+        const access = { leer: current.leer, registrar: current.registrar };
+        for (const level of CONTINUITY_LEVELS.filter((item) => request.requested.includes(item))) {
+          access[level] = await prompt.yes(`  ¿Permitir: ${CONTINUITY_ACCESS_LABELS[level].toLowerCase()}?`, false) || access[level];
+        }
+        await policy.setContinuity(describeAccess(access, CONTINUITY_LEVELS), { channel: 'consola' });
+        await session.audit('continuidad-autorizada', { permisos: describeAccess(access, CONTINUITY_LEVELS), canal: 'consola', cliente: request.client });
+        prompt.write(`Continuidad: ${describeAccess(access, CONTINUITY_LEVELS).join(', ') || 'sin permisos'}.`);
+        changes += 1;
+      } else {
+        prompt.write('Rechazada.');
+      }
+    }
+    await requests.remove(request.id);
+  }
+  return changes;
+}
+
+/** Lista y retira permisos. */
+export async function permissionsConsole({ session, prompt, revoke = null }) {
+  const { motor, policy } = session;
+  const folders = await motor.listAuthorizedFolders();
+  if (revoke !== null) {
+    const folder = folders.find((item) => item.id === revoke || item.path === path.normalize(revoke));
+    if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'Esa carpeta no está autorizada.');
+    if (!(await prompt.yes(`¿Retirar ${folder.path} de Mind? Se elimina su índice; los originales no se tocan.`, false))) return 0;
+    await motor.revokeFolder(folder.id);
+    await policy.remove(folder.id);
+    await session.audit('carpeta-retirada', { carpeta: folder.id, ruta: folder.path, canal: 'consola' });
+    prompt.write('Retirada.');
+    return 1;
+  }
+  if (folders.length === 0) prompt.write('No hay carpetas autorizadas.');
+  for (const folder of folders) {
+    const decision = await policy.get(folder.id);
+    prompt.write(`${folder.path}`);
+    prompt.write(`  id: ${folder.id}`);
+    prompt.write(`  permisos: ${decision ? describeAccess(decision.access).join(', ') : 'ninguno para agentes'}`);
+  }
+  const continuity = await policy.getContinuity();
+  prompt.write(`Continuidad: ${describeAccess(continuity, CONTINUITY_LEVELS).join(', ') || 'sin permisos'}`);
+  return 0;
+}
+
+/**
+ * Recuperación guiada de la Base tras un cierre abrupto. Sigue el procedimiento
+ * documentado en docs/CONCURRENCIA_INDICES.md: solo actúa si ninguna sesión de
+ * Mind sigue viva y el usuario confirma que cerró todos sus agentes.
+ */
+export async function repairConsole({ session, prompt }) {
+  const base = session.motor.baseDirectory;
+  const { live, stale } = await liveSessions(base);
+  const others = live.filter((item) => item.id !== session.id);
+  if (others.length > 0) {
+    prompt.write(`Hay ${others.length} sesión(es) de Mind activas (agentes abiertos). Ciérralas y vuelve a intentarlo.`);
+    return 0;
+  }
+  const entries = await fs.readdir(base);
+  const locks = entries.filter((entry) => /^folder-index-[a-f0-9]{64}\.lock$/.test(entry));
+  const temporaries = entries.filter((entry) => /^\.mind-[A-Za-z0-9-]+\.tmp$/.test(entry));
+  if (locks.length + temporaries.length + stale.length === 0) {
+    prompt.write('La Base no tiene bloqueos ni temporales abandonados.');
+    return 0;
+  }
+  prompt.write(`Bloqueos de índice: ${locks.length}; temporales: ${temporaries.length}; sesiones cerradas sin limpiar: ${stale.length}.`);
+  if (!(await prompt.yes('¿Confirmas que cerraste todos los agentes y programas que usan esta Base?', false))) return 0;
+  for (const entry of [...locks, ...temporaries]) await fs.rm(path.join(base, entry), { force: true });
+  for (const item of stale) await fs.rm(path.join(base, 'sesiones', item.file), { force: true });
+  await session.audit('base-reparada', { bloqueos: locks.length, temporales: temporaries.length, sesiones: stale.length, canal: 'consola' });
+  prompt.write('Listo. Los índices afectados se reconcilian en la próxima sesión.');
+  return locks.length + temporaries.length + stale.length;
+}
