@@ -276,17 +276,20 @@ sustituido, borrado o cambiado entretanto, también da `VERSION_CONFLICT`.
 
 ### Límites de concurrencia
 
-- Windows: mientras dura la operación el archivo se mantiene abierto sin compartir
-  escritura, así que nadie puede cambiar su contenido. Si otro programa ya lo tenía
-  abierto para escribir, falla con `FILE_IN_USE`. Sí se permite renombrarlo o
-  borrarlo, lo que se detecta salvo en la ventana final.
-- POSIX: no hay bloqueos obligatorios. Un cambio ajeno anterior a la última
-  comprobación (inode, tamaño, mtime y ctime) se detecta.
-- En ambos queda una ventana de microsegundos entre esa última comprobación y el
-  rename atómico en la que un cambio ajeno simultáneo podría perderse. Si eso deja
-  un resultado que no se puede confirmar, la operación devuelve `MODIFY_UNCONFIRMED`.
+- Windows: el original se abre solicitando FILE_WRITE_DATA y sin compartir
+  escritura. Otro modificador de Mind no puede abrirlo mientras ese handle
+  permanece activo: `FILE_IN_USE`. Sí se permite renombrarlo o borrarlo, lo que
+  se detecta salvo en la ventana final.
+- macOS/Linux: `fcntl.flock(LOCK_EX | LOCK_NB)` excluye a otros modificadores
+  cooperativos desde la apertura hasta cerrar el descriptor. Un bloqueo ocupado
+  da `FILE_IN_USE`. Tras adquirirlo se verifica la identidad asociada al nombre;
+  un descriptor del inode sustituido no puede publicar sobre la nueva versión.
+- Se mantienen las comprobaciones finales de identidad y versión. No constituyen
+  un compare-and-swap con el rename frente a programas externos que no respeten
+  los bloqueos consultivos POSIX o que renombren/borran por otros mecanismos.
+  Si no se puede confirmar qué archivo se sustituyó: `MODIFY_UNCONFIRMED`.
 - Dos agentes con la misma versión: se publica uno y el otro recibe
-  `VERSION_CONFLICT` (o `FILE_IN_USE` en Windows si coinciden en la apertura).
+  `FILE_IN_USE` durante la exclusión o `VERSION_CONFLICT` si ya se publicó el cambio.
 - No hay transacciones ni bloqueo entre procesos para el índice. Una publicación
   concurrente del índice da `INDEX_CONFLICT` y pide reconciliación.
 

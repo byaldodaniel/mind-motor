@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openMotor } from '../src/motor.js';
@@ -185,6 +187,54 @@ test('modificaciones concurrentes sobre la misma versión: solo una se publica',
   }
   assert.equal(await fs.readFile(file(), 'utf8'), `versión ${results.indexOf(published[0])}`);
   assert.deepEqual(await fs.readdir(folder), ['nota.txt']);
+});
+
+test('FILE_IN_USE entre procesos consume el permiso sin perder su vínculo de identidad', async (t) => {
+  const { folder, modifier, requester, grant, file } = await fixture(t);
+  await fs.writeFile(file(), 'original');
+  const worker = fileURLToPath(new URL('./fixtures/modifier_process.py', import.meta.url));
+  const holder = spawn(pythonExecutable, ['-I', '-B', worker, 'prepared'], {
+    stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+  });
+  let output = '';
+  holder.stdout.on('data', (chunk) => { output += chunk; });
+  const closed = new Promise((resolve, reject) => {
+    holder.once('close', resolve);
+    holder.once('error', reject);
+  });
+  const lines = createInterface({ input: holder.stderr });
+  const prepared = once(lines, 'line', { signal: AbortSignal.timeout(10_000) });
+  // El canal se mantiene abierto hasta liberar la barrera.
+  try {
+    holder.stdin.write(JSON.stringify({
+      root: folder, relativePath: 'nota.txt', expected: digest('original'),
+      content: Buffer.from('primero').toString('base64'),
+    }) + '\n');
+    const barrier = JSON.parse((await prepared)[0]);
+    assert.equal(barrier.phase, 'prepared');
+    assert.equal(barrier.pid, holder.pid);
+    const authorization = await grant();
+    const request = { requester, authorization, expectedVersion: textVersion('original'), content: 'segundo' };
+    await assert.rejects(modifier.modifyTextFile({ ...request, requester: {} }), { code: 'MODIFY_NOT_AUTHORIZED' });
+    await assert.rejects(modifier.modifyTextFile(request), { code: 'FILE_IN_USE' });
+    await assert.rejects(modifier.modifyTextFile(request), { code: 'MODIFY_NOT_AUTHORIZED' });
+    holder.stdin.end('go\n');
+    assert.equal(await closed, 0);
+    assert.equal(JSON.parse(output).ok, true);
+    assert.equal(await fs.readFile(file(), 'utf8'), 'primero');
+    await assert.rejects(modifier.modifyTextFile(request), { code: 'MODIFY_NOT_AUTHORIZED' });
+    await assert.rejects(modifier.modifyTextFile({ ...request, authorization: await grant() }), { code: 'VERSION_CONFLICT' });
+    const updated = await modifier.modifyTextFile({
+      ...request, authorization: await grant(), expectedVersion: textVersion('primero'),
+    });
+    assert.equal(updated.version, textVersion('segundo'));
+    assert.equal(await fs.readFile(file(), 'utf8'), 'segundo');
+    assert.deepEqual(await fs.readdir(folder), ['nota.txt']);
+  } finally {
+    if (holder.exitCode === null) holder.kill();
+    await closed;
+    lines.close();
+  }
 });
 
 test('revocar el permiso o la carpeta lo impide; registrar de nuevo no lo reactiva', async (t) => {
