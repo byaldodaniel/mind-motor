@@ -36,8 +36,11 @@ servidor del proyecto en su cliente. No intentes iniciarlo ni configurarlo tú.
 5. `leer` devuelve el contenido y su versión. Para cambios puntuales usa
    `editar`; para sustituir todo el contenido, `modificar` con esa versión. Si el
    archivo cambió entretanto, Mind no escribe (`VERSION_CONFLICT`): vuelve a leer.
-   `crear` nunca sobrescribe.
-6. Registra decisiones, resultados y contexto útiles con `continuidad_registrar`
+   `crear` nunca sobrescribe. `leer` también extrae, solo para leer, el texto de
+   documentos de oficina (.docx, .xlsx, .pptx, .odt, .ods, .odp).
+6. Si algo ya no aparece, `eliminados` muestra lo que desapareció en los últimos
+   30 días (solo metadatos; Mind no guarda copias).
+7. Registra decisiones, resultados y contexto útiles con `continuidad_registrar`
    y recupera trabajos anteriores con `continuidad_consultar`.
 
 ## Reglas

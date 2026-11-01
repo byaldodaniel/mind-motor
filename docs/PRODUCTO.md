@@ -72,7 +72,7 @@ mediante Mind.
 | `buscar` | encontrar | Por nombre o ruta, con filtros de tipo, extensión, subcarpeta, tamaño y fecha, sobre el índice |
 | `explorar` | encontrar | Contenido de una carpeta o subcarpeta desde el índice |
 | `eliminados` | encontrar | Lo que desapareció en los últimos 30 días (solo metadatos) |
-| `leer` | leer | Texto UTF-8 de hasta 1 MiB, con su versión |
+| `leer` | leer | Texto UTF-8 de hasta 1 MiB, con su versión; texto de .docx, .xlsx, .pptx, .odt, .ods y .odp (solo lectura) |
 | `crear` | escribir | Archivo nuevo; nunca sobrescribe |
 | `modificar` | escribir | Sustituye el contenido si la versión coincide |
 | `editar` | leer y escribir | Reemplazos exactos con control de versión |
