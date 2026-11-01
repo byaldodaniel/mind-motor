@@ -1,5 +1,6 @@
 """Garantías del SO para la creación, con datos ficticios fuera del repositorio."""
 import base64
+import contextlib
 import csv
 import importlib.util
 import io
@@ -18,6 +19,36 @@ DEVELOPMENT = MOTOR.parent
 spec = importlib.util.spec_from_file_location('native_writer', MOTOR / 'src' / 'native_writer.py')
 native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
+
+
+@contextlib.contextmanager
+def held(path, share, delete_pending=False):
+    """Windows: mantiene path abierto como lo haría otro proceso.
+
+    share=0 reproduce al ganador de una creación concurrente, que conserva su
+    handle sin compartir hasta terminar. delete_pending deja el nombre pendiente
+    de eliminación hasta cerrar el handle.
+    """
+    import ctypes as c
+    from ctypes import wintypes as w
+    kernel = c.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.SetFileInformationByHandle.argtypes = [w.HANDLE, c.c_int, w.LPVOID, w.DWORD]
+    kernel.SetFileInformationByHandle.restype = w.BOOL
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    access = 0x80000000 | (0x10000 if delete_pending else 0)  # GENERIC_READ | DELETE
+    handle = kernel.CreateFileW(str(path), access, share, None, 3, 0x80, None)  # OPEN_EXISTING
+    if handle in (None, c.c_void_p(-1).value):
+        raise c.WinError(c.get_last_error())
+    try:
+        if delete_pending:
+            flag = c.c_ubyte(1)  # FileDispositionInfo (4): DeleteFile=TRUE, semántica clásica.
+            if not kernel.SetFileInformationByHandle(handle, 4, c.byref(flag), 1):
+                raise c.WinError(c.get_last_error())
+        yield
+    finally:
+        kernel.CloseHandle(handle)
 
 
 class WriterTest(unittest.TestCase):
@@ -174,6 +205,67 @@ class WriterTest(unittest.TestCase):
         finally:
             restore()
         self.assertEqual(self.names(), [])
+
+    @unittest.skipUnless(os.name == 'nt', 'modos de uso compartido de Windows')
+    def test_concurrent_winner_holding_the_name_is_reported_as_existing(self):
+        """Ventana de la carrera de creación concurrente en Windows.
+
+        El ganador ya publicó y conserva su handle sin compartir. El perdedor,
+        tanto en la comprobación previa como al publicar, debe informar
+        FILE_EXISTS y no ACCESS_DENIED.
+        """
+        target = self.folder / 'carrera.txt'
+        target.write_bytes(b'ganador')
+        with held(target, share=0):
+            self.assert_code('FILE_EXISTS', 'carrera.txt')
+        target.unlink()
+
+        with contextlib.ExitStack() as winner:
+            def publish_first(temporary):
+                target.write_bytes(b'ganador')
+                winner.enter_context(held(target, share=0))
+
+            self.assert_code('FILE_EXISTS', 'carrera.txt', before_publish=publish_first)
+        self.assertEqual(target.read_bytes(), b'ganador')
+        self.assertEqual(self.names(), ['carrera.txt'])
+
+    @unittest.skipUnless(os.name == 'nt', 'eliminación pendiente de Windows')
+    def test_name_pending_deletion_is_an_existing_name_not_a_denial(self):
+        target = self.folder / 'pendiente.txt'
+        target.write_bytes(b'anterior')
+        with held(target, share=7, delete_pending=True):
+            self.assert_code('FILE_EXISTS', 'pendiente.txt')
+        self.assertEqual(self.names(), [])
+
+        other = self.folder / 'tardío.txt'
+        with contextlib.ExitStack() as pending:
+            def deleted_before_publish(temporary):
+                other.write_bytes(b'anterior')
+                pending.enter_context(held(other, share=7, delete_pending=True))
+
+            self.assert_code('FILE_EXISTS', 'tardío.txt', before_publish=deleted_before_publish)
+        self.assertEqual(self.names(), [])
+        # Libre el nombre, la creación procede con normalidad.
+        self.create('pendiente.txt')
+        self.assertEqual(self.names(), ['pendiente.txt'])
+
+    @unittest.skipUnless(os.name == 'nt', 'ACL de Windows')
+    def test_real_denial_on_an_existing_name_is_still_reported_as_denied(self):
+        """Sin permiso para ver el nombre, la colisión no se presume."""
+        target = self.folder / 'protegido.txt'
+        target.write_bytes(b'ajeno')
+        result = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True, text=True, check=True)
+        sid = next(csv.reader(io.StringIO(result.stdout.strip())))[1]
+        # Sin listar la carpeta ni leer atributos del archivo, NTFS no concede la consulta.
+        subprocess.run(['icacls', str(self.folder), '/deny', f'*{sid}:(RD)'], capture_output=True, check=True)
+        subprocess.run(['icacls', str(target), '/deny', f'*{sid}:(RA)'], capture_output=True, check=True)
+        try:
+            self.assert_code('ACCESS_DENIED', 'protegido.txt')
+        finally:
+            subprocess.run(['icacls', str(target), '/remove:d', f'*{sid}'], capture_output=True, check=True)
+            subprocess.run(['icacls', str(self.folder), '/remove:d', f'*{sid}'], capture_output=True, check=True)
+        self.assertEqual(target.read_bytes(), b'ajeno')
+        self.assertEqual(self.names(), ['protegido.txt'])
 
     def test_never_enumerates_or_opens_other_content(self):
         backend = native.Windows if os.name == 'nt' else native.Posix
