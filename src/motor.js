@@ -25,7 +25,8 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /** @typedef {{ id: string, value: string }} TechnicalRecord */
 /**
- * @typedef {{ baseDirectory: string, pythonExecutable?: string, functionExecutors?: object }} MotorOptions
+ * @typedef {{ baseDirectory: string, pythonExecutable?: string, functionExecutors?: object, protectedDirectories?: string[] }} MotorOptions
+ * protectedDirectories: ubicaciones que ninguna carpeta autorizada puede contener ni ocupar.
  * functionExecutors: catálogo explícito de ejecutores de confianza del anfitrión
  * (véase docs/EJECUCION_FUNCIONES.md). Sin él no se puede vincular ninguna función.
  */
@@ -37,6 +38,7 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(folderPath: string) => Promise<import('./folders.js').AuthorizedFolder>} authorizeFolder
  * @property {() => Promise<import('./folders.js').AuthorizedFolder[]>} listAuthorizedFolders
  * @property {(id: string) => Promise<boolean>} revokeFolder
+ * @property {(id: string) => Promise<{id: string, path: string, generation: string | null} | null>} getAuthorizedFolder Solo anfitrión.
  * @property {(id: string, targetPath: string) => Promise<{folderId: string, path: string}>} checkFolderScope
  * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextRead Solo anfitrión administrativo.
  * @property {(authorization: object) => boolean} revokeTextRead Solo antes del intento.
@@ -102,7 +104,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {} } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [] } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -129,7 +131,12 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     return path.join(base, `record-${id}.json`);
   }
 
-  const { loadAuthorizedFolder, ...folders } = createFolderRegistry(base, motor);
+  if (!Array.isArray(protectedDirectories)
+      || !protectedDirectories.every((item) => typeof item === 'string' && path.isAbsolute(item))) {
+    throw new MotorError('INVALID_PROTECTED_DIRECTORIES', 'Las ubicaciones protegidas deben ser rutas absolutas.');
+  }
+  const protectedPhysical = await Promise.all(protectedDirectories.map((item) => realpath(item)));
+  const { loadAuthorizedFolder, ...folders } = createFolderRegistry(base, motor, protectedPhysical);
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
@@ -159,6 +166,12 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   const api = Object.freeze({
     baseDirectory: base,
     ...folders,
+    /**
+     * Solo anfitrión: registro completo de una carpeta, con su generación, para
+     * ligar a ella decisiones del usuario (por ejemplo, la política de acceso de agentes).
+     * @returns {Promise<{ id: string, path: string, generation: string | null } | null>}
+     */
+    getAuthorizedFolder: (id) => loadAuthorizedFolder(id),
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
     // Funciones: administración y ejecución manual del anfitrión. getFunctionVersion
     // queda interno del ejecutor; no se entregan a agentes.

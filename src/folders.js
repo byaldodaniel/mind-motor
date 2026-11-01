@@ -38,8 +38,12 @@ function authorizationId(canonical) {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
-/** Registro local del usuario. No representa permisos concedidos a un agente. */
-export function createFolderRegistry(baseDirectory, motorDirectory) {
+/**
+ * Registro local del usuario. No representa permisos concedidos a un agente.
+ * protectedDirectories: ubicaciones adicionales que ninguna carpeta autorizada
+ * puede contener ni ocupar (en el producto, la carpeta completa de Mind).
+ */
+export function createFolderRegistry(baseDirectory, motorDirectory, protectedDirectories = []) {
   function filename(id) {
     if (typeof id !== 'string' || !VALID_ID.test(id)) {
       throw new MotorError('INVALID_AUTHORIZATION_ID', 'El identificador de autorización no es válido.');
@@ -48,7 +52,7 @@ export function createFolderRegistry(baseDirectory, motorDirectory) {
   }
 
   function rejectInternal(canonical) {
-    for (const internal of [baseDirectory, motorDirectory]) {
+    for (const internal of [baseDirectory, motorDirectory, ...protectedDirectories]) {
       if (contains(internal, canonical) || contains(canonical, internal)) {
         throw new MotorError('FOLDER_OVERLAPS_INTERNAL', 'La carpeta de información no puede contener ni estar dentro del Motor o de la Base.');
       }
