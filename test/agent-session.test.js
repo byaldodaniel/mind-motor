@@ -94,6 +94,8 @@ test('el usuario decide en el formulario del cliente; el agente no puede ampliar
   assert.equal(found.data.resultados[0].ruta_absoluta, path.join(folder, 'Proyectos', 'presupuesto.md'));
   const read = await call('leer', { ruta: 'Proyectos/presupuesto.md' });
   assert.match(read.text, /Total: 100/);
+  // Defecto detectado con Claude Code real: el cliente puede mostrar solo los datos estructurados.
+  assert.equal(read.data.contenido, '# Presupuesto ficticio\nTotal: 100\n');
   assert.match(read.data.version, /^sha256:[0-9a-f]{64}$/);
 
   const denied = await call('crear', { ruta: 'nuevo.txt', contenido: 'x' });
@@ -104,16 +106,19 @@ test('el usuario decide en el formulario del cliente; el agente no puede ampliar
   assert.equal(conn.asked.length, 1);
 });
 
-test('rechazar, cancelar o no marcar la casilla no registra nada', async (t) => {
+test('rechazar, cancelar o no marcar la casilla no registra nada; cancelar deja la solicitud para la consola', async (t) => {
   const { folder, open, agent } = await fixture(t);
   const session = await open();
-  for (const [answer, expected] of [
-    [{ action: 'decline' }, 'rechazado'],
-    [{ action: 'cancel' }, 'cancelado'],
-    [{ action: 'accept', content: { autorizar: false, leer: true } }, 'rechazado'],
+  for (const [answer, expected, pending] of [
+    [{ action: 'decline' }, 'rechazado', 0],
+    [{ action: 'accept', content: { autorizar: false, leer: true } }, 'rechazado', 0],
+    [{ action: 'cancel' }, 'pendiente', 1],
   ]) {
     const call = agent(session, connection({ onElicit: () => answer }));
-    assert.equal((await call('solicitar_acceso', { ruta: folder, permisos: ['leer'] })).data.estado, expected);
+    const result = await call('solicitar_acceso', { ruta: folder, permisos: ['leer'] });
+    assert.equal(result.data.estado, expected);
+    if (expected === 'pendiente') assert.match(result.data.instrucciones, /se canceló/);
+    assert.equal((await session.requests.list()).length, pending);
   }
   assert.deepEqual(await session.motor.listAuthorizedFolders(), []);
 });
@@ -263,6 +268,7 @@ test('continuidad: permiso propio, origen fijado por Mind y continuación desde 
   assert.equal((await other('continuidad_actualizar', { id: decision.data.registro.id, revision: 1, contenido: 'tarde' })).isError, true);
   const markdown = await other('continuidad_exportar', { formato: 'markdown' });
   assert.match(markdown.text, /Presupuesto revisado y aprobado/);
+  assert.match(markdown.data.paquete, /Presupuesto revisado y aprobado/);
   const pack = (await other('continuidad_exportar', {})).text;
 
   // Importar en una Base distinta (otra instalación o aplicación).

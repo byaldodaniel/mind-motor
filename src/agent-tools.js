@@ -386,6 +386,16 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
     }
   }
 
+  function pendingAnswer(answer) {
+    return {
+      estado: 'pendiente',
+      solicitud: answer.request.id,
+      instrucciones: `${answer.cancelled
+        ? 'El formulario de autorización se canceló o tu cliente no pudo mostrarlo.'
+        : 'Tu cliente no muestra formularios de autorización.'} La solicitud quedó pendiente: pide al usuario que, si quiere concederla, abra la carpeta de Mind y ejecute "mind autorizar" (o abra "Autorizar Mind"). Después consulta "estado". No la des por aprobada.`,
+    };
+  }
+
   const handlers = {
     async estado(args) {
       only(args, []);
@@ -432,9 +442,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
           return { estado: 'ya-autorizado', continuidad: describeAccess(current, CONTINUITY_LEVELS) };
         }
         const answer = await consent.askContinuity({ requested, current, reason, clientInfo: connection?.clientInfo });
-        if (answer.status === 'pending') {
-          return { estado: 'pendiente', solicitud: answer.request.id, instrucciones: 'Pide al usuario que abra la carpeta de Mind y ejecute "mind autorizar" (o abra "Autorizar Mind") para aprobarla. Después vuelve a consultar "estado".' };
-        }
+        if (answer.status === 'pending') return pendingAnswer(answer);
         if (answer.status !== 'approved') return { estado: answer.status === 'declined' ? 'rechazado' : 'cancelado' };
         const saved = await policy.setContinuity(describeAccess(answer.access, CONTINUITY_LEVELS), { channel: answer.channel });
         await session.audit('continuidad-autorizada', { permisos: describeAccess(saved, CONTINUITY_LEVELS), canal: answer.channel, cliente: source });
@@ -454,12 +462,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         return { estado: 'ya-autorizado', carpeta: { id: existing.id, ruta: existing.path, permisos: describeAccess(current) } };
       }
       const answer = await consent.askFolder({ folderPath: canonical, requested, current, reason, clientInfo: connection?.clientInfo });
-      if (answer.status === 'pending') {
-        return {
-          estado: 'pendiente', solicitud: answer.request.id,
-          instrucciones: 'Tu cliente no muestra formularios de autorización. Pide al usuario que abra la carpeta de Mind y ejecute "mind autorizar" (o abra "Autorizar Mind") para revisar y aprobar la solicitud. Después consulta "estado".',
-        };
-      }
+      if (answer.status === 'pending') return pendingAnswer(answer);
       if (answer.status !== 'approved') return { estado: answer.status === 'declined' ? 'rechazado' : 'cancelado' };
       const folder = existing ?? await motor.authorizeFolder(canonical);
       const saved = await policy.set(folder.id, answer.access, { channel: answer.channel });
@@ -595,8 +598,11 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         version, bytes: Buffer.byteLength(content, 'utf8'), lineas: total,
         ...(shown !== content ? { mostrado: { desde_linea: from ?? 1, lineas: count ?? null } } : {}),
       };
+      // El contenido va en los dos canales: Claude Code entrega al modelo los datos
+      // estructurados y otros clientes, el bloque de texto (comprobado con un agente real).
       return {
         ...metadata,
+        contenido: shown,
         __mcpText: `${JSON.stringify(metadata)}\n--- contenido ---\n${shown}`,
       };
     },
@@ -752,7 +758,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       if (ids.length === 0) return { registros: 0, paquete: null, nota: 'No hay registros de continuidad.' };
       const pack = await motor.exportContinuity({ ids, includeReferenced: bool(args.relacionados, 'relacionados') ?? false });
       const output = format === 'markdown' ? formatContinuityMarkdown(pack) : JSON.stringify(pack, null, 2);
-      return { registros: pack.entries.length, formato: format, faltantes: pack.missing, __mcpText: output };
+      return { registros: pack.entries.length, formato: format, faltantes: pack.missing, paquete: output, __mcpText: output };
     },
 
     async continuidad_importar(args) {

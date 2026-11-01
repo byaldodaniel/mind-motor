@@ -195,9 +195,15 @@ export function createConsent({ connection, requests }) {
       }
       const response = await elicit(lines.join('\n'), properties, ['autorizar']);
       if (response.action === 'decline') return { status: 'declined' };
-      if (response.action !== 'accept' || response.content?.autorizar !== true) {
-        return { status: response.action === 'accept' ? 'declined' : 'cancelled' };
+      if (response.action !== 'accept') {
+        // Cancelado: el usuario cerró el formulario o el cliente no pudo mostrarlo
+        // (por ejemplo, en modo sin interfaz). Queda pendiente para la consola.
+        const record = await requests.create({
+          kind: 'carpeta', path: folderPath, requested: describeAccess(wanted), reason, client: who,
+        });
+        return { status: 'pending', request: record, cancelled: true };
       }
+      if (response.content?.autorizar !== true) return { status: 'declined' };
       const access = { ...normalizeAccess(describeAccess(already)) };
       access.encontrar = true;
       for (const level of asked.filter((item) => item !== 'encontrar')) {
@@ -222,7 +228,11 @@ export function createConsent({ connection, requests }) {
       const properties = {};
       for (const level of asked) properties[level] = { type: 'boolean', title: CONTINUITY_LABELS[level], default: true };
       const response = await elicit(message, properties, []);
-      if (response.action !== 'accept') return { status: response.action === 'decline' ? 'declined' : 'cancelled' };
+      if (response.action === 'decline') return { status: 'declined' };
+      if (response.action !== 'accept') {
+        const record = await requests.create({ kind: 'continuidad', requested: asked, reason, client: who });
+        return { status: 'pending', request: record, cancelled: true };
+      }
       const access = { leer: current?.leer === true, registrar: current?.registrar === true };
       for (const level of asked) if (response.content?.[level] === true) access[level] = true;
       if (asked.every((level) => !access[level])) return { status: 'declined' };
