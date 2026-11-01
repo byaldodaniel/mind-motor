@@ -147,3 +147,36 @@ Errores nuevos: `INVALID_REQUESTER`, `INVALID_READ_PATH`, `READ_NOT_AUTHORIZED`,
 carpetas y metadatos. Ningún mensaje contiene el contenido parcial del original.
 
 El algoritmo, su evidencia y sus límites están en [INCREMENTO_03.md](INCREMENTO_03.md).
+
+## Indexación administrativa integrada
+
+| Operación de Motor | Entrada | Resultado |
+|---|---|---|
+| `indexFolder(folderId)` | Id del registro existente; ninguna ruta ni resolutor externo | `Promise<IndexResult>`: índice inicial o reconciliación |
+| `readFolderIndex(folderId)` | Id registrado | `Promise<FolderIndex | null>`: último índice vigente o null |
+| `revokeFolder(folderId)` | Id del registro | Retira autorización y elimina índice; conserva el booleano previo |
+
+Son operaciones del anfitrión administrativo, como registrar y retirar carpetas.
+No se exponen al agente por poseer un permiso de lectura puntual. El Motor inyecta
+su `loadAuthorizedFolder`, la Base física y `pythonExecutable`; no se crea un
+registro de permisos adicional. Continuidad y definiciones de funciones conservan
+sus interfaces internas y no se agregan al objeto Motor ni a la CLI.
+
+El índice v2 añade `authorizationGeneration`, distinto del contador numérico
+`generation` del índice. Debe coincidir con la generación de la autorización y
+la raíz registrada. Un registro de carpeta heredado v1 se representa con null;
+una concesión posterior ya usa la generación aleatoria v2. Los índices v1 no
+ligados a autorización se validan como formato histórico, pero se devuelven como
+null y no se usan para reconciliar. Un índice de otra concesión tampoco aporta
+entradas anteriores ni cambios: se reconstruye como inicial.
+
+Se revalida identidad de la autorización antes y después de consultar/recorrer.
+Un cambio durante la operación produce `INDEX_SCOPE_CHANGED`; una retirada
+produce `FOLDER_NOT_AUTHORIZED`. Permanecen los errores del indexador y del
+almacenamiento: corrupción o enlaces no se reparan silenciosamente.
+
+La retirada revoca antes de limpiar; si limpiar falla, el error se informa y la
+carpeta sigue retirada. Una publicación tardía puede dejar físicamente un índice
+viejo, pero el vínculo de generación impide ofrecerlo con una nueva autorización.
+No hay transacciones ni bloqueo entre procesos; se conserva el modelo local de
+confianza. Solo se descartan índices, nunca originales.

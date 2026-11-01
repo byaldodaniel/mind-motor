@@ -1,12 +1,12 @@
 import path from 'node:path';
 import { MotorError } from './errors.js';
-import { contains } from './paths.js';
+import { contains, samePath } from './paths.js';
 import { scanFolder } from './index-scan.js';
 import { createIndexStore, validateScopeId } from './index-store.js';
 
 const DEFAULT_MAX_ENTRIES = 100_000;
 
-/** @typedef {{ id: string, path: string }} IndexScope Ámbito ya validado por el Motor. */
+/** @typedef {{ id: string, path: string, generation?: string | null }} IndexScope Ámbito ya validado por el Motor. */
 /**
  * Resolución confiable que solo el Motor proporciona. Debe rechazar ámbitos no
  * autorizados o retirados; el indexador nunca recibe rutas de quien lo llama.
@@ -69,9 +69,27 @@ function summarize(entries, issues) {
   return { totals, issues: [...problems, ...issues] };
 }
 
+function sameAuthorization(first, second) {
+  return samePath(first.path, second.path)
+    && (first.generation ?? null) === (second.generation ?? null);
+}
+
+function boundIndex(index, scope) {
+  // Los v1 no estaban ligados a una concesión: nunca se reutilizan como vigentes.
+  return index && samePath(index.root, scope.path)
+    && Object.hasOwn(index, 'authorizationGeneration')
+    && index.authorizationGeneration === (scope.generation ?? null) ? index : null;
+}
+
+function requireSameAuthorization(before, after) {
+  if (!sameAuthorization(before, after)) {
+    throw new MotorError('INDEX_SCOPE_CHANGED', 'La autorización cambió durante la operación del índice.');
+  }
+}
+
 /**
- * Núcleo de indexación de metadatos. No forma parte de la API pública del Motor:
- * el anfitrión lo crea con su Base y con un resolutor de ámbitos autorizados.
+ * Núcleo interno de indexación de metadatos. El Motor lo crea con su Base y
+ * resolutor del registro, y expone las operaciones solo al anfitrión administrativo.
  * No lee contenido, no sigue enlaces y no modifica los originales.
  * @param {object} options
  * @param {string} options.baseDirectory Ruta física de la Base ya abierta por el Motor.
@@ -130,20 +148,21 @@ export function createFolderIndexer({
       validateScopeId(scopeId);
       return exclusive(scopeId, async () => {
         const scope = await authorized(scopeId);
-        const previous = await store.load(scopeId);
+        const previous = boundIndex(await store.load(scopeId), scope);
         const { entries, issues } = await scanFolder(scope.path, {
           previous: previous?.entries ?? [], maxEntries, pythonExecutable,
         });
         // La autorización se vuelve a consultar: una retirada durante el recorrido no se publica.
-        await authorized(scopeId);
-        const latest = await store.load(scopeId);
+        requireSameAuthorization(scope, await authorized(scopeId));
+        const latest = boundIndex(await store.load(scopeId), scope);
         if ((latest?.generation ?? 0) !== (previous?.generation ?? 0)) {
           throw new MotorError('INDEX_CONFLICT', 'Otro proceso actualizó este índice durante el recorrido.');
         }
         const indexedAt = new Date().toISOString();
         const generation = (previous?.generation ?? 0) + 1;
         await store.save({
-          scopeId, root: scope.path, generation, createdAt: previous?.createdAt ?? indexedAt,
+          scopeId, root: scope.path, authorizationGeneration: scope.generation ?? null,
+          generation, createdAt: previous?.createdAt ?? indexedAt,
           updatedAt: indexedAt, entries, issues,
         });
         return {
@@ -163,8 +182,10 @@ export function createFolderIndexer({
      * @returns {Promise<import('./index-store.js').FolderIndex | null>}
      */
     async readFolderIndex(scopeId) {
-      await authorized(scopeId);
-      return store.load(scopeId);
+      const scope = await authorized(scopeId);
+      const index = await store.load(scopeId);
+      requireSameAuthorization(scope, await authorized(scopeId));
+      return boundIndex(index, scope);
     },
 
     /** Retira solo el índice de la Base; admite ámbitos ya retirados. */
