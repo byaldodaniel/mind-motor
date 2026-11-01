@@ -28,7 +28,7 @@ async function fixture(t) {
   return { root, base, folder, motor, scope, filename };
 }
 
-test('Motor indexa y reconcilia solo ids del registro; los otros dos módulos siguen internos', async (t) => {
+test('Motor indexa y reconcilia solo ids del registro; la continuidad sigue interna', async (t) => {
   const { base, folder, motor, scope } = await fixture(t);
   for (const invalid of [folder, '../escape', '', null]) {
     await assert.rejects(motor.indexFolder(invalid), { code: 'INVALID_SCOPE_ID' });
@@ -40,7 +40,7 @@ test('Motor indexa y reconcilia solo ids del registro; los otros dos módulos si
   await fs.writeFile(path.join(folder, 'nuevo.txt'), 'Otra nota ficticia');
   assert.deepEqual((await motor.indexFolder(scope.id)).changes.added, ['nuevo.txt']);
   assert.deepEqual((await motor.readFolderIndex(scope.id)).entries.map((item) => item.path), ['anterior.txt', 'nuevo.txt']);
-  for (const name of ['recordContinuity', 'getContinuity', 'exportContinuity', 'createFunction', 'listFunctions']) {
+  for (const name of ['recordContinuity', 'getContinuity', 'exportContinuity', 'getFunctionVersion']) {
     assert.equal(Object.hasOwn(motor, name), false);
   }
   const requester = {};

@@ -6,6 +6,8 @@ import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
+import { createFunctionRegistry } from './functions.js';
+import { createFunctionRunner } from './function-runner.js';
 import { createTextCreator } from './text-creator.js';
 import { createTextModifier } from './text-modifier.js';
 import { createFolderIndexer } from './indexer.js';
@@ -18,7 +20,11 @@ const MOTOR_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
 const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /** @typedef {{ id: string, value: string }} TechnicalRecord */
-/** @typedef {{ baseDirectory: string, pythonExecutable?: string }} MotorOptions */
+/**
+ * @typedef {{ baseDirectory: string, pythonExecutable?: string, functionExecutors?: object }} MotorOptions
+ * functionExecutors: catálogo explícito de ejecutores de confianza del anfitrión
+ * (véase docs/EJECUCION_FUNCIONES.md). Sin él no se puede vincular ninguna función.
+ */
 /**
  * @typedef {object} Motor
  * @property {string} baseDirectory Ruta física de la Base externa existente.
@@ -31,6 +37,14 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextRead Solo anfitrión administrativo.
  * @property {(authorization: object) => boolean} revokeTextRead Solo antes del intento.
  * @property {(request: {requester: object, authorization: object}) => Promise<{folderId: string, relativePath: string, content: string}>} readTextFile
+ * @property {(id: string, definition: object) => Promise<{id: string, definition: object}>} createFunction Solo anfitrión administrativo.
+ * @property {(id: string) => Promise<{id: string, definition: object} | null>} getFunction Solo anfitrión administrativo.
+ * @property {() => Promise<{id: string, definition: object}[]>} listFunctions Solo anfitrión administrativo.
+ * @property {(id: string, definition: object) => Promise<{id: string, definition: object}>} updateFunction Solo anfitrión administrativo.
+ * @property {(id: string) => Promise<boolean>} retireFunction Solo anfitrión administrativo.
+ * @property {(request: {functionId: string, executor: string}) => Promise<object>} bindFunction Solo anfitrión: autoriza la definición actual con un ejecutor del catálogo.
+ * @property {(binding: object) => boolean} unbindFunction Solo anfitrión.
+ * @property {(request: {binding: object, input?: unknown, capabilities?: object}) => Promise<{functionId: string, executor: string, result: unknown}>} runFunction Solo anfitrión: una invocación manual.
  * @property {(folderId: string) => Promise<import('./indexer.js').IndexResult>} indexFolder Solo administración local.
  * @property {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} readFolderIndex Solo administración local.
  * @property {(request: import('./search.js').SearchRequest) => Promise<object>} searchFiles Solo anfitrión, sobre ámbitos que él autoriza.
@@ -71,7 +85,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {} } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -108,12 +122,25 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
       return folder;
     },
   });
+  // Definiciones como datos en la Base; el código ejecutable solo llega del catálogo del anfitrión.
+  const functions = createFunctionRegistry({ baseDirectory: base });
+  const runner = createFunctionRunner({ functions, executors: functionExecutors });
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
   return Object.freeze({
     baseDirectory: base,
     ...folders,
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
+    // Funciones: administración y ejecución manual del anfitrión. getFunctionVersion
+    // queda interno del ejecutor; no se entregan a agentes.
+    createFunction: functions.createFunction,
+    getFunction: functions.getFunction,
+    listFunctions: functions.listFunctions,
+    updateFunction: functions.updateFunction,
+    retireFunction: functions.retireFunction,
+    bindFunction: runner.bindFunction,
+    unbindFunction: runner.unbindFunction,
+    runFunction: runner.runFunction,
     indexFolder: indexer.indexFolder,
     readFolderIndex: indexer.readFolderIndex,
     ...createIndexSearch({ readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder }),

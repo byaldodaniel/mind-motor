@@ -3,7 +3,9 @@
 Este incremento permite que el anfitrión de confianza ejecute manualmente una
 función registrada mediante un ejecutor que él mismo proporciona. El módulo
 interno `src/function-runner.js` reutiliza el registro de `src/functions.js` y
-la misma Base; no se incorpora a `openMotor`, a la CLI ni a los exports públicos.
+la misma Base. `openMotor` lo crea con el catálogo `functionExecutors` que entrega
+el anfitrión y expone sus operaciones (véase [INTERFACES.md](INTERFACES.md));
+no está en la CLI.
 No añade dependencias, procesos residentes, horarios ni eventos.
 
 ## Dos piezas distintas

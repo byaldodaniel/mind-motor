@@ -394,5 +394,6 @@ test('registrar o vincular no concede lectura; solo capacidades del anfitrión d
     runner.runFunction({ binding, capabilities: { readText } }),
     (error) => error.code === 'FUNCTION_FAILED' && error.cause.code === 'READ_NOT_AUTHORIZED',
   );
-  for (const name of ['bindFunction', 'runFunction', 'createFunction']) assert.equal(Object.hasOwn(motor, name), false);
+  // Integradas en openMotor como operaciones del anfitrión; la lectura interna de versiones no se expone.
+  assert.equal(Object.hasOwn(motor, 'getFunctionVersion'), false);
 });

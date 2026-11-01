@@ -129,6 +129,31 @@ escrituras concurrentes, ni procedencia histórica del archivo, ni protección a
 cambios privilegiados de montajes. Si falta una primitiva segura, se deniega sin
 recurrir a una apertura más débil. Véase [docs/INCREMENTO_03.md](docs/INCREMENTO_03.md).
 
+## Funciones y ejecución manual — Función 04
+
+El anfitrión registra definiciones de funciones como datos y las ejecuta a mano
+con ejecutores de confianza que él mismo aporta al abrir el Motor:
+
+```js
+const motor = await openMotor({ baseDirectory, functionExecutors: {
+  'contar-palabras': {
+    validateInput: (input) => typeof input?.text === 'string',
+    run: ({ input }) => ({ count: input.text.split(/\s+/u).filter(Boolean).length }),
+  },
+} });
+await motor.createFunction('resumen', { descripcion: 'Contar palabras' });
+const binding = await motor.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+const { result } = await motor.runFunction({ binding, input: { text: 'Texto ficticio' } });
+```
+
+Una definición nunca elige su ejecutor, sus permisos ni código: es un dato. El
+vínculo se liga a la versión exacta aprobada (generación UUID y huella SHA-256).
+Actualizar o retirar la definición lo invalida para siempre. Las capacidades se
+entregan por invocación y solo si el ejecutor las declaró. Son operaciones del
+anfitrión; no hay horarios, eventos ni ejecutores externos. Detalles en
+[docs/EJECUCION_FUNCIONES.md](docs/EJECUCION_FUNCIONES.md) y
+[docs/INTERFACES.md](docs/INTERFACES.md).
+
 ## Creación segura de un archivo de texto — Función 03
 
 El anfitrión concede, tras la autorización explícita del usuario, un permiso de un

@@ -1,8 +1,9 @@
 # Función 04 — Registro de definiciones
 
 Este incremento conserva definiciones reutilizables en la misma Base del Motor.
-El módulo interno `src/functions.js` todavía no se incorpora a `openMotor`, a la
-CLI ni a los exports públicos del paquete. No añade dependencias ni componentes
+El módulo `src/functions.js` se expone en `openMotor` como administración del
+anfitrión (véase [EJECUCION_FUNCIONES.md](EJECUCION_FUNCIONES.md) e
+[INTERFACES.md](INTERFACES.md)); no está en la CLI. No añade dependencias ni componentes
 residentes. No modifica el lector seguro ni la indexación.
 
 ## Contrato interno
