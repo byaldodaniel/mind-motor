@@ -128,3 +128,21 @@ El registro no apunta a ningún otro registro.
 - Repetir la prueba desde una carpeta extraída del paquete portable, en los tres sistemas.
 - Probar el formulario de autorización en el modo interactivo de Claude Code; requiere una persona frente a la interfaz.
 - Otros agentes (Gemini CLI, Cursor, VS Code, Codex): sin verificar.
+
+## Otros clientes MCP (verificación de descubrimiento, sin modelo)
+
+Instalados desde npm en un directorio temporal y probados contra una carpeta de
+Mind simulada (estructura de producto con los runtimes del contenedor):
+
+| Cliente | Configuración | Resultado |
+|---|---|---|
+| Gemini CLI 0.66.0 | `.gemini/settings.json` del proyecto (`command`, `args`, `cwd`) | `gemini mcp list` → `✓ mind … (stdio) - Connected`. Gemini bloquea sobrescribir `NODE_OPTIONS` desde la configuración: hay que usar el iniciador o no declarar `env`. |
+| Codex CLI 0.166.0 | `.codex/config.toml` del proyecto | Solo se lee si el proyecto es de confianza (`trust_level = "trusted"`; Codex lo pregunta la primera vez). `codex mcp list` lo muestra `enabled`, pero no comprueba la conexión; verificarla exige una cuenta de Codex. |
+| Cursor, VS Code | `.cursor/mcp.json`, `.vscode/mcp.json` | Sin verificar: son aplicaciones con interfaz gráfica. |
+
+## Prueba de los 12 casos en una carpeta simulada
+
+`scripts/producto-12-casos.mjs` contra una carpeta con la estructura del producto
+(Motor copiado del repositorio y runtimes del contenedor; no es un paquete
+portable real): 10 casos superados, 0 fallidos y 2 pendientes (actualización y
+respaldo, en integración).
