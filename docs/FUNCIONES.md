@@ -61,8 +61,9 @@ Cada definición ocupa un registro en la raíz de la Base:
 ```json
 {
   "format": "mind-function-definition",
-  "version": 1,
+  "version": 2,
   "id": "resumen",
+  "generation": "5e0619f7-0a56-43ae-8f67-7b3e38f947a0",
   "definition": { "instruction": "Texto ficticio" }
 }
 ```
@@ -72,6 +73,20 @@ su escritura mediante temporal y publicación por renombrado. No se crea ningún
 directorio al construir el módulo, consultar, crear, actualizar o retirar una
 definición. Este núcleo no necesita recursos auxiliares; su ubicación se creará
 solo cuando una operación futura realmente los necesite.
+
+Cada creación y cada actualización publica un UUID nuevo en `generation`, incluso
+si la definición es idéntica a la anterior. La generación pertenece al envoltorio;
+un campo del mismo nombre dentro de `definition` sigue siendo un dato opaco.
+Las operaciones normales conservan `{ id, definition }`, sin exponer metadatos
+adicionales en sus resultados. El ejecutor interno usa `getFunctionVersion(id)`
+para leer conjuntamente definición y generación, evitando mezclar dos lecturas.
+
+Los registros v1 (cuatro campos, sin generación) siguen siendo consultables,
+listables y retirables. No se migran al leer. Una actualización explícita,
+incluso con la misma definición, publica v2 con generación nueva. Vincular un v1
+para ejecutar falla con `FUNCTION_GENERATION_REQUIRED` hasta esa actualización;
+no se usa una generación nula compartida como identidad de ejecución. Los v2
+con generación ausente o mal formada y las versiones desconocidas son corruptos.
 
 Retirar elimina únicamente el registro validado. No borra originales, recursos
 ni registros técnicos o autorizaciones. Una definición corrupta no se sobrescribe
