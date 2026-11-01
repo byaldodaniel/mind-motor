@@ -28,7 +28,7 @@ async function fixture(t) {
   return { root, base, folder, motor, scope, filename };
 }
 
-test('Motor indexa y reconcilia solo ids del registro; las definiciones de funciones siguen internas', async (t) => {
+test('Motor indexa y reconcilia solo ids del registro; continuidad y funciones son administración del anfitrión', async (t) => {
   const { base, folder, motor, scope } = await fixture(t);
   for (const invalid of [folder, '../escape', '', null]) {
     await assert.rejects(motor.indexFolder(invalid), { code: 'INVALID_SCOPE_ID' });
@@ -40,11 +40,14 @@ test('Motor indexa y reconcilia solo ids del registro; las definiciones de funci
   await fs.writeFile(path.join(folder, 'nuevo.txt'), 'Otra nota ficticia');
   assert.deepEqual((await motor.indexFolder(scope.id)).changes.added, ['nuevo.txt']);
   assert.deepEqual((await motor.readFolderIndex(scope.id)).entries.map((item) => item.path), ['anterior.txt', 'nuevo.txt']);
-  for (const name of ['createFunction', 'listFunctions', 'readContinuityContext', 'recordContinuityResult']) {
+  // Las vistas de agente y la lectura interna de versiones no forman parte del Motor administrativo.
+  for (const name of ['getFunctionVersion', 'readContinuityContext', 'recordContinuityResult']) {
     assert.equal(Object.hasOwn(motor, name), false);
   }
-  // La continuidad se integra como administración del anfitrión (véase continuity-integration).
+  // Continuidad y funciones se integran como administración del anfitrión
+  // (véanse continuity-integration y function-integration).
   assert.equal(typeof motor.recordContinuity, 'function');
+  assert.equal(typeof motor.createFunction, 'function');
   const requester = {};
   await assert.rejects(motor.readTextFile({ requester, authorization: scope.id }), { code: 'READ_NOT_AUTHORIZED' });
   assert.equal((await fs.readdir(base)).length, 2);

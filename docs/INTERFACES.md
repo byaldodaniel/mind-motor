@@ -100,6 +100,47 @@ Integración de agentes externos, índices, planificación y formato de continui
 requieren incrementos aprobados por separado. El almacenamiento de
 texto de este núcleo no pretende resolver por adelantado sus necesidades.
 
+## Funciones y ejecución manual — Función 04 integrada
+
+`openMotor({ baseDirectory, pythonExecutable?, functionExecutors? })` crea el
+registro `src/functions.js` sobre su Base física y el ejecutor manual
+`src/function-runner.js` con el catálogo `functionExecutors`. Ese catálogo es
+explícito: lo entrega el anfitrión de confianza al abrir el Motor y se copia en
+ese momento. Sin catálogo, el Motor administra definiciones pero no puede
+vincular ninguna (`EXECUTOR_NOT_FOUND`). Un catálogo mal formado hace fallar
+`openMotor` con `INVALID_EXECUTOR`. Contratos y garantías en
+[FUNCIONES.md](FUNCIONES.md) y [EJECUCION_FUNCIONES.md](EJECUCION_FUNCIONES.md).
+
+| Operación de Motor | Resultado |
+|---|---|
+| `createFunction(id, definition)` | `{ id, definition }`; rechaza duplicados. |
+| `getFunction(id)` / `listFunctions()` | Definiciones como datos, sin generación. |
+| `updateFunction(id, definition)` | Sustituye y publica una nueva generación UUID. |
+| `retireFunction(id)` | `boolean`; retira solo el registro. |
+| `bindFunction({ functionId, executor })` | Vínculo opaco: definición actual exacta (generación + SHA-256) con un ejecutor del catálogo. |
+| `unbindFunction(binding)` | `boolean`. |
+| `runFunction({ binding, input?, capabilities? })` | `{ functionId, executor, result }`: una invocación manual. |
+
+Todas son operaciones del anfitrión; no se entregan a agentes. `getFunctionVersion`
+sigue siendo interno del ejecutor y no se expone.
+
+- **Definiciones como datos.** Se guardan como datos JSON en
+  `function-definition-<id>.json`. Nunca se interpretan como código. Un campo
+  `executor`, `code`, `permissions` o `capabilities` dentro de una definición no
+  elige ejecutor ni concede nada.
+- **Código de confianza.** Solo el catálogo del anfitrión aporta código ejecutable.
+  Añadir o sustituir ejecutores después de abrir el Motor no cambia lo autorizado.
+- **Autorización por invocación.** `bindFunction` es la aprobación explícita del
+  anfitrión. Cada `runFunction` vuelve a leer generación y huella. Si la definición
+  se retiró (`FUNCTION_NOT_FOUND`) o cambió (`FUNCTION_CHANGED`), el vínculo queda
+  retirado para siempre, aunque se restaure el mismo contenido o se recree el id.
+  Las capacidades se entregan en cada invocación y solo las que el ejecutor
+  declaró. Un vínculo vale solo en la instancia de Motor que lo creó y no persiste
+  entre procesos; las definiciones sí.
+- **Límites.** Ejecutar no escribe en la Base. Los ejecutores corren en el proceso
+  del anfitrión. Retirar no cancela una ejecución ya admitida. No hay horarios,
+  eventos, interfaz ni ejecutores externos.
+
 ## Lectura puntual y autorización — Incremento 03
 
 `openMotor({ baseDirectory, pythonExecutable? })` permite al anfitrión elegir un
