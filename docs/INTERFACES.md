@@ -155,6 +155,15 @@ El algoritmo, su evidencia y sus límites están en [INCREMENTO_03.md](INCREMENT
 | `indexFolder(folderId)` | Id del registro existente; ninguna ruta ni resolutor externo | `Promise<IndexResult>`: índice inicial o reconciliación |
 | `readFolderIndex(folderId)` | Id registrado | `Promise<FolderIndex | null>`: último índice vigente o null |
 | `revokeFolder(folderId)` | Id del registro | Retira autorización y elimina índice; conserva el booleano previo |
+| `searchFiles(request)` | `SearchRequest`: ids que el anfitrión autoriza para la consulta, texto y filtros | `Promise<{ results, total, offset, limit, truncated, scopes }>` |
+
+`searchFiles` (Incremento 09) consulta solo los índices vigentes de la Base, sin
+recorrer las carpetas ni abrir archivos. Cada resultado es `{ folderId,
+relativePath, name, type, size, modifiedAt, changedAt, createdAt, status, reason,
+indexedAt }`; `folderId` y `relativePath` tienen la forma que espera
+`grantTextRead`, pero la búsqueda no concede la lectura. `status` es `indexed`
+(confirmado en `indexedAt`) o `unverified`. Detalle en
+[INCREMENTO_09.md](INCREMENTO_09.md).
 
 Son operaciones del anfitrión administrativo, como registrar y retirar carpetas.
 No se exponen al agente por poseer un permiso de lectura puntual. El Motor inyecta

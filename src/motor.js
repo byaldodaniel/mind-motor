@@ -7,6 +7,7 @@ import { contains } from './paths.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
 import { createFolderIndexer } from './indexer.js';
+import { createIndexSearch } from './search.js';
 
 export { MotorError } from './errors.js';
 
@@ -29,6 +30,7 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(request: {requester: object, authorization: object}) => Promise<{folderId: string, relativePath: string, content: string}>} readTextFile
  * @property {(folderId: string) => Promise<import('./indexer.js').IndexResult>} indexFolder Solo administración local.
  * @property {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} readFolderIndex Solo administración local.
+ * @property {(request: import('./search.js').SearchRequest) => Promise<object>} searchFiles Solo anfitrión, sobre ámbitos que él autoriza.
  */
 
 function validateId(id) {
@@ -85,6 +87,7 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
     indexFolder: indexer.indexFolder,
     readFolderIndex: indexer.readFolderIndex,
+    ...createIndexSearch({ readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder }),
 
     async revokeFolder(id) {
       // Primero se retira la autoridad. Un fallo de limpieza no la restaura.
