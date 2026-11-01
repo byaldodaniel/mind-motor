@@ -211,7 +211,16 @@ coincidencias parciales y filtros de metadatos, en los índices vigentes de las
 carpetas indicadas por el anfitrión. No vuelve a recorrer las carpetas ni abre
 contenido. Detalles en [docs/INCREMENTO_09.md](docs/INCREMENTO_09.md).
 
-La indexación, la consulta del índice y la búsqueda son administrativas; registrar una carpeta
+`motor.openIndexObserver({ onReport })` abre, solo si el anfitrión lo pide, la
+observación de cambios de su sesión: `observe(folderId)` reconcilia una vez y
+después reconcilia con `indexFolder` cuando el sistema avisa de cambios, para que
+`searchFiles` refleje lo que el usuario modifica fuera de Mind. No hay servicio
+residente: sin abrirla no existe nada, nada mantiene vivo el proceso y
+`close()` libera todo. Retirar la carpeta con `revokeFolder` detiene su
+observación antes de resolver; una retirada desde otro proceso se detecta en
+segundos. Detalles en [docs/FUNCION_01_OBSERVACION.md](docs/FUNCION_01_OBSERVACION.md).
+
+La indexación, la consulta del índice, la búsqueda y la observación son administrativas; registrar una carpeta
 no concede estas operaciones a un agente. No se añaden comandos CLI ni permisos
 paralelos. Continuidad y definiciones de funciones están integradas en el código
 como módulos internos, sin métodos públicos en Motor ni ejecución de funciones.

@@ -156,6 +156,7 @@ El algoritmo, su evidencia y sus límites están en [INCREMENTO_03.md](INCREMENT
 | `readFolderIndex(folderId)` | Id registrado | `Promise<FolderIndex | null>`: último índice vigente o null |
 | `revokeFolder(folderId)` | Id del registro | Retira autorización y elimina índice; conserva el booleano previo |
 | `searchFiles(request)` | `SearchRequest`: ids que el anfitrión autoriza para la consulta, texto y filtros | `Promise<{ results, total, offset, limit, truncated, scopes }>` |
+| `openIndexObserver(options?)` | `{ onReport?, strategy?, debounceMs?, … }` | Observador de la sesión: `observe`, `reconcile`, `status`, `list`, `unobserve`, `close` |
 
 `searchFiles` (Incremento 09) consulta solo los índices vigentes de la Base, sin
 recorrer las carpetas ni abrir archivos. Cada resultado es `{ folderId,
@@ -331,3 +332,42 @@ Errores: los de [FUNCION_03_MODIFICAR.md](FUNCION_03_MODIFICAR.md)
 `METADATA_NOT_PRESERVABLE`, `MODIFY_UNCONFIRMED`, …). Si el resultado es
 `MODIFY_FAILED` por tiempo o `MODIFY_UNCONFIRMED`, el contenido nuevo puede estar
 publicado sin entrada actualizada: corresponde releer y reconciliar.
+
+## Observación de cambios — Función 01 integrada
+
+`openIndexObserver(options)` es una capacidad **opcional** de la sesión del
+anfitrión. `openMotor` no abre observaciones: solo existen después de llamarla.
+Devuelve el observador de [FUNCION_01_OBSERVACION.md](FUNCION_01_OBSERVACION.md)
+ligado a este Motor; la opción `motor` se ignora, de modo que siempre actúa con
+el `indexFolder`, `readFolderIndex` y `listAuthorizedFolders` de esta instancia y
+con su Base. No se entrega a agentes ni concede lectura o búsqueda.
+
+| Operación del observador | Resultado |
+|---|---|
+| `observe(folderId)` | Reconciliación inicial y observación; resuelve con el estado. |
+| `reconcile(folderId)` | Reconciliación inmediata pedida por el anfitrión. |
+| `status(folderId)` / `list()` | Estado de cada carpeta observada; `null` si no se observa. |
+| `unobserve(folderId)` | Deja de observar; el índice se conserva. |
+| `close()` | Detiene todo y libera observaciones y temporizadores. |
+
+Los avisos del sistema solo deciden cuándo reconciliar; cada actualización es una
+llamada a `indexFolder`, con el recorrido seguro y la vigencia de la autorización
+de siempre. Las búsquedas reflejan el cambio cuando termina esa reconciliación
+(agrupación por defecto: 300 ms de silencio, máximo 5 s, al menos 2 s entre
+recorridos), no en el instante del cambio.
+
+Sin servicio residente: las observaciones no son persistentes y los temporizadores
+no mantienen vivo el proceso. Si el proceso termina, la observación termina con
+él; el siguiente `observe` reconcilia lo ocurrido entretanto.
+
+Retirada: `revokeFolder(folderId)` en este Motor pide una reconciliación a sus
+observadores abiertos, que falla con `FOLDER_NOT_AUTHORIZED` y detiene esa
+carpeta (`stopped`, motivo `revoked`) antes de que `revokeFolder` resuelva; esto
+ocurre aunque falle la limpieza del índice. La detención se pide después de
+liberar el bloqueo coordinado del índice, y solo si la retirada llegó a
+ejecutarse: si el bloqueo no se obtiene (`INDEX_LOCK_TIMEOUT`), la carpeta sigue
+autorizada y observada. Una retirada desde otra instancia o
+proceso se detecta por la observación de la Base o por la comprobación periódica
+(`authorizationCheckMs`, 5 s). Una nueva autorización de la misma ruta no hereda
+la observación. Cerrar el observador no retira autorizaciones ni índices.
+
