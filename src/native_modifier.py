@@ -11,14 +11,17 @@ con un rename atómico que reemplaza el nombre:
   FileRenameInformationEx con REPLACE_IF_EXISTS y POSIX_SEMANTICS respecto al
   handle del padre, y después se confirma que el archivo sustituido es el
   verificado.
-- POSIX: concurrencia optimista. Justo antes de renameat se comprueba que el
-  nombre sigue apuntando al mismo inode sin cambios de tamaño, mtime ni ctime;
-  después, que el inode verificado quedó sin enlaces.
+- POSIX: flock exclusivo no bloqueante sobre el descriptor original durante
+  verificación, preparación y publicación. Tras bloquear se verifica que el
+  nombre aún corresponde al inode abierto; se conservan las comprobaciones
+  previas a renameat y la confirmación del inode sustituido. El bloqueo es
+  consultivo: otros programas que no lo respetan aún pueden interferir.
 
 Si no se pueden conservar los metadatos de seguridad del original, se rechaza.
 """
 import base64
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import json
@@ -62,6 +65,17 @@ class Posix(reader.Posix):
     def open_target(self, parent, name):
         handle = self.child(parent, name, False)
         try:
+            import fcntl
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    raise Refusal('FILE_IN_USE') from None
+                raise
+            # Un descriptor abierto antes de otro rename puede bloquear el inode
+            # antiguo cuando el ganador ya lo liberó. Nunca usarlo como vigente.
+            if not self._same(handle, parent, name):
+                raise Refusal('VERSION_CONFLICT')
             volume = self.check(handle, False)
             return handle, volume
         except BaseException:
@@ -220,9 +234,10 @@ class Windows(reader.Windows):
         return handle.value
 
     def open_target(self, parent, name):
-        # SYNCHRONIZE, READ_CONTROL, READ_ATTRIBUTES, READ_DATA. Se comparte solo lectura
-        # y borrado: mientras se mantiene abierto nadie puede escribir el contenido.
-        handle = self._nt(parent, component(name), 0x100000 | 0x20000 | 0x80 | 0x1, 0x1 | 0x4, 1, 0x200020)
+        # SYNCHRONIZE, READ_CONTROL, READ_ATTRIBUTES, READ_DATA y WRITE_DATA.
+        # Sin FILE_SHARE_WRITE: también otra instancia de Mind debe pedir escritura,
+        # de modo que su apertura falle mientras este handle permanece abierto.
+        handle = self._nt(parent, component(name), 0x100000 | 0x20000 | 0x80 | 0x1 | 0x2, 0x1 | 0x4, 1, 0x200020)
         try:
             return handle, self.check(handle, False)
         except BaseException:
