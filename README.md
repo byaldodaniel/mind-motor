@@ -56,6 +56,38 @@ concurrentes sobre el mismo registro. La Base de este incremento es local y de
 confianza, con datos ficticios. Los temporales de un proceso interrumpido pueden
 quedar en la Base; nunca se interpretan como registros.
 
+## Carpetas autorizadas — Incremento 02
+
+El usuario puede registrar una carpeta existente, consultar las registradas y retirar
+una autorización. En PowerShell, usando la variable `$base` del ejemplo anterior y
+una carpeta de información de pruebas ya existente:
+
+```powershell
+$carpeta = (Resolve-Path -LiteralPath '../Información de prueba').Path
+node src/cli.js --base $base folder-add $carpeta
+node src/cli.js --base $base folder-list
+# Copiar el id devuelto; no es la ruta de la carpeta.
+node src/cli.js --base $base folder-remove '<id>'
+```
+
+Los mismos comandos funcionan en macOS/Linux con `--base "$base"` y rutas absolutas
+entre comillas. Cada invocación termina; el registro y la retirada sobreviven a un
+nuevo proceso del Motor. `folder-remove` devuelve `{"removed":false}` si el id ya
+no estaba registrado.
+
+Solo se guarda un identificador y la ruta física en un archivo
+`folder-authorization-<id>.json` de la Base. Los alias de directorio se resuelven al
+registrar y no crean otra autorización para la misma ruta física. Las carpetas deben
+ser accesibles y no pueden solaparse con Motor o Base, ni contenerlos. Consultar
+muestra los registros guardados, aunque una carpeta haya desaparecido; retirarla
+por id no requiere que siga existiendo.
+
+**Registrar es una operación administrativa local del usuario. No concede acceso a
+ningún agente.** No hay métodos de lectura/escritura de archivos originales ni
+indexación. Para validar una carpeta solo se consultan sus metadatos y se abre y
+cierra el directorio, sin enumerar entradas. Los detalles están en
+[docs/INTERFACES.md](docs/INTERFACES.md).
+
 ## Pruebas
 
 ```sh
@@ -64,7 +96,9 @@ node --test
 
 También se puede usar `npm test`; no requiere `npm install`. La suite cubre arranque,
 lectura/escritura, reinicio entre procesos, independencia de Bases y código,
-validación de rutas y entradas, datos corruptos y limpieza ante fallos.
+validación de rutas y entradas, datos corruptos y limpieza ante fallos. Incluye
+registro/retirada persistentes de carpetas, rutas fuera de alcance, enlaces que
+escapan del ámbito y rechazo de acceso simulado como denegado.
 GitHub Actions ejecuta la misma suite en Windows, macOS y Linux con Node.js 24.
 
 ## Interfaces y alcance

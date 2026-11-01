@@ -26,3 +26,6 @@ record-*.json
 .mind-test-*/
 node_modules/
 coverage/
+
+# Autorizaciones locales de carpetas
+folder-authorization-*.json
