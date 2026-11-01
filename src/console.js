@@ -55,6 +55,12 @@ async function choosePreset(prompt, requested) {
   return null;
 }
 
+/** Pregunta opcional de exclusiones al autorizar una carpeta. */
+async function askExclusions(prompt) {
+  const answer = await prompt.ask('Subcarpetas a excluir, separadas por comas (Enter para ninguna): ');
+  return (answer ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+}
+
 /** Aprueba o rechaza las solicitudes pendientes y, opcionalmente, autoriza una carpeta indicada. */
 export async function authorizeConsole({ session, prompt, folderPath = null, requested = null }) {
   const { motor, policy, requests } = session;
@@ -68,7 +74,9 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
     prompt.write(`Carpeta (incluye todo lo que contiene): ${canonical}`);
     const access = await choosePreset(prompt, requested ?? ['leer']);
     if (access) {
+      const exclusions = await askExclusions(prompt);
       const folder = await motor.authorizeFolder(canonical);
+      if (exclusions.length > 0) await motor.setFolderExclusions(folder.id, exclusions);
       await policy.set(folder.id, access, { channel: 'consola' });
       await session.audit('carpeta-autorizada', { carpeta: folder.id, ruta: folder.path, permisos: describeAccess(access), canal: 'consola' });
       prompt.write(`Autorizada con permisos: ${describeAccess(access).join(', ')}.`);
@@ -97,7 +105,12 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
       }
       const access = await choosePreset(prompt, request.requested);
       if (access) {
+        const exclusions = await askExclusions(prompt);
         const folder = await motor.authorizeFolder(canonical);
+        if (exclusions.length > 0) {
+          const current = (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [];
+          await motor.setFolderExclusions(folder.id, [...current, ...exclusions]);
+        }
         const previous = (await policy.get(folder.id))?.access ?? {};
         for (const level of ACCESS_LEVELS) access[level] ||= previous[level] === true;
         await policy.set(folder.id, access, { channel: 'consola' });
@@ -129,9 +142,27 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
 }
 
 /** Lista y retira permisos. */
-export async function permissionsConsole({ session, prompt, revoke = null }) {
+export async function permissionsConsole({ session, prompt, revoke = null, exclude = null, include = null, target = null }) {
   const { motor, policy } = session;
   const folders = await motor.listAuthorizedFolders();
+  if (exclude !== null || include !== null) {
+    const folder = folders.find((item) => item.id === target || item.path === path.normalize(target ?? ''));
+    if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'Esa carpeta no está autorizada.');
+    const current = (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [];
+    let next = current;
+    if (exclude !== null) next = [...current, ...exclude];
+    if (include !== null) {
+      // Volver a incluir amplía el acceso de los agentes: lo confirma el usuario.
+      if (!(await prompt.yes(`¿Volver a incluir ${include.join(', ')} en ${folder.path}?`, false))) return 0;
+      const removed = new Set(include.map((item) => item.replace(/^\/+|\/+$/g, '')));
+      next = current.filter((item) => !removed.has(item));
+    }
+    const result = await motor.setFolderExclusions(folder.id, next);
+    await session.audit(include !== null ? 'rutas-incluidas' : 'rutas-excluidas', { carpeta: folder.id, excluidas: result.exclusions, canal: 'consola' });
+    if (include !== null) await session.ensureIndex(folder.id).catch(() => {});
+    prompt.write(`Excluidas en ${folder.path}: ${result.exclusions.join(', ') || 'ninguna'}.`);
+    return 1;
+  }
   if (revoke !== null) {
     const folder = folders.find((item) => item.id === revoke || item.path === path.normalize(revoke));
     if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'Esa carpeta no está autorizada.');
@@ -148,6 +179,8 @@ export async function permissionsConsole({ session, prompt, revoke = null }) {
     prompt.write(`${folder.path}`);
     prompt.write(`  id: ${folder.id}`);
     prompt.write(`  permisos: ${decision ? describeAccess(decision.access).join(', ') : 'ninguno para agentes'}`);
+    const exclusions = (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [];
+    if (exclusions.length > 0) prompt.write(`  excluidas: ${exclusions.join(', ')}`);
   }
   const continuity = await policy.getContinuity();
   prompt.write(`Continuidad: ${describeAccess(continuity, CONTINUITY_LEVELS).join(', ') || 'sin permisos'}`);

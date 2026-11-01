@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
+import { isExcluded } from './paths.js';
 
 const helper = fileURLToPath(new URL('./native_modifier.py', import.meta.url));
 export const MAX_MODIFY_BYTES = 1024 * 1024;
@@ -123,6 +124,7 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
   // Mapa propio: los permisos de lectura o creación nunca autorizan modificar.
   const grants = new WeakMap();
   const denied = () => new MotorError('MODIFY_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta modificación.');
+  const excluded = () => new MotorError('PATH_EXCLUDED', 'El usuario excluyó esa ubicación del acceso de Mind.');
   async function folderFor(id) {
     const folder = await loadAuthorizedFolder(id);
     if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'La carpeta ya no está registrada.');
@@ -133,6 +135,7 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
       if (!requester || typeof requester !== 'object') throw new MotorError('INVALID_REQUESTER', 'El anfitrión debe proporcionar la identidad opaca del solicitante.');
       const name = relativeName(relativePath);
       const folder = await folderFor(folderId);
+      if (isExcluded(folder.exclusions, name)) throw excluded();
       const authorization = Object.freeze(Object.create(null));
       grants.set(authorization, {
         requester, folderId, generation: folder.generation, relativePath: name, used: false, revoked: false,
@@ -160,11 +163,13 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
       const bytes = encodeText(content);
       const folder = await folderFor(grant.folderId);
       if (folder.generation !== grant.generation) throw denied();
+      if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const result = await modifyNative({
         root: folder.path, relativePath: grant.relativePath, expected, bytes, pythonExecutable,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();
+          if (isExcluded(current.exclusions, grant.relativePath)) throw excluded();
         },
       });
       return {

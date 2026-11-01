@@ -88,7 +88,8 @@ test('el usuario decide en el formulario del cliente; el agente no puede ampliar
   assert.match(form.message, /Resumir el presupuesto/);
   assert.match(form.message, /todo lo que contiene/);
   // Una sola elección (opción 1): se propone el nivel mínimo que cubre lo pedido.
-  assert.deepEqual(Object.keys(form.requestedSchema.properties), ['acceso']);
+  assert.deepEqual(Object.keys(form.requestedSchema.properties), ['acceso', 'excluir']);
+  assert.deepEqual(form.requestedSchema.required, ['acceso']);
   assert.equal(form.requestedSchema.properties.acceso.default, 'completo');
   assert.deepEqual(form.requestedSchema.properties.acceso.oneOf.map((item) => item.const), ['encontrar', 'leer', 'completo']);
 
@@ -136,7 +137,7 @@ test('sin formularios, la solicitud queda pendiente hasta que el usuario la apru
   assert.equal((await call('leer', { carpeta: folder, ruta: 'notas.txt' })).code, 'FOLDER_NOT_AUTHORIZED');
   assert.equal((await call('estado')).data.solicitudes_pendientes.length, 1);
 
-  const answers = ['2'];
+  const answers = ['2', ''];
   const lines = [];
   const prompt = {
     write: (line = '') => lines.push(line),
@@ -288,4 +289,30 @@ test('continuidad: permiso propio, origen fijado por Mind y continuación desde 
   assert.equal((await importer('continuidad_importar', { paquete: pack })).data.importados.length, 2);
   assert.equal((await importer('continuidad_importar', { paquete: pack })).data.sin_cambios.length, 2);
   assert.equal((await importer('continuidad_consultar', { texto: 'aprobado' })).data.total, 1);
+});
+
+test('exclusiones: el usuario las elige al autorizar; el agente puede añadir más, pero no volver a incluir', async (t) => {
+  const { folder, open, agent } = await fixture(t);
+  await fs.mkdir(path.join(folder, 'Privado'));
+  await fs.writeFile(path.join(folder, 'Privado', 'claves.txt'), 'Datos privados ficticios\n');
+  const session = await open();
+  const conn = connection({ onElicit: () => ({ action: 'accept', content: { acceso: 'completo', excluir: 'Privado' } }) });
+  const call = agent(session, conn);
+  assert.equal(conn.asked.length, 0);
+  const granted = await call('solicitar_acceso', { ruta: folder, acceso: 'completo' });
+  assert.deepEqual(granted.data.carpeta.excluidas, ['Privado']);
+  assert.equal(conn.asked[0].params.requestedSchema.properties.excluir.type, 'string');
+  assert.equal((await call('buscar', { consulta: 'claves' })).data.total, 0);
+  assert.equal((await call('explorar', { profundidad: 3 })).data.entradas.some((entry) => entry.ruta.startsWith('Privado')), false);
+  assert.equal((await call('leer', { ruta: 'Privado/claves.txt' })).code, 'PATH_EXCLUDED');
+  assert.equal((await call('crear', { ruta: 'Privado/nuevo.txt', contenido: 'x' })).code, 'PATH_EXCLUDED');
+  // Excluir más reduce el acceso: no requiere confirmación.
+  const more = await call('retirar_acceso', { carpeta: granted.data.carpeta.id, excluir: ['Proyectos'] });
+  assert.deepEqual(more.data.excluidas, ['Privado', 'Proyectos']);
+  assert.ok(more.data.entradas_retiradas_del_indice >= 2);
+  assert.equal((await call('leer', { ruta: 'Proyectos/presupuesto.md' })).code, 'PATH_EXCLUDED');
+  assert.deepEqual((await call('estado')).data.carpetas[0].excluidas, ['Privado', 'Proyectos']);
+  // Volver a incluir no es una herramienta del agente.
+  assert.equal((await call('retirar_acceso', { carpeta: granted.data.carpeta.id, incluir: ['Privado'] })).code, 'INVALID_ARGUMENTS');
+  assert.equal(await fs.readFile(path.join(folder, 'Privado', 'claves.txt'), 'utf8'), 'Datos privados ficticios\n');
 });

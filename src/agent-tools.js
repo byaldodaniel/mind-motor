@@ -164,10 +164,11 @@ export const TOOL_DEFINITIONS = Object.freeze([
   {
     name: 'retirar_acceso',
     title: 'Retirar acceso',
-    description: 'Reduce o retira permisos de una carpeta. Retirar "encontrar" (o usar todo=true) retira la carpeta de Mind y elimina su índice; los originales no se tocan.',
+    description: 'Reduce o retira permisos de una carpeta. "excluir" deja fuera de Mind subcarpetas o archivos (no se indexan, no se encuentran ni se pueden leer o modificar). Retirar "encontrar" (o todo=true) retira la carpeta de Mind y elimina su índice. Los originales no se tocan. Volver a incluir lo decide el usuario en la consola de Mind.',
     inputSchema: schema({
       carpeta: FOLDER_REF,
       permisos: { type: 'array', items: { type: 'string', enum: ACCESS_LEVELS } },
+      excluir: { type: 'array', items: { type: 'string' }, description: 'Rutas relativas dentro de la carpeta, por ejemplo ["Privado", "Finanzas/2025"].' },
       todo: { type: 'boolean' },
     }, ['carpeta']),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -410,6 +411,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
           ruta: folder.path,
           nombre: path.basename(folder.path),
           acceso: decision ? presetName(decision.access) : 'ninguno',
+          excluidas: (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [],
           permisos: decision ? describeAccess(decision.access) : [],
           ...(decision ? {} : { aviso: 'Registrada sin permisos para agentes: solicita acceso.' }),
           indice: await indexSummary(folder),
@@ -471,22 +473,38 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       if (answer.status === 'pending') return pendingAnswer(answer);
       if (answer.status !== 'approved') return { estado: answer.status === 'declined' ? 'rechazado' : 'cancelado' };
       const folder = existing ?? await motor.authorizeFolder(canonical);
+      if (answer.exclusions?.length > 0) {
+        const current = (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [];
+        await motor.setFolderExclusions(folder.id, [...current, ...answer.exclusions]);
+      }
       const saved = await policy.set(folder.id, answer.access, { channel: answer.channel });
       await session.audit('carpeta-autorizada', { carpeta: folder.id, ruta: folder.path, permisos: describeAccess(saved.access), canal: answer.channel, cliente: source });
       const index = await session.ensureIndex(folder.id, { timeoutMs: 30_000 }).catch((error) => ({ status: 'error', code: error?.code }));
       return {
         estado: 'autorizado',
-        carpeta: { id: folder.id, ruta: folder.path, permisos: describeAccess(saved.access) },
+        carpeta: {
+          id: folder.id, ruta: folder.path, permisos: describeAccess(saved.access),
+          excluidas: (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [],
+        },
         indice: index.status === 'reconciling' ? { estado: 'indexando', nota: 'La indexación inicial continúa; "estado" muestra el avance.' } : await indexSummary(folder),
       };
     },
 
     async retirar_acceso(args) {
-      only(args, ['carpeta', 'permisos', 'todo']);
+      only(args, ['carpeta', 'permisos', 'excluir', 'todo']);
       const folder = await resolveFolder(args.carpeta);
       const all = bool(args.todo, 'todo') === true;
       const removing = args.permisos === undefined ? null : normalizeAccess(args.permisos);
-      if (!all && !removing) throw invalid('Indica los permisos a retirar o todo=true.');
+      if (!all && !removing && args.excluir === undefined) throw invalid('Indica los permisos a retirar, las rutas a excluir o todo=true.');
+      if (!all && args.excluir !== undefined && !removing?.encontrar) {
+        const current = (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [];
+        const added = strings(args.excluir, 'excluir', { max: 64, itemMax: 1024 });
+        const result = await motor.setFolderExclusions(folder.id, [...current, ...added]);
+        await session.audit('rutas-excluidas', { carpeta: folder.id, excluidas: result.exclusions, cliente: source });
+        if (!removing) {
+          return { estado: 'actualizado', carpeta: folder.id, excluidas: result.exclusions, entradas_retiradas_del_indice: result.removedEntries };
+        }
+      }
       if (all || removing.encontrar) {
         await motor.revokeFolder(folder.id);
         await policy.remove(folder.id);

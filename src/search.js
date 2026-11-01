@@ -1,5 +1,6 @@
 import { MotorError } from './errors.js';
 import { validateScopeId } from './index-store.js';
+import { isExcluded } from './paths.js';
 
 export const DEFAULT_SEARCH_LIMIT = 50;
 export const MAX_SEARCH_LIMIT = 500;
@@ -214,10 +215,10 @@ export function createIndexSearch({ readFolderIndex, loadAuthorizedFolder }) {
     }
   }
 
-  /** Confirma que la concesión que produjo el índice sigue vigente al responder. */
+  /** Confirma que la concesión que produjo el índice sigue vigente al responder; devuelve el registro. */
   async function stillAuthorized(folderId, index) {
     const folder = await loadAuthorizedFolder(folderId);
-    return folder !== null && (folder.generation ?? null) === index.authorizationGeneration;
+    return folder !== null && (folder.generation ?? null) === index.authorizationGeneration ? folder : null;
   }
 
   return {
@@ -231,11 +232,13 @@ export function createIndexSearch({ readFolderIndex, loadAuthorizedFolder }) {
       const found = [];
       for (const { scope, index } of read) {
         if (!index) continue;
-        if (!(await stillAuthorized(scope.folderId, index))) {
+        const folder = await stillAuthorized(scope.folderId, index);
+        if (!folder) {
           Object.assign(scope, status(scope.folderId, 'not-authorized', null, 'FOLDER_NOT_AUTHORIZED'));
           continue;
         }
         for (const entry of index.entries) {
+          if (isExcluded(folder.exclusions, entry.path)) continue;
           const level = matches(entry, criteria);
           if (level === null) continue;
           found.push({

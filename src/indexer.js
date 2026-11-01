@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { MotorError } from './errors.js';
-import { contains, samePath } from './paths.js';
+import { contains, samePath, isExcluded } from './paths.js';
 import { scanFolder } from './index-scan.js';
 import { createIndexStore, validateScopeId } from './index-store.js';
 
@@ -153,7 +153,7 @@ export function createFolderIndexer({
           return boundIndex(await store.load(scopeId), scope);
         });
         const { entries, issues } = await scanFolder(scope.path, {
-          previous: previous?.entries ?? [], maxEntries, pythonExecutable,
+          previous: previous?.entries ?? [], maxEntries, pythonExecutable, exclude: scope.exclusions ?? [],
         });
         // El recorrido no retiene el bloqueo. Se descarta si cambió su base.
         requireSameAuthorization(scope, await authorized(scopeId));
@@ -214,6 +214,7 @@ export function createFolderIndexer({
         if (entry?.type !== 'file' || entry.state !== 'indexed' || typeof entry.path !== 'string') {
           return reconcile('INVALID_CREATED_ENTRY');
         }
+        if (isExcluded(scope.exclusions, entry.path)) return reconcile('PATH_EXCLUDED');
         const index = boundIndex(await store.load(scopeId), scope);
         if (!index) return { status: 'not-indexed', generation: null, code: null };
         const known = new Map(index.entries.map((item) => [item.path, item]));
@@ -263,6 +264,7 @@ export function createFolderIndexer({
         if (entry?.type !== 'file' || entry.state !== 'indexed' || typeof entry.path !== 'string') {
           return reconcile('INVALID_MODIFIED_ENTRY');
         }
+        if (isExcluded(scope.exclusions, entry.path)) return reconcile('PATH_EXCLUDED');
         const index = boundIndex(await store.load(scopeId), scope);
         if (!index) return { status: 'not-indexed', generation: null, code: null };
         const position = index.entries.findIndex((item) => item.path === entry.path);
@@ -280,6 +282,34 @@ export function createFolderIndexer({
         // save valida la forma completa; una entrada mal formada no se publica.
         await store.save({ ...index, generation, entries });
         return { status: 'updated', generation, code: null };
+      }));
+    },
+
+    /**
+     * Cambia las exclusiones del ámbito bajo la misma coordinación que las
+     * publicaciones y retira del índice vigente las entradas excluidas, para que
+     * dejen de encontrarse en ese mismo momento. Lo que se vuelve a incluir
+     * aparece en la siguiente reconciliación.
+     * @param {string} scopeId
+     * @param {() => Promise<string[] | null>} change Escribe el registro y devuelve las exclusiones vigentes.
+     */
+    async applyExclusions(scopeId, change) {
+      validateScopeId(scopeId);
+      return exclusive(scopeId, () => store.exclusive(scopeId, async () => {
+        const exclusions = await change();
+        if (exclusions === null) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'La carpeta no está autorizada o fue retirada.');
+        const scope = await authorized(scopeId);
+        const index = boundIndex(await store.load(scopeId), scope);
+        let removed = 0;
+        if (index) {
+          const entries = index.entries.filter((entry) => !isExcluded(exclusions, entry.path));
+          const issues = index.issues.filter((issue) => issue.path === '' || !isExcluded(exclusions, issue.path));
+          removed = index.entries.length - entries.length;
+          if (removed > 0 || issues.length !== index.issues.length) {
+            await store.save({ ...index, generation: index.generation + 1, entries, issues });
+          }
+        }
+        return { exclusions, removedEntries: removed };
       }));
     },
 

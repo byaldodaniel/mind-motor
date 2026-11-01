@@ -37,7 +37,7 @@ function iso(milliseconds) {
  * Ejecuta el auxiliar nativo. No hay alternativa por rutas: si el recorrido por
  * referencias no está disponible, la operación se deniega.
  */
-function runHelper({ root, maxEntries, pythonExecutable }) {
+function runHelper({ root, maxEntries, pythonExecutable, exclude = [] }) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonExecutable, ['-I', '-B', helper], {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -69,7 +69,7 @@ function runHelper({ root, maxEntries, pythonExecutable }) {
         reject(new MotorError('SAFE_SCAN_FAILED', messages.SAFE_SCAN_FAILED, { cause }));
       }
     });
-    child.stdin.end(`${JSON.stringify({ root, maxEntries })}\n`);
+    child.stdin.end(`${JSON.stringify({ root, maxEntries, ...(exclude.length > 0 ? { exclude } : {}) })}\n`);
   });
 }
 
@@ -134,7 +134,7 @@ export function mergeScan(scanned, { previous, maxEntries }) {
  * @param {{ previous: IndexEntry[], maxEntries: number, pythonExecutable: string }} options
  * @returns {Promise<{ entries: IndexEntry[], issues: ScanIssue[] }>}
  */
-export async function scanFolder(root, { previous, maxEntries, pythonExecutable }) {
-  const scanned = await runHelper({ root, maxEntries, pythonExecutable });
+export async function scanFolder(root, { previous, maxEntries, pythonExecutable, exclude = [] }) {
+  const scanned = await runHelper({ root, maxEntries, pythonExecutable, exclude });
   return mergeScan(scanned, { previous, maxEntries });
 }

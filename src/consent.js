@@ -193,7 +193,12 @@ export function createConsent({ connection, requests }) {
       const choice = connection.protocolVersion === '2025-11-25'
         ? { type: 'string', title: 'Acceso', oneOf: presets.map((name) => ({ const: name, title: PRESET_LABELS[name] })), default: suggested }
         : { type: 'string', title: 'Acceso', enum: presets, enumNames: presets.map((name) => PRESET_LABELS[name]), default: suggested };
-      const response = await elicit(lines.join('\n'), { acceso: choice }, ['acceso']);
+      const exclude = {
+        type: 'string', title: 'Excluir subcarpetas (opcional)',
+        description: 'Rutas dentro de la carpeta, separadas por comas; por ejemplo: Privado, Finanzas/2025',
+        default: '',
+      };
+      const response = await elicit(lines.join('\n'), { acceso: choice, excluir: exclude }, ['acceso']);
       if (response.action === 'decline') return { status: 'declined' };
       if (response.action !== 'accept') {
         // Cancelado: el usuario cerró el formulario o el cliente no pudo mostrarlo
@@ -207,7 +212,9 @@ export function createConsent({ connection, requests }) {
       if (typeof chosen !== 'string' || !Object.hasOwn(ACCESS_PRESETS, chosen)) return { status: 'declined' };
       // Lo ya concedido se conserva; reducir permisos se hace explícitamente al retirar.
       const access = normalizeAccess([...describeAccess(already), ...ACCESS_PRESETS[chosen]]);
-      return { status: 'approved', access, channel: 'formulario-del-cliente' };
+      const excluded = typeof response.content?.excluir === 'string'
+        ? response.content.excluir.split(',').map((item) => item.trim()).filter(Boolean) : [];
+      return { status: 'approved', access, exclusions: excluded, channel: 'formulario-del-cliente' };
     },
 
     async askContinuity({ requested, current, reason, clientInfo }) {

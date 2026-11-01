@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
+import { isExcluded } from './paths.js';
 
 const helper = fileURLToPath(new URL('./native_reader.py', import.meta.url));
 export const MAX_TEXT_BYTES = 1024 * 1024;
@@ -77,6 +78,7 @@ export function readNative({ root, relativePath, pythonExecutable, confirm }) {
 export function createTextReader({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3' }) {
   const grants = new WeakMap();
   const denied = () => new MotorError('READ_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta lectura.');
+  const excluded = () => new MotorError('PATH_EXCLUDED', 'El usuario excluyó esa ubicación del acceso de Mind.');
   async function folderFor(id) {
     const folder = await loadAuthorizedFolder(id);
     if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'La carpeta ya no está registrada.');
@@ -87,6 +89,7 @@ export function createTextReader({ loadAuthorizedFolder, pythonExecutable = proc
       if (!requester || typeof requester !== 'object') throw new MotorError('INVALID_REQUESTER', 'El anfitrión debe proporcionar la identidad opaca del solicitante.');
       const name = relativeName(relativePath);
       const folder = await folderFor(folderId);
+      if (isExcluded(folder.exclusions, name)) throw excluded();
       const authorization = Object.freeze(Object.create(null));
       grants.set(authorization, { requester, folderId, generation: folder.generation, relativePath: name, used: false, revoked: false });
       return authorization;
@@ -105,11 +108,13 @@ export function createTextReader({ loadAuthorizedFolder, pythonExecutable = proc
       grant.used = true; // Un solo intento; se consume antes de cualquier await.
       const folder = await folderFor(grant.folderId);
       if (folder.generation !== grant.generation) throw denied();
+      if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const content = await readNative({
         root: folder.path, relativePath: grant.relativePath, pythonExecutable,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();
+          if (isExcluded(current.exclusions, grant.relativePath)) throw excluded();
         },
       });
       return { folderId: grant.folderId, relativePath: grant.relativePath, content };

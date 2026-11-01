@@ -272,9 +272,23 @@ class Windows:
         self.kernel.CloseHandle(handle)
 
 
-def scan(root, max_entries, backend=None, before_open=None):
-    """Devuelve registros e incidencias. before_open solo es una barrera de pruebas."""
+# Windows y macOS no distinguen mayúsculas por defecto: una exclusión debe cubrir
+# el mismo nombre escrito de otra forma.
+FOLD_CASE = os.name == 'nt' or sys.platform == 'darwin'
+
+
+def _key(relative):
+    return relative.lower() if FOLD_CASE else relative
+
+
+def scan(root, max_entries, backend=None, before_open=None, exclude=()):
+    """Devuelve registros e incidencias. before_open solo es una barrera de pruebas.
+
+    exclude: rutas relativas ("/") que el usuario excluyó. No se registran ni se
+    abren: tampoco se listan ni se recorren sus descendientes.
+    """
     backend = backend or (Windows() if os.name == 'nt' else Posix())
+    excluded = frozenset(_key(item) for item in exclude)
     try:
         handle, volume = backend.open_root(root)
     except Refusal as error:
@@ -307,6 +321,8 @@ def scan(root, max_entries, backend=None, before_open=None):
                 backend.close(parent)
                 continue
             relative = f'{base}/{child.name}' if base else child.name
+            if excluded and _key(relative) in excluded:
+                continue
             if child.error == 'NAME_NOT_UTF8':
                 issues.append({'path': base, 'code': child.error})
                 continue
@@ -347,7 +363,10 @@ def scan(root, max_entries, backend=None, before_open=None):
 def run():
     try:
         request = json.loads(sys.stdin.buffer.readline(65536))
-        records, issues = scan(request['root'], int(request['maxEntries']))
+        exclude = request.get('exclude', [])
+        if not isinstance(exclude, list) or not all(isinstance(item, str) and item for item in exclude):
+            raise Refusal('SAFE_SCAN_FAILED')
+        records, issues = scan(request['root'], int(request['maxEntries']), exclude=exclude)
         sys.stdout.write(json.dumps({'records': records, 'issues': issues}))
         return 0
     except (Refusal, ScopeError) as error:

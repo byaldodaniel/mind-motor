@@ -13,6 +13,10 @@ Para el usuario:
   autorizar [ruta]           Revisa y aprueba solicitudes de agentes; con una ruta,
                              autoriza esa carpeta (pregunta qué permisos conceder).
   permisos [retirar <id>]    Lista permisos o retira una carpeta de Mind.
+  permisos excluir <id> <subcarpeta>...
+  permisos incluir <id> <subcarpeta>...
+                             Deja fuera de Mind subcarpetas de una carpeta autorizada,
+                             o vuelve a incluirlas.
   reparar                    Limpia bloqueos y temporales abandonados tras un cierre
                              abrupto (cuando no hay agentes abiertos).
   version                    Versión del Motor y de los componentes.
@@ -137,7 +141,7 @@ export async function main(args) {
       case 'permisos':
       case 'reparar': {
         const consoleModule = await import('./console.js');
-        if (command !== 'permisos' || parameters[0] === 'retirar') consoleModule.requireInteractive();
+        if (command !== 'permisos' || ['retirar', 'incluir'].includes(parameters[0])) consoleModule.requireInteractive();
         return await withSession(options, async (session) => {
           const prompt = consoleModule.createPrompter();
           try {
@@ -146,7 +150,14 @@ export async function main(args) {
               const requested = ['leer', 'escribir', 'organizar'].filter((level) => parameters.includes(`--${level}`));
               await consoleModule.authorizeConsole({ session, prompt, folderPath, requested: requested.length ? requested : null });
             } else if (command === 'permisos') {
-              await consoleModule.permissionsConsole({ session, prompt, revoke: parameters[0] === 'retirar' ? parameters[1] ?? null : null });
+              const [action, target, ...paths] = parameters;
+              await consoleModule.permissionsConsole({
+                session, prompt,
+                revoke: action === 'retirar' ? target ?? null : null,
+                exclude: action === 'excluir' ? paths : null,
+                include: action === 'incluir' ? paths : null,
+                target: ['excluir', 'incluir'].includes(action) ? target ?? null : null,
+              });
             } else {
               await consoleModule.repairConsole({ session, prompt });
             }

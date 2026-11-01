@@ -136,7 +136,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     throw new MotorError('INVALID_PROTECTED_DIRECTORIES', 'Las ubicaciones protegidas deben ser rutas absolutas.');
   }
   const protectedPhysical = await Promise.all(protectedDirectories.map((item) => realpath(item)));
-  const { loadAuthorizedFolder, ...folders } = createFolderRegistry(base, motor, protectedPhysical);
+  // setExclusions solo se usa bajo la coordinación del índice (setFolderExclusions).
+  const { loadAuthorizedFolder, setExclusions, ...folders } = createFolderRegistry(base, motor, protectedPhysical);
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
@@ -172,6 +173,17 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
      * @returns {Promise<{ id: string, path: string, generation: string | null } | null>}
      */
     getAuthorizedFolder: (id) => loadAuthorizedFolder(id),
+
+    /**
+     * Solo anfitrión: subcarpetas que el usuario excluye del ámbito. Mind no las
+     * recorre, no las indexa y no permite leerlas ni escribirlas. Se retiran del
+     * índice vigente en el acto.
+     * @param {string} id
+     * @param {string[]} exclusions Rutas relativas con "/".
+     */
+    async setFolderExclusions(id, exclusions) {
+      return indexer.applyExclusions(id, () => setExclusions(id, exclusions));
+    },
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
     // Funciones: administración y ejecución manual del anfitrión. getFunctionVersion
     // queda interno del ejecutor; no se entregan a agentes.
