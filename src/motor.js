@@ -5,6 +5,7 @@ import { MotorError } from './errors.js';
 import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
 import { createFolderRegistry } from './folders.js';
+import { createTextReader } from './text-reader.js';
 
 export { MotorError } from './errors.js';
 
@@ -12,7 +13,7 @@ const MOTOR_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
 const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /** @typedef {{ id: string, value: string }} TechnicalRecord */
-/** @typedef {{ baseDirectory: string }} MotorOptions */
+/** @typedef {{ baseDirectory: string, pythonExecutable?: string }} MotorOptions */
 /**
  * @typedef {object} Motor
  * @property {string} baseDirectory Ruta física de la Base externa existente.
@@ -22,6 +23,9 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {() => Promise<import('./folders.js').AuthorizedFolder[]>} listAuthorizedFolders
  * @property {(id: string) => Promise<boolean>} revokeFolder
  * @property {(id: string, targetPath: string) => Promise<{folderId: string, path: string}>} checkFolderScope
+ * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextRead Solo anfitrión administrativo.
+ * @property {(authorization: object) => boolean} revokeTextRead Solo antes del intento.
+ * @property {(request: {requester: object, authorization: object}) => Promise<{folderId: string, relativePath: string, content: string}>} readTextFile
  */
 
 function validateId(id) {
@@ -35,7 +39,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -62,9 +66,11 @@ export async function openMotor({ baseDirectory } = {}) {
     return path.join(base, `record-${id}.json`);
   }
 
+  const { loadAuthorizedFolder, ...folders } = createFolderRegistry(base, motor);
   return Object.freeze({
     baseDirectory: base,
-    ...createFolderRegistry(base, motor),
+    ...folders,
+    ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
 
     async writeRecord(id, value) {
       const target = filename(id);

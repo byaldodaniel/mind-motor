@@ -1,6 +1,6 @@
 {
   "name": "mind-motor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Núcleo local de Mind 1.0: Motor y Base independientes.",
   "type": "module",
@@ -10,6 +10,6 @@
   "exports": "./src/motor.js",
   "scripts": {
     "start": "node src/cli.js",
-    "test": "node --test"
+    "test": "node scripts/test.mjs"
   }
 }

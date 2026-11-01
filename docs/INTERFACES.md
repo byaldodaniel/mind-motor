@@ -1,4 +1,4 @@
-# Interfaces mínimas — Incrementos 01 y 02
+# Interfaces mínimas — Incrementos 01 a 03
 
 ## Contrato ejecutable
 
@@ -47,6 +47,9 @@ SHA-256; en Windows se normaliza la diferencia entre mayúsculas y minúsculas.
 Cada carpeta tiene su propio archivo de autorización versionado en la Base, separado
 de los registros técnicos de texto. La retirada elimina únicamente ese archivo.
 No se guardan nombres de agentes, permisos por operación ni credenciales.
+Los nuevos registros usan formato v2 con `generation` aleatoria: retirar y volver
+a registrar la misma ubicación no reactiva permisos anteriores. Se siguen leyendo
+registros v1 del Incremento 02, sin migrarlos ni reescribirlos al consultar.
 
 `checkFolderScope` prepara una frontera de alcance para operaciones futuras:
 comprueba que la autorización sigue presente, que su raíz existe y no ha sido
@@ -92,6 +95,55 @@ suponer una Base global o escribir datos técnicos dentro del código.
 
 Estas filas fijan límites de integración, no implementan ni congelan los contratos
 particulares. El Incremento 02 incorpora el registro administrativo de carpetas.
-Permisos de agentes, acceso a originales, índices, planificación y formato de
-continuidad requieren incrementos aprobados por separado. El almacenamiento de
+El Incremento 03 incorpora permisos efímeros y lectura puntual de originales.
+Integración de agentes externos, índices, planificación y formato de continuidad
+requieren incrementos aprobados por separado. El almacenamiento de
 texto de este núcleo no pretende resolver por adelantado sus necesidades.
+
+## Lectura puntual y autorización — Incremento 03
+
+`openMotor({ baseDirectory, pythonExecutable? })` permite al anfitrión elegir un
+intérprete de confianza. El valor predeterminado es `python` en Windows y `python3`
+en macOS/Linux. No se usa shell; se invoca el auxiliar propio con `-I -B` (modo
+aislado y sin bytecode). Una invocación por intento, timeout de 10 segundos.
+
+| Operación | Entrada | Resultado |
+|---|---|---|
+| `grantTextRead` | `{ requester: object, folderId, relativePath }` | Permiso opaco efímero, solo para ese solicitante y archivo |
+| `revokeTextRead` | Objeto permiso original | `boolean`, retirada antes de comenzar el intento |
+| `readTextFile` | `{ requester: object, authorization: object }` | `Promise<{ folderId, relativePath, content }>` |
+
+La concesión es administrativa: el anfitrión de confianza la ejecuta tras la
+autorización explícita del usuario. No se admite un nombre de agente como prueba
+de identidad: `requester` se compara por identidad de objeto, y el permiso es una
+clave de un `WeakMap` privado. Copiarlo, serializarlo, conocer la ruta/id, usarlo
+desde otra instancia o presentar otro objeto con el mismo nombre no concede acceso.
+El anfitrión entrega al agente únicamente una función ligada a su identidad y su
+permiso, sin la API administrativa. Esta es una frontera de capacidades dentro de
+un proceso confiable; no autentica agentes remotos ni aísla código hostil en el
+proceso. No implementa una interfaz de consentimiento ni un transporte externo.
+
+`relativePath` utiliza `/` en los tres sistemas. Rechaza componentes vacíos, `.` y
+`..`, rutas absolutas, barras inversas, NUL/controles, ADS, nombres reservados y
+alias Win32 con punto/espacio final. El permiso fija la ruta; la lectura no acepta
+una ruta alternativa. Es de un solo intento y se consume antes de E/S: un fallo
+también exige una nueva autorización. No persiste entre procesos.
+
+Se consulta el registro antes de abrir y otra vez después de obtener el descriptor,
+antes de leer. Si se retiró o cambió su generación, no se lee el contenido. La
+retirada durante una lectura ya iniciada no cancela ni recupera bytes entregados;
+no hay transacciones entre procesos. `revokeTextRead` devuelve `false` si el intento
+ya comenzó. El registro sigue autorizando una ubicación, no un inode histórico:
+reemplazar un archivo o una carpeta ordinaria antes de abrir puede seleccionar su
+reemplazo en esa ubicación. Una vez abierto, se conserva el objeto adquirido.
+
+Solo archivos regulares, UTF-8 estricto sin NUL, máximo 1 MiB, BOM preservado. No
+se presupone texto por extensión. Los errores descartan todos los bytes acumulados.
+Los permisos del SO siguen aplicándose; no se solicitan derechos de escritura.
+
+Errores nuevos: `INVALID_REQUESTER`, `INVALID_READ_PATH`, `READ_NOT_AUTHORIZED`,
+`ACCESS_DENIED`, `FILE_NOT_FOUND`, `UNSAFE_PATH`, `FILE_TOO_LARGE`, `TEXT_UNREADABLE`,
+`READ_FAILED`, `SAFE_OPEN_UNAVAILABLE`. Se conservan los errores del registro de
+carpetas y metadatos. Ningún mensaje contiene el contenido parcial del original.
+
+El algoritmo, su evidencia y sus límites están en [INCREMENTO_03.md](INCREMENTO_03.md).

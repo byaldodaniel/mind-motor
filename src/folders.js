@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { readJson, writeJson, removeJson } from './storage.js';
@@ -55,22 +55,27 @@ export function createFolderRegistry(baseDirectory, motorDirectory) {
     }
   }
 
-  async function load(id) {
+  async function load(id, includeGeneration = false) {
     const stored = await readJson(filename(id));
     if (stored === null) return null;
     const data = stored.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)
-        || Object.keys(data).length !== 4 || data.format !== 'mind-folder-authorization'
-        || data.version !== 1 || data.id !== id || typeof data.path !== 'string'
+        || data.format !== 'mind-folder-authorization'
+        || !((data.version === 1 && Object.keys(data).length === 4)
+          || (data.version === 2 && Object.keys(data).length === 5
+            && typeof data.generation === 'string' && /^[a-f0-9-]{36}$/.test(data.generation)))
+        || data.id !== id || typeof data.path !== 'string'
         || data.path.includes('\0') || !path.isAbsolute(data.path)
         || authorizationId(data.path) !== id) {
       throw new MotorError('AUTHORIZATION_CORRUPT', 'El registro de autorización no tiene el formato esperado.');
     }
     rejectInternal(data.path);
-    return { id: data.id, path: data.path };
+    return { id: data.id, path: data.path, ...(includeGeneration ? { generation: data.generation ?? null } : {}) };
   }
 
   return {
+    // Uso interno del Motor; no se expone al solicitante.
+    loadAuthorizedFolder: (id) => load(id, true),
     /** @param {string} folderPath @returns {Promise<AuthorizedFolder>} */
     async authorizeFolder(folderPath) {
       const canonical = await resolveFolder(folderPath);
@@ -79,7 +84,7 @@ export function createFolderRegistry(baseDirectory, motorDirectory) {
       const existing = await load(id);
       if (existing) return existing;
       await writeJson(filename(id), {
-        format: 'mind-folder-authorization', version: 1, id, path: canonical,
+        format: 'mind-folder-authorization', version: 2, id, path: canonical, generation: randomUUID(),
       });
       return { id, path: canonical };
     },
