@@ -7,6 +7,10 @@ indexación cada vez. Rama `funcion-01-observacion-indices`, creada desde `main`
 
 ## Qué se implementó
 
+> Integración posterior: `motor.openIndexObserver(options)` crea este observador
+> ligado al Motor y `revokeFolder` detiene su observación; véase
+> [INTERFACES.md](INTERFACES.md#observación-de-cambios--función-01-integrada).
+
 - `src/index-observer.js`: módulo independiente. No modifica `openMotor`, el
   indexador, el almacén de índices, el auxiliar nativo ni `package.json`.
 - `test/index-observer.test.js`: pruebas en la matriz existente (Windows, macOS

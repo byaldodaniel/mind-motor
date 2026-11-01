@@ -10,6 +10,7 @@ import { createTextCreator } from './text-creator.js';
 import { createTextModifier } from './text-modifier.js';
 import { createFolderIndexer } from './indexer.js';
 import { createIndexSearch } from './search.js';
+import { createIndexObserver } from './index-observer.js';
 
 export { MotorError } from './errors.js';
 export { textVersion } from './text-modifier.js';
@@ -40,6 +41,7 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextModify Solo anfitrión administrativo.
  * @property {(authorization: object) => boolean} revokeTextModify Solo antes del intento.
  * @property {(request: {requester: object, authorization: object, expectedVersion: string, content: string}) => Promise<ModifiedTextFile>} modifyTextFile
+ * @property {(options?: object) => ReturnType<typeof import('./index-observer.js').createIndexObserver>} openIndexObserver Capacidad opcional de la sesión del anfitrión.
  */
 /**
  * @typedef {object} CreatedTextFile
@@ -110,7 +112,16 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
   });
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
-  return Object.freeze({
+  /** Observadores abiertos en esta instancia; solo existen si el anfitrión los abre. */
+  const observers = new Set();
+
+  async function stopObservation(id) {
+    // La reconciliación pedida falla con FOLDER_NOT_AUTHORIZED y el observador se detiene como 'revoked'.
+    await Promise.allSettled([...observers].filter((observer) => observer.status(id))
+      .map((observer) => observer.reconcile(id)));
+  }
+
+  const api = Object.freeze({
     baseDirectory: base,
     ...folders,
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
@@ -150,8 +161,34 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
     async revokeFolder(id) {
       // Primero se retira la autoridad. Un fallo de limpieza no la restaura.
       const removed = await folders.revokeFolder(id);
-      await indexer.removeFolderIndex(id);
+      try {
+        await indexer.removeFolderIndex(id);
+      } finally {
+        await stopObservation(id);
+      }
       return removed;
+    },
+
+    /**
+     * Abre la observación de índices para la sesión del anfitrión. Es opcional:
+     * sin llamarla no hay observaciones ni temporizadores. Nada mantiene vivo el
+     * proceso; close() libera todo. No se entrega a agentes.
+     * @param {{ onReport?: Function, strategy?: 'recursive' | 'directories' }} [options]
+     */
+    openIndexObserver(options = {}) {
+      // El observador solo actúa a través de este Motor; no admite otro.
+      const observer = createIndexObserver({ ...options, motor: api });
+      observers.add(observer);
+      return Object.freeze({
+        ...observer,
+        async close() {
+          try {
+            await observer.close();
+          } finally {
+            observers.delete(observer);
+          }
+        },
+      });
     },
 
     async writeRecord(id, value) {
@@ -178,4 +215,5 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
       return { id: record.id, value: record.value };
     },
   });
+  return api;
 }
