@@ -452,3 +452,44 @@ proceso se detecta por la observación de la Base o por la comprobación periód
 (`authorizationCheckMs`, 5 s). Una nueva autorización de la misma ruta no hereda
 la observación. Cerrar el observador no retira autorizaciones ni índices.
 
+
+## Capa de producto (Mind 1.0)
+
+Interfaces añadidas para el producto portable. La descripción de uso está en
+[PRODUCTO.md](PRODUCTO.md) y el estado, en [AVANCE.md](AVANCE.md).
+
+### Opciones y operaciones del Motor para el anfitrión
+
+- `openMotor({ ..., protectedDirectories })`: ubicaciones adicionales que ninguna
+  carpeta autorizada puede contener ni ocupar. En el producto es la carpeta
+  completa de Mind (iniciadores, runtimes y Base).
+- `motor.getAuthorizedFolder(id)` → `{ id, path, generation, exclusions } | null`.
+  Solo anfitrión: permite ligar decisiones del usuario a la autorización vigente.
+- `motor.setFolderExclusions(id, rutas)` → `{ exclusions, removedEntries }`. Solo
+  anfitrión. Cambia las exclusiones bajo la misma coordinación que las
+  publicaciones del índice y retira en el acto las entradas excluidas. El registro
+  pasa a la versión 3 (`exclusions`). Lectura, creación y modificación rechazan
+  `PATH_EXCLUDED` al conceder, al usar y al confirmar; el recorrido nativo no
+  entra en lo excluido.
+
+### Módulos de producto
+
+| Módulo | Responsabilidad |
+|---|---|
+| `src/layout.js` | Estructura de la carpeta portable; modo producto por `mind-producto.json`. |
+| `src/base-format.js` | `mind-base.json`: primer uso y rechazo de una Base más reciente (`BASE_TOO_NEW`). |
+| `src/session.js` | Sesión ligada al agente: reconciliación inicial, observación, rastro de eliminados, registro de sesión en `Base/sesiones/` y extensiones. |
+| `src/mcp-server.js` | JSON-RPC 2.0 por stdio; negociación de versión; elicitación. |
+| `src/mcp-session.js` | `mind mcp`: une servidor, sesión y herramientas; cierre ordenado. |
+| `src/access-policy.js` | Decisiones del usuario por carpeta (`folder-access-<id>.json`) y para la continuidad, ligadas a la generación. |
+| `src/consent.js` | Formulario del cliente o solicitud pendiente (`consent-request-<id>.json`); validación de carpetas candidatas. |
+| `src/console.js` | `mind autorizar`, `permisos`, `reparar` (terminal interactivo). |
+| `src/agent-tools.js` | Anfitrión de confianza: herramientas del agente sobre permisos de un solo intento. |
+| `src/removals.js` | Rastro de eliminados (`folder-removed-<id>.json`): solo metadatos, 30 días. |
+| `src/tools/`, `src/commands/`, `src/session-extensions.js` | Puntos de extensión por área. |
+
+### Archivos de la Base añadidos
+
+`mind-base.json`, `folder-access-<id>.json`, `agent-continuity-access.json`,
+`consent-request-<uuid>.json`, `folder-removed-<id>.json`, `auditoria.jsonl` y
+`sesiones/sesion-<uuid>.json`. Ninguno contiene contenido de los originales.
