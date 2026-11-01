@@ -6,7 +6,8 @@ precisión y solo con autorización explícita del anfitrión. No hay edición,
 movimiento ni eliminación.
 
 Módulo independiente: `src/text-creator.js` (JS) y `src/native_writer.py`
-(auxiliar nativo, biblioteca estándar). Aún no está conectado a `openMotor`.
+(auxiliar nativo, biblioteca estándar). `openMotor` lo expone; véase
+[INTERFACES.md](INTERFACES.md) para la integración y la coherencia del índice.
 
 ## Uso del anfitrión
 
