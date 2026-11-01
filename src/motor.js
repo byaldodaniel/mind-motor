@@ -7,10 +7,12 @@ import { contains } from './paths.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
 import { createTextCreator } from './text-creator.js';
+import { createTextModifier } from './text-modifier.js';
 import { createFolderIndexer } from './indexer.js';
 import { createIndexSearch } from './search.js';
 
 export { MotorError } from './errors.js';
+export { textVersion } from './text-modifier.js';
 
 const MOTOR_DIRECTORY = fileURLToPath(new URL('..', import.meta.url));
 const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -35,6 +37,9 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextCreate Solo anfitrión administrativo.
  * @property {(authorization: object) => boolean} revokeTextCreate Solo antes del intento.
  * @property {(request: {requester: object, authorization: object, content: string}) => Promise<CreatedTextFile>} createTextFile
+ * @property {(request: {requester: object, folderId: string, relativePath: string}) => Promise<object>} grantTextModify Solo anfitrión administrativo.
+ * @property {(authorization: object) => boolean} revokeTextModify Solo antes del intento.
+ * @property {(request: {requester: object, authorization: object, expectedVersion: string, content: string}) => Promise<ModifiedTextFile>} modifyTextFile
  */
 /**
  * @typedef {object} CreatedTextFile
@@ -42,6 +47,16 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {string} relativePath
  * @property {number} size
  * @property {import('./index-scan.js').IndexEntry} indexEntry Metadatos leídos del archivo creado.
+ * @property {{ status: 'updated' | 'current' | 'not-indexed' | 'needs-reconciliation', generation: number | null, code: string | null }} index
+ */
+/**
+ * @typedef {object} ModifiedTextFile
+ * @property {string} folderId
+ * @property {string} relativePath
+ * @property {number} size
+ * @property {string} previousVersion Versión verificada antes de publicar.
+ * @property {string} version Versión del contenido publicado; sirve para la siguiente modificación.
+ * @property {import('./index-scan.js').IndexEntry} indexEntry Metadatos leídos del archivo publicado.
  * @property {{ status: 'updated' | 'current' | 'not-indexed' | 'needs-reconciliation', generation: number | null, code: string | null }} index
  */
 
@@ -94,6 +109,7 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
     },
   });
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
+  const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
   return Object.freeze({
     baseDirectory: base,
     ...folders,
@@ -114,6 +130,21 @@ export async function openMotor({ baseDirectory, pythonExecutable } = {}) {
         index = { status: 'needs-reconciliation', generation: null, code: error?.code ?? 'INDEX_UPDATE_FAILED' };
       }
       return { ...created, index };
+    },
+
+    grantTextModify: modifier.grantTextModify,
+    revokeTextModify: modifier.revokeTextModify,
+
+    async modifyTextFile(request) {
+      const modified = await modifier.modifyTextFile(request);
+      let index;
+      try {
+        index = await indexer.recordModifiedFile(modified.folderId, modified.indexEntry);
+      } catch (error) {
+        // El cambio ya está publicado: un fallo del índice no lo anula ni publica datos dudosos.
+        index = { status: 'needs-reconciliation', generation: null, code: error?.code ?? 'INDEX_UPDATE_FAILED' };
+      }
+      return { ...modified, index };
     },
 
     async revokeFolder(id) {

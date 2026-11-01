@@ -243,3 +243,80 @@ Errores: los de [FUNCION_03_CREAR.md](FUNCION_03_CREAR.md) (`CREATE_NOT_AUTHORIZ
 `FILE_EXISTS`, `PARENT_NOT_FOUND`, `UNSAFE_PATH`, `CREATE_UNCONFIRMED`, …). Si el
 resultado es `CREATE_FAILED` por tiempo o `CREATE_UNCONFIRMED`, el archivo puede
 existir sin entrada en el índice: corresponde reconciliar.
+
+## Modificación de un archivo de texto existente — Función 03 integrada
+
+| Operación de Motor | Entrada | Resultado |
+|---|---|---|
+| `grantTextModify` | `{ requester: object, folderId, relativePath }` | Permiso opaco de un solo intento. Solo anfitrión. |
+| `revokeTextModify` | Objeto permiso original | `boolean`: retirado antes de comenzar el intento. Solo anfitrión. |
+| `modifyTextFile` | `{ requester, authorization, expectedVersion, content }` | `Promise<{ folderId, relativePath, size, previousVersion, version, indexEntry, index }>` |
+| `textVersion(content)` (exportada) | Texto | `"sha256:<64 hex>"` de sus bytes UTF-8 |
+
+El núcleo es `src/text-modifier.js` + `src/native_modifier.py`
+([FUNCION_03_MODIFICAR.md](FUNCION_03_MODIFICAR.md)). `openMotor` lo crea con el
+mismo `loadAuthorizedFolder` y `pythonExecutable` que la lectura y la creación.
+Los permisos de modificación viven en su propio mapa: no sirven para leer ni crear,
+ni al revés. Se ligan por identidad de objeto al `requester`, a la carpeta (id +
+generación) y a la ruta exacta. Se consumen antes de validar o abrir, no persisten
+entre procesos ni sirven en otra instancia. Retirar o reautorizar la carpeta los
+invalida.
+
+### Versión y `VERSION_CONFLICT`
+
+`expectedVersion` es `textVersion(content)` del texto que el agente leyó con
+`readTextFile`. Coincide con el archivo porque la lectura devuelve UTF-8 estricto
+con el BOM preservado. El auxiliar vuelve a leer el archivo por el mismo handle
+que va a sustituir y compara el SHA-256. Si difiere, falla con
+`VERSION_CONFLICT` y no escribe nada en el archivo ni en el índice: el agente
+debe releer, rehacer su cambio y pedir un permiso nuevo. Antes de publicar se
+comprueba de nuevo que el nombre sigue designando ese mismo archivo. Si fue
+sustituido, borrado o cambiado entretanto, también da `VERSION_CONFLICT`.
+`version` del resultado es la versión publicada.
+
+### Límites de concurrencia
+
+- Windows: mientras dura la operación el archivo se mantiene abierto sin compartir
+  escritura, así que nadie puede cambiar su contenido. Si otro programa ya lo tenía
+  abierto para escribir, falla con `FILE_IN_USE`. Sí se permite renombrarlo o
+  borrarlo, lo que se detecta salvo en la ventana final.
+- POSIX: no hay bloqueos obligatorios. Un cambio ajeno anterior a la última
+  comprobación (inode, tamaño, mtime y ctime) se detecta.
+- En ambos queda una ventana de microsegundos entre esa última comprobación y el
+  rename atómico en la que un cambio ajeno simultáneo podría perderse. Si eso deja
+  un resultado que no se puede confirmar, la operación devuelve `MODIFY_UNCONFIRMED`.
+- Dos agentes con la misma versión: se publica uno y el otro recibe
+  `VERSION_CONFLICT` (o `FILE_IN_USE` en Windows si coinciden en la apertura).
+- No hay transacciones ni bloqueo entre procesos para el índice. Una publicación
+  concurrente del índice da `INDEX_CONFLICT` y pide reconciliación.
+
+### Coherencia del índice
+
+Tras publicar, el Motor llama a `recordModifiedFile` del indexador, en la misma
+cola por ámbito que `indexFolder` y `recordCreatedFile`. La entrada solo se
+sustituye si el índice vigente ya tenía ese nombre como archivo. `index.status`
+tiene los mismos valores que en la creación:
+
+| `status` | Significado |
+|---|---|
+| `updated` | Entrada sustituida; `generation` del índice aumenta en 1. |
+| `current` | El índice ya tenía exactamente esa entrada. |
+| `not-indexed` | La carpeta no tiene índice vigente; no se crea uno. |
+| `needs-reconciliation` | No se publicó nada; `code` explica el motivo. |
+
+Motivos de `needs-reconciliation`:
+- `INDEX_ENTRY_MISSING`: el índice no conocía el archivo.
+- `INDEX_ENTRY_CONFLICT`: el índice tenía ese nombre como otro tipo.
+- `INDEX_CONFLICT`: otro proceso publicó el índice a la vez.
+- El error de lectura del índice, por ejemplo `RECORD_CORRUPT`.
+
+La reconciliación explícita es `indexFolder(folderId)`. Un fallo del índice nunca
+convierte en error una modificación ya publicada. `updatedAt` del índice sigue
+siendo la fecha del último recorrido completo; la entrada sustituida lleva sus
+propias fechas, leídas del archivo publicado.
+
+Errores: los de [FUNCION_03_MODIFICAR.md](FUNCION_03_MODIFICAR.md)
+(`MODIFY_NOT_AUTHORIZED`, `INVALID_VERSION`, `VERSION_CONFLICT`, `FILE_IN_USE`,
+`METADATA_NOT_PRESERVABLE`, `MODIFY_UNCONFIRMED`, …). Si el resultado es
+`MODIFY_FAILED` por tiempo o `MODIFY_UNCONFIRMED`, el contenido nuevo puede estar
+publicado sin entrada actualizada: corresponde releer y reconciliar.

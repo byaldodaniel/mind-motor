@@ -149,8 +149,35 @@ de texto UTF-8 de hasta 1 MiB en carpetas existentes; nunca reemplaza
 `searchFiles` lo encuentra sin recorrer la carpeta. Si el índice no conoce las
 carpetas padre, tenía otra entrada con ese nombre o no se pudo actualizar, no se
 publica nada y `index.status` es `needs-reconciliation`: se reconcilia con
-`motor.indexFolder(folderId)`. No hay modificación, movimiento ni eliminación.
-Detalles en [docs/FUNCION_03_CREAR.md](docs/FUNCION_03_CREAR.md) y
+`motor.indexFolder(folderId)`. Detalles en
+[docs/FUNCION_03_CREAR.md](docs/FUNCION_03_CREAR.md) y
+[docs/INTERFACES.md](docs/INTERFACES.md).
+
+## Modificación segura de un archivo de texto — Función 03
+
+El agente lee el archivo, calcula su versión y entrega el contenido nuevo completo.
+El anfitrión concede antes un permiso de un solo intento para ese archivo exacto:
+
+```js
+import { textVersion } from 'mind-motor';
+
+const authorization = await motor.grantTextModify({ requester, folderId, relativePath: 'notas/a.txt' });
+const modified = await motor.modifyTextFile({
+  requester, authorization, expectedVersion: textVersion(leido.content), content: nuevoTexto,
+});
+// { folderId, relativePath, size, previousVersion, version, indexEntry, index }
+```
+
+Si el archivo cambió desde esa lectura, la operación falla con `VERSION_CONFLICT`
+y no escribe nada: hay que releer y volver a pedir permiso. El contenido se escribe
+completo en un temporal y se publica con un rename atómico; nunca se trunca el
+original. Se rechazan enlaces, archivos protegidos o con metadatos que no se
+pueden conservar. Tras publicar, el Motor sustituye la entrada del índice cuando
+es seguro (`index.status: 'updated'`); si no, `needs-reconciliation`. Queda una
+ventana de microsegundos entre la última comprobación y el rename en la que un
+cambio ajeno simultáneo podría perderse. Solo texto UTF-8 de hasta 1 MiB; no hay
+movimiento ni eliminación. Detalles en
+[docs/FUNCION_03_MODIFICAR.md](docs/FUNCION_03_MODIFICAR.md) y
 [docs/INTERFACES.md](docs/INTERFACES.md).
 
 ## Uso selectivo
@@ -204,8 +231,8 @@ la misma suite en Windows, macOS y Linux con Node.js 24 y Python 3.12.
 ## Interfaces y alcance
 
 La API programática y los límites para extender el núcleo están documentados en
-[docs/INTERFACES.md](docs/INTERFACES.md). Hay lectura y creación de texto con
-permiso explícito, indexación y búsqueda administrativas, y núcleos
+[docs/INTERFACES.md](docs/INTERFACES.md). Hay lectura, creación y modificación de
+texto con permiso explícito, indexación y búsqueda administrativas, y núcleos
 internos de continuidad y definiciones de funciones. Todavía no hay integración de
 agentes, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
 actuales son datos técnicos de prueba, no una estructura obligatoria para organizar

@@ -235,6 +235,44 @@ export function createFolderIndexer({
       });
     },
 
+    /**
+     * Sustituye la entrada del archivo que el Motor acaba de modificar, sin recorrer
+     * la carpeta. Solo publica si el índice vigente ya tenía ese nombre como archivo;
+     * si no lo conocía o era otro tipo, deja el índice intacto y pide una
+     * reconciliación explícita con indexFolder. updatedAt sigue siendo la fecha del
+     * último recorrido: la entrada aporta sus propias fechas.
+     * @param {string} scopeId
+     * @param {import('./index-scan.js').IndexEntry} entry
+     * @returns {Promise<{ status: 'updated' | 'current' | 'not-indexed' | 'needs-reconciliation', generation: number | null, code: string | null }>}
+     */
+    async recordModifiedFile(scopeId, entry) {
+      validateScopeId(scopeId);
+      return exclusive(scopeId, async () => {
+        const reconcile = (code, generation = null) => ({ status: 'needs-reconciliation', generation, code });
+        if (entry?.type !== 'file' || entry.state !== 'indexed' || typeof entry.path !== 'string') {
+          return reconcile('INVALID_MODIFIED_ENTRY');
+        }
+        const scope = await authorized(scopeId);
+        const index = boundIndex(await store.load(scopeId), scope);
+        if (!index) return { status: 'not-indexed', generation: null, code: null };
+        const position = index.entries.findIndex((item) => item.path === entry.path);
+        const existing = index.entries[position];
+        if (!existing) return reconcile('INDEX_ENTRY_MISSING', index.generation);
+        if (existing.type !== 'file') return reconcile('INDEX_ENTRY_CONFLICT', index.generation);
+        const same = ['type', 'size', 'modifiedAt', 'changedAt', 'createdAt', 'state', 'reason']
+          .every((field) => existing[field] === entry[field]);
+        if (same) return { status: 'current', generation: index.generation, code: null };
+        requireSameAuthorization(scope, await authorized(scopeId));
+        const latest = boundIndex(await store.load(scopeId), scope);
+        if (latest?.generation !== index.generation) return reconcile('INDEX_CONFLICT');
+        const entries = index.entries.with(position, entry);
+        const generation = index.generation + 1;
+        // save valida la forma completa; una entrada mal formada no se publica.
+        await store.save({ ...index, generation, entries });
+        return { status: 'updated', generation, code: null };
+      });
+    },
+
     /** Retira solo el índice de la Base; admite ámbitos ya retirados. */
     async removeFolderIndex(scopeId) {
       validateScopeId(scopeId);
