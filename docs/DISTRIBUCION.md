@@ -115,6 +115,30 @@ reproduce el diálogo de Gatekeeper.
 La prueba con el modelo real desde la carpeta extraída está en
 [`evidencia/HITO_A_AGENTE_REAL_2026-11-02.md`](evidencia/HITO_A_AGENTE_REAL_2026-11-02.md).
 
+## Resultados del Hito A
+
+Ejecución [41369923501](https://github.com/byaldodaniel/mind-motor/actions/runs/41369923501),
+commit e344011. Los paquetes probados se descargan desde esa página, en
+*Artifacts*.
+
+| Paquete | SHA-256 | 12 comprobaciones | Claude Code real (4) | Cuarentena |
+|---|---|---|---|---|
+| `Mind-1.0.0-rc.1-linux-x64.tar.gz` | `75e179cd3060eb2c3034a05413b30ccb12c8a05eb41648b943fc2961b1028645` | 12/12 | Conectado | — |
+| `Mind-1.0.0-rc.1-linux-arm64.tar.gz` | `f21d257ee7a8b05a827cd53e6146573f83c3318913995d3f32890934d6a25752` | 12/12 | Conectado | — |
+| `Mind-1.0.0-rc.1-darwin-arm64.tar.gz` | `ba3d6d90ac4c89fee3c4278a238dcba67d6b7b76bb196fa1bfd4129712e711da` | 12/12 | Conectado | Superada |
+| `Mind-1.0.0-rc.1-darwin-x64.tar.gz` | `6b8a937f351c7f300376af42d3a6bc8c07817875e3f51100e52165c5f2901762` | 12/12 | Conectado | Superada |
+| `Mind-1.0.0-rc.1-win32-x64.zip` | `7ef0076e384d3b7ebf0322254c383c83f7ac15105ec40bc1495d0c26a5e3253a` | 12/12 | Conectado | — |
+
+- **Reproducibilidad:** la segunda construcción del CI coincide byte a byte con
+  la primera. Una construcción independiente en otro equipo (contenedor de
+  desarrollo, Node 24.22.1) dio las cinco mismas huellas.
+- **Modelo real:** con el paquete Linux x64 anterior,
+  [`evidencia/HITO_A_AGENTE_REAL_2026-11-02.md`](evidencia/HITO_A_AGENTE_REAL_2026-11-02.md).
+- **Sin modelo real:** en macOS y Windows, Claude Code real solo descubrió y conectó
+  el servidor. El resto del recorrido lo hizo el cliente MCP de prueba.
+- **Commits posteriores:** cambian la fecha y el commit del manifiesto, y con ellos
+  las huellas. Cada ejecución del workflow vuelve a probar sus paquetes.
+
 ## Límites conocidos
 
 - **Sin firma de código.** Decisión aprobada: no pagar certificados.

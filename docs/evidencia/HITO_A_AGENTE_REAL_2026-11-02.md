@@ -5,57 +5,54 @@ con el modelo real, en modo sin interfaz (`claude -p`). Datos ficticios.
 
 ## Qué se probó
 
-- **Paquete:** `Mind-1.0.0-rc.1-linux-x64.tar.gz` (sha256
-  `b930a1fc054f46956d80b5ee38b01834770fb453a73a259767f687fc84900cdb`),
-  construido localmente con `scripts/construir-paquetes.mjs` a partir del árbol
-  de trabajo que después se publicó como commit 74e2da3. Su manifiesto indica
-  `builtFrom` 07cd5a7, el commit vigente al construirlo. Los paquetes oficiales
-  de la prueba son los del CI, construidos desde commits sin cambios locales.
+- **Paquete:** el paquete entregado, `Mind-1.0.0-rc.1-linux-x64.tar.gz`, construido
+  desde el commit e344011 (sha256
+  `75e179cd3060eb2c3034a05413b30ccb12c8a05eb41648b943fc2961b1028645`). La
+  construcción local da los mismos bytes que el artefacto del CI
+  ([run 41369923501](https://github.com/byaldodaniel/mind-motor/actions/runs/41369923501)).
 - **Ubicación:** extraído con `tar -xzf` en `<prueba>/Mis programas/Mind`, una
-  ruta con espacios y con «ñ». La carpeta de datos era `<prueba>/Información
-  ficticia`.
+  ruta con espacios y con «ñ». La carpeta de datos era `<prueba>/Información ficticia`.
 - **Inicio:** Claude Code se lanzó dentro de la carpeta `Mind`. Encontró el
-  `.mcp.json` del paquete e inició Mind con el Node incluido (`Runtime/node/bin/node`,
-  ruta relativa). No se instaló nada ni se configuró MCP.
-- **Aprobación del servidor:** la aprobación única del servidor del proyecto,
-  que en uso normal da la persona en el diálogo de Claude Code, se registró en
-  una configuración temporal y aislada de Claude Code (`enabledMcpjsonServers`).
-  El paquete no la trae preaprobada.
-- **Autorización de la carpeta:** en modo `-p`, Claude Code cancela el
-  formulario de autorización, así que la solicitud quedó pendiente. El
-  desarrollador, en el papel del usuario, la aprobó en la consola de Mind
-  (`./mind autorizar`), con un terminal emulado.
+  `.mcp.json` del paquete e inició Mind con el Node incluido (ruta relativa
+  `Runtime/node/bin/node`). No se instaló nada ni se configuró MCP.
+- **Aprobación del servidor del proyecto:** en uso normal la da la persona en el
+  diálogo de Claude Code. Aquí se registró en una configuración temporal y
+  aislada de Claude Code (`enabledMcpjsonServers`). El paquete no la trae
+  preaprobada.
+- **Autorización de la carpeta:** en modo `-p`, Claude Code cancela el formulario
+  de autorización y la solicitud queda pendiente. El desarrollador, en el papel
+  del usuario, la aprobó en la consola de Mind (`./mind autorizar`) con un
+  terminal emulado. Eligió «Acceso completo» y concedió la continuidad.
 
 ## Resultados
 
 | Sesión | Tarea | Turnos | Duración (s) | Coste (USD) |
 |---|---|---|---|---|
-| 1 | Consultar el estado; solicitar acceso completo a la carpeta y a la continuidad | 6 | 20.3 | 0.239 |
+| 1 | Consultar el estado; solicitar acceso completo a la carpeta y a la continuidad | 6 | 18.9 | 0.238 |
 | — | El usuario aprueba ambas solicitudes en `./mind autorizar` | — | — | — |
-| 2 | Buscar y leer el presupuesto, crear un resumen, editar el acta y registrar la decisión | 10 | 22.2 | 0.294 |
+| 2 | Buscar y leer el presupuesto, crear un resumen, editar el acta y registrar la decisión | 8 | 18.4 | 0.275 |
 | — | Con Mind cerrado: se borra `compras.txt` y se crea `Proyectos/nota-comite.txt` | — | — | — |
-| 3 | Proceso nuevo: retomar desde la continuidad y averiguar qué cambió | 11 | 25.3 | 0.287 |
+| 3 | Proceso nuevo: retomar desde la continuidad y averiguar qué cambió | 9 | 18.1 | 0.274 |
 
-Coste total: 0.82 USD.
+Coste total: 0.79 USD.
 
 Comprobado en el disco después de la sesión 2:
 
 - `Proyectos/resumen-presupuesto.md` contenía «Total aprobado del presupuesto 2026: 4.250 EUR».
 - `Proyectos/acta.txt` pasó de «Pendiente: …» a «Hecho: …».
-
-Entre sesiones no quedó ningún proceso de Mind ni ningún registro de sesión en
-`Base/sesiones`.
+- `Base/sesiones` quedó vacía: ninguna sesión siguió viva entre procesos.
 
 ## Hallazgos
 
 1. **El agente no da por concedido lo que no se concedió.** En la sesión 1
    informó que ambas solicitudes estaban pendientes y explicó cómo aprobarlas.
-2. **Etiqueta corregida.** La consola describía «Acceso completo» como «leer,
-   crear, modificar y organizar; borrar pide confirmación», que son operaciones
+2. **Etiqueta de acceso corregida.** Una ejecución anterior de esta misma prueba,
+   con una construcción previa al commit e344011 y un coste de 0,82 USD, mostró
+   que la consola describía «Acceso completo» con organizar y borrar, que son
    del Hito B. Ahora dice «leer, crear y modificar; incluye organizar, que
    llegará en una versión posterior».
 3. **Reapertura.** La sesión 3 recuperó la decisión y su fuente solo desde la
-   continuidad, y la reconciliación detectó el archivo nuevo y el eliminado con
+   continuidad. La reconciliación detectó el archivo nuevo y el eliminado con
    Mind cerrado. El agente señaló la contradicción con la nota (4.500 EUR) sin
    modificar nada.
 
@@ -64,76 +61,57 @@ Entre sesiones no quedó ningún proceso de Mind ni ningún registro de sesión 
 ### Sesión 1
 
 ```text
-Las dos solicitudes están **pendientes**. No se ha concedido ninguna.
+Las dos solicitudes están **pendientes**. Ninguna se ha aprobado todavía. El formulario de autorización no llegó a mostrarse, o se canceló, así que Mind las dejó en espera.
 
-**Estado inicial de Mind:** el motor es la versión 1.0.0-rc.1 y la sesión estaba activa con observación continua. No había carpetas autorizadas, permisos de continuidad ni solicitudes previas.
+**Estado inicial de Mind:** motor 1.0.0-rc.1, observación activa. No había ninguna carpeta autorizada, ningún permiso de continuidad ni ninguna solicitud previa.
 
-**Solicitudes enviadas:**
+**Solicitudes creadas:**
 
-| Solicitud | Permisos pedidos | Estado |
-|---|---|---|
-| Carpeta `…/agente real ñ/Información ficticia` (id `90f0d9e9-6e1d-4315-aaec-b2d1b11449a5`), motivo «Resumir el presupuesto 2026» | completo: encontrar, leer, escribir, organizar | **Pendiente** |
-| Continuidad (id `a8284750-9a12-4df6-a031-d5eefb17507e`) | leer, registrar | **Pendiente** |
+| Solicitud | Tipo | Permisos solicitados | Estado |
+|---|---|---|---|
+| `9d9b9fc2-6ff2-413c-8c12-3f52b518730f` | Carpeta `…/agente real ñ/Información ficticia` (motivo: resumir el presupuesto 2026) | Acceso `completo`, que Mind registró como `encontrar`, `leer`, `escribir` y `organizar` | **Pendiente** |
+| `0cb30f28-cbc3-4486-ad60-4a00165a5dab` | Continuidad | `leer` y `registrar` | **Pendiente** |
 
-Las dos quedaron pendientes porque el formulario de autorización se canceló o tu cliente no pudo mostrarlo, aunque Mind indica que tu cliente admite formularios. Volví a consultar el estado después de enviarlas: siguen pendientes, y todavía no hay carpetas autorizadas ni permisos de continuidad.
+Al volver a consultar el estado, las carpetas autorizadas y los permisos de continuidad siguen vacíos. Por ahora no puedo leer ni modificar nada en esa carpeta ni usar la continuidad.
 
-**Para concederlas:** abre la carpeta de Mind y ejecuta `mind autorizar` (o abre «Autorizar Mind»). Ahí puedes aprobar o rechazar cada solicitud. Cuando lo hayas hecho, dímelo y consultaré el estado para confirmarlo antes de empezar con el resumen del presupuesto 2026.
+**Algo a tener en cuenta:** en la solicitud de carpeta, Mind convirtió "completo" en cuatro permisos e incluyó `organizar`. Según las instrucciones, esta versión no organiza, mueve ni borra archivos, así que ese permiso no se usaría. Si prefieres conceder menos, puedes aprobar solo `encontrar`, `leer` y `escribir` si el formulario lo permite, o pedirme que cree una solicitud nueva con esos tres permisos.
+
+**Para aprobarlas:** abre la carpeta de Mind (`Mis programas/Mind`) y ejecuta `./mind autorizar` en macOS o Linux, o `mind.cmd autorizar` en Windows. También puedes abrir "Autorizar Mind". Cuando lo hayas hecho, avísame, consulto el estado y empiezo con el resumen del presupuesto 2026.
 
 ```
 
 ### Sesión 2
 
 ```text
-Todo está hecho y cada paso salió bien. Solo usé Mind.
+He hecho todo solo con Mind y todos los pasos han salido bien.
 
-1. **Estado:** hay una carpeta autorizada, "Información ficticia" (`<prueba>/Información ficticia`). Tiene acceso completo (encontrar, leer, escribir y organizar) y su índice está al día. La continuidad tiene los permisos de leer y registrar. No había solicitudes pendientes.
-
-2. **Búsqueda:** al buscar "presupuesto" salió un solo resultado, `Proyectos/presupuesto-2026.md`.
-
-3. **Lectura:** el archivo dice:
-   ```
-   # Presupuesto ficticio 2026
-   Total aprobado: 4.250 EUR
-   Responsable: equipo ficticio
-   ```
-
-4. **Creación:** creé `Proyectos/resumen-presupuesto.md` (47 bytes) con esta línea:
-   `Total aprobado del presupuesto 2026: 4.250 EUR`
-
-5. **Edición:** en `Proyectos/acta.txt` cambié "Pendiente" por "Hecho" con `editar`. Le pasé la versión que había leído antes, y hubo un solo reemplazo. La línea ahora dice `Hecho: revisar el presupuesto`.
-
-6. **Continuidad:** guardé la decisión de tipo "decisión" con el total, 4.250 EUR. Su id es `8dc2329f-090e-48a0-a815-5c2b0624a05b`. Tiene una referencia de tipo "fuente" a la ruta completa de `presupuesto-2026.md`, y Mind confirmó que ese archivo existe.
+1. **Estado:** la carpeta "Información ficticia" ya estaba autorizada con acceso completo (encontrar, leer, escribir, organizar) y su índice estaba al día. La continuidad tiene permisos para leer y registrar. No había solicitudes pendientes, así que no hizo falta pedir ningún permiso.
+2. **Búsqueda:** hubo un único resultado para "presupuesto": `Proyectos/presupuesto-2026.md`.
+3. **Lectura:** el archivo tiene 3 líneas. Dice "Total aprobado: 4.250 EUR" y "Responsable: equipo ficticio".
+4. **Creación:** he creado `Proyectos/resumen-presupuesto.md` con una línea: "Total aprobado del presupuesto 2026: 4.250 EUR".
+5. **Edición:** en `Proyectos/acta.txt` he cambiado "Pendiente" por "Hecho" con la herramienta `editar`, que confirmó 1 cambio. No leí el acta antes de editarla, así que el único dato que tengo es ese cambio confirmado; no he visto el resto del contenido.
+6. **Continuidad:** he registrado la decisión "Total aprobado del presupuesto 2026: 4.250 EUR" con el id `e2f1a17b-5b89-435a-9298-f932d3d3e678`. Incluye una referencia al archivo del presupuesto, y Mind confirma que ese archivo existe.
 
 ```
 
 ### Sesión 3
 
 ```text
-La decisión registrada (4.250 EUR) **probablemente ya no está vigente**. Después de registrarla apareció una nota que dice que el comité aprobó subir el presupuesto a 4.500 EUR. Los documentos del presupuesto siguen diciendo 4.250 EUR. Todo lo he consultado solo con Mind.
+Lo más importante: la decisión registrada sobre el presupuesto 2026 (total aprobado de **4.250 EUR**) ya no está vigente. Una nota creada después dice que el comité aprobó ampliarlo a **4.500 EUR**. Para todo esto solo usé Mind.
 
-## Lo que se decidió
-En la continuidad hay un único registro sobre el tema, creado el 2026-11-02 a las 00:53:32 por una sesión anterior de Claude Code:
-- **Decisión:** el total aprobado del presupuesto 2026 es **4.250 EUR**.
-- **Fuente:** `Proyectos/presupuesto-2026.md`, que todavía existe.
+**Lo que dice la continuidad**
+- Hay un único registro de tipo "decisión", creado el 2026-11-02 a las 01:03:39 (UTC): *"Total aprobado del presupuesto 2026: 4.250 EUR"*.
+- Su fuente es `Proyectos/presupuesto-2026.md`, y el registro indica que ese archivo sigue existiendo.
 
-## Qué cambió en la carpeta "Información ficticia" desde entonces
-- **Nuevo:** `Proyectos/nota-comite.txt` (00:53:50). Dice: *"Nota escrita con Mind cerrado: el comité aprobó ampliar a 4.500 EUR"*. Se escribió con Mind cerrado, pero Mind la detectó al reconciliar el índice.
-- **Eliminado:** `compras.txt`, en la raíz de la carpeta (15 bytes). Lo borró algo externo a Mind y se detectó a las 00:53:51. Mind no guarda copias, así que no sé qué contenía; solo podría recuperarse de la papelera o de un respaldo.
-- **Sin cambios desde la decisión:**
-  - `presupuesto-2026.md` sigue diciendo "Total aprobado: 4.250 EUR".
-  - `resumen-presupuesto.md` dice lo mismo.
-  - `acta.txt` solo dice "Hecho: revisar el presupuesto".
+**Lo que cambió en "Información ficticia" desde entonces**
+- **Nuevo:** `Proyectos/nota-comite.txt` (01:03:48). Lo leí y dice: *"Nota escrita con Mind cerrado: el comité aprobó ampliar a 4.500 EUR"*.
+- **Eliminado:** `compras.txt` (15 bytes), detectado a las 01:03:49 y borrado desde fuera de Mind. Mind solo guarda sus datos, no el contenido, así que no sé qué contenía. Si hace falta, habría que buscarlo en la papelera o en una copia de seguridad.
+- **Sin cambios:** `presupuesto-2026.md`, `acta.txt` y `resumen-presupuesto.md` son anteriores al registro. `presupuesto-2026.md` todavía dice "Total aprobado: 4.250 EUR".
 
-## Estado del trabajo
-- La nota es lo más reciente y contradice la decisión registrada: indica 4.500 EUR.
-- Ni el documento fuente ni el resumen están actualizados con esa cifra.
-- La nota no dice quién la escribió ni enlaza ningún acta del comité, así que no puedo confirmar que sea oficial.
+**Estado del trabajo**
+- Ahora hay una contradicción: el documento del presupuesto y la continuidad dicen 4.250 EUR, y la nota del comité dice 4.500 EUR.
+- La nota es más reciente y habla de una aprobación del comité, así que probablemente es la que vale. Pero solo es una línea, sin fecha propia ni firma, y no la he cotejado con otra fuente. Antes de darla por buena convendría que la confirmes.
 
-## Posibles siguientes pasos
-1. Confirmar que la ampliación a 4.500 EUR es oficial.
-2. Si lo es, actualizar `presupuesto-2026.md` y `resumen-presupuesto.md`, y añadir a la continuidad un registro que sustituya la decisión de 4.250 EUR.
-3. Averiguar si `compras.txt` se borró a propósito.
-
-No he modificado ningún archivo ni la continuidad, porque solo me pediste consultar. Si quieres, hago los cambios del paso 2.
+No he modificado nada. Si confirmas que la cifra es 4.500 EUR, puedo actualizar el registro de continuidad (tengo permiso para registrar) y, si quieres, también `presupuesto-2026.md`.
 
 ```
