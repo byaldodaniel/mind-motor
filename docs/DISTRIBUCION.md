@@ -132,7 +132,7 @@ commit e344011. Los paquetes probados se descargan desde esa página, en
 - **Reproducibilidad:** la segunda construcción del CI coincide byte a byte con
   la primera. Una construcción independiente en otro equipo (contenedor de
   desarrollo, Node 24.22.1) dio las cinco mismas huellas.
-- **Modelo real:** con el paquete Linux x64 anterior,
+- **Modelo real:** con el mismo paquete Linux x64 de esta tabla,
   [`evidencia/HITO_A_AGENTE_REAL_2026-11-02.md`](evidencia/HITO_A_AGENTE_REAL_2026-11-02.md).
 - **Sin modelo real:** en macOS y Windows, Claude Code real solo descubrió y conectó
   el servidor. El resto del recorrido lo hizo el cliente MCP de prueba.
