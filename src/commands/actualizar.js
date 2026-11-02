@@ -53,7 +53,33 @@ async function exists(target) {
 
 function inside(parent, child) {
   const relative = path.relative(parent, child);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/** Resuelve enlaces incluso cuando la Base o el destino aún no existen. */
+async function physicalPath(target) {
+  try {
+    return await fsp.realpath(target);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    const parent = path.dirname(target);
+    if (parent === target) throw error;
+    return path.join(await physicalPath(parent), path.basename(target));
+  }
+}
+
+async function protectBase(root, baseDirectory, items) {
+  const physicalRoot = await physicalPath(path.resolve(root));
+  const base = await physicalPath(path.resolve(baseDirectory));
+  if (inside(base, physicalRoot)) {
+    throw fail('UPDATE_BASE_OVERLAP', 'La Base no puede contener la instalación que se actualiza.');
+  }
+  for (const item of items) {
+    const target = await physicalPath(native(physicalRoot, item));
+    if (inside(target, base) || inside(base, target)) {
+      throw fail('UPDATE_BASE_OVERLAP', `La Base se solapa con ${item}, que se sustituye al actualizar. No se modifica nada.`);
+    }
+  }
 }
 
 /** Elementos que gestiona el paquete: carpetas propias enteras y archivos sueltos del manifiesto. */
@@ -312,6 +338,9 @@ export async function updateMind({
   if (inside(root, sourcePath) || inside(sourcePath, root)) {
     throw fail('UPDATE_SOURCE_INVALID', 'El paquete nuevo debe estar fuera de la carpeta de Mind que se actualiza.');
   }
+  // --base admite ubicaciones personalizadas: ninguna puede quedar entre los
+  // elementos que se apartan o sustituyen, tampoco a través de un enlace.
+  await protectBase(root, baseDirectory, [...managedItems(current), MANIFEST_NAME]);
   await requireNoSessions(baseDirectory);
   const unlock = await lock(root);
   const staging = await fsp.mkdtemp(path.join(root, STAGING_PREFIX));
@@ -321,6 +350,7 @@ export async function updateMind({
   const move = (from, to) => moveEntry(from, to, { rename: testing.rename, platform: testing.platform });
   try {
     const { tree, manifest: incoming } = await prepare(sourcePath, staging, report);
+    await protectBase(root, baseDirectory, [...managedItems(current, incoming), MANIFEST_NAME]);
     if (incoming.platform !== current.platform || incoming.arch !== current.arch) {
       throw fail('UPDATE_PLATFORM_MISMATCH', `El paquete es para ${incoming.platform}-${incoming.arch} y esta instalación es ${current.platform}-${current.arch}.`);
     }
