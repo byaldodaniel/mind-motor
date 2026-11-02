@@ -30,7 +30,7 @@ export const ACCESS_PRESETS = Object.freeze({
 export const PRESET_LABELS = Object.freeze({
   encontrar: 'Solo encontrar (nombres, rutas y fechas; sin abrir archivos)',
   leer: 'Encontrar y leer (sin cambiar nada)',
-  completo: 'Acceso completo (leer, crear, modificar y organizar; borrar pide confirmación cada vez)',
+  completo: 'Acceso completo (leer, crear y modificar; incluye organizar, que llegará en una versión posterior)',
 });
 
 /** El nivel más bajo que cubre lo pedido. */

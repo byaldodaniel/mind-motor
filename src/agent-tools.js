@@ -50,7 +50,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
     description: 'Pide al usuario que autorice una carpeta (o la continuidad) para los agentes. El usuario decide en un formulario de tu cliente o en la consola de Mind; esta herramienta nunca concede nada por sí sola. Pide solo los permisos necesarios.',
     inputSchema: schema({
       ruta: { type: 'string', description: 'Ruta absoluta de una carpeta existente del usuario. El acceso cubre todo lo que contiene.' },
-      acceso: { type: 'string', enum: Object.keys(ACCESS_PRESETS), description: 'Nivel mínimo necesario: encontrar (solo metadatos), leer, o completo (leer, crear, modificar, organizar).' },
+      acceso: { type: 'string', enum: Object.keys(ACCESS_PRESETS), description: 'Nivel mínimo necesario: encontrar (solo metadatos), leer, o completo (leer, crear y modificar).' },
       permisos: { type: 'array', items: { type: 'string', enum: ACCESS_LEVELS }, description: 'Alternativa a acceso, por permisos: encontrar, leer, escribir, organizar.' },
       continuidad: { type: 'array', items: { type: 'string', enum: CONTINUITY_LEVELS }, description: 'Para la continuidad entre agentes: leer, registrar. Úsalo en lugar de ruta.' },
       motivo: { type: 'string', description: 'Motivo breve que verá el usuario.' },

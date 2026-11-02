@@ -3,7 +3,7 @@ name: Paquetes portables
 # prueba extraídos en cada sistema, con sus propios runtimes y una ruta con
 # espacios y caracteres no ASCII. Los paquetes quedan como artefactos de la
 # ejecución; no es una publicación de producción.
-on: [push, pull_request, workflow_dispatch]
+on: [push, workflow_dispatch]
 permissions:
   contents: read
 jobs:

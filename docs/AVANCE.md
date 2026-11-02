@@ -18,7 +18,7 @@ Estados: **Implementado y probado** · **Desarrollado, pendiente de integración
 | Consolidación #16 + #19 + #20 | Implementado y probado | Commits `86fb96d`, `855aee4`, `f05da1f`; suite combinada en verde; CI en Windows, macOS y Linux | — |
 | Defecto Windows `ACCESS_DENIED` / `FILE_EXISTS` | Implementado y probado | Reproducido en CI antes de corregir (run 41358101441); corregido en `abfb13a` (run 41358364405) | — |
 | Servidor MCP sin dependencias (stdio, 2025-11-25) | Implementado y probado | `src/mcp-server.js`; `test/mcp-server.test.js` | — |
-| Sesión ligada al agente (abrir/crear Base, reconciliar, observar, cerrar) | Implementado y probado | `src/session.js`, `src/mcp-session.js`; `test/mcp-lifecycle.test.js` | Probar desde el paquete extraído (Etapa F) |
+| Sesión ligada al agente (abrir/crear Base, reconciliar, observar, cerrar) | Implementado y probado | `src/session.js`, `src/mcp-session.js`; `test/mcp-lifecycle.test.js`; casos 5, 11 y 12 desde el paquete en 5 plataformas | — |
 | Consentimiento (formulario del cliente o consola; elección única) | Implementado y probado | `src/consent.js`, `src/console.js`; `test/agent-session.test.js` | Formulario interactivo de Claude Code probado por una persona |
 | Permisos separados por carpeta (encontrar, leer, escribir, organizar) | Implementado y probado | `src/access-policy.js`, ligados a la generación del registro | — |
 | Exclusiones de subcarpetas | Implementado y probado | Registro v3; `test/exclusions.test.js`; prueba nativa | — |
@@ -27,16 +27,16 @@ Estados: **Implementado y probado** · **Desarrollado, pendiente de integración
 | Rastro de eliminados y referencias rotas | Implementado y probado | `src/removals.js`; herramienta `eliminados` | — |
 | Recuperación automática de bloqueos abandonados | Implementado y probado | `src/index-lock.js`; `test/index-lock.test.js`; `docs/CONCURRENCIA_INDICES.md` | — |
 | Consola: autorizar, permisos, reparar, estado, herramienta | Implementado y probado | `src/console.js`, `src/product-cli.js` | — |
-| Prueba con agente real (Claude Code 2.1.316) | Implementado y probado | `docs/evidencia/AGENTE_REAL_2026-11-01.md` | Repetir desde el paquete; otros agentes sin verificar |
-| Organizar (crear carpetas, mover) | En construcción (subagente A) | — | Código nativo para 3 sistemas; integración |
-| Borrar con confirmación, auditoría y papelera | En construcción (subagente A) | — | Integración |
-| Propiedades y búsqueda por propiedades | En construcción (subagente C) | — | Integración |
-| Índices personalizados CSV | En construcción (subagente C) | — | Integración |
-| Función 04: ejecutores, automatizaciones en sesión y programador del sistema | En construcción (subagente E) | Registro y ejecución manual en el Motor (#20) | Herramienta del agente; consentimiento de activación |
-| Respaldo cifrado y recuperación (código físico y archivo protegido) | En construcción (subagente B) | — | Integración; revisión criptográfica externa |
-| Paquetes portables para 3 sistemas, CI de paquetes y cuarentena de macOS | En construcción (subagente D) | `packaging/componentes.json` (versiones y SHA-256 fijados) | Verificación en CI de los 3 sistemas |
-| Actualización segura del Motor (`mind actualizar`) | En construcción (subagente D) | Base protegida contra versiones anteriores (`BASE_TOO_NEW`) | Integración |
-| Pruebas de producto (12 casos) desde la carpeta extraída | Pendiente de construcción | — | Tras los paquetes |
+| Prueba con agente real (Claude Code 2.1.316) | Implementado y probado | `docs/evidencia/AGENTE_REAL_2026-11-01.md`; desde la carpeta extraída del paquete Linux x64: `docs/evidencia/HITO_A_AGENTE_REAL_2026-11-02.md` | Formulario interactivo con una persona; otros agentes sin configurar |
+| Organizar (crear carpetas, mover) | Hito B: escrito, sin conectar | `src/organizer.js`, `src/native_organizer.py` (WIP del subagente A) | Conectar al Motor y al agente; pruebas en 3 sistemas |
+| Borrar con confirmación, auditoría y papelera | Hito B: escrito, sin conectar | `src/trash.js` (WIP) | Conectar, confirmación, pruebas |
+| Propiedades y búsqueda por propiedades | Hito B: en el Motor, sin herramienta | `src/properties.js` (WIP del subagente C) | Herramienta del agente, pruebas |
+| Índices personalizados CSV | Hito B: sin empezar | — | Diseño, código, pruebas |
+| Función 04: ejecutores, automatizaciones en sesión y programador del sistema | Hito B: escrito, sin registrar | Registro y ejecución manual en el Motor (#20); `src/automations/`, `src/executors/` (WIP) | Herramienta, consentimiento de activación, órdenes, pruebas |
+| Respaldo cifrado y recuperación (código físico y archivo protegido) | Hito B: módulo escrito, sin conectar | `src/backup.js` (WIP; prueba manual) | Orden, pruebas, revisión criptográfica externa |
+| Paquetes portables (Hito A): linux-x64, linux-arm64, darwin-arm64, darwin-x64, win32-x64 | Implementado y probado | `scripts/construir-paquetes.mjs` (reproducible, huellas oficiales), `packaging/iniciadores/`, `.github/workflows/paquetes.yml`, `docs/DISTRIBUCION.md` | Experiencia sin firma (Gatekeeper, SmartScreen) comprobada por una persona |
+| Actualización segura del Motor (`mind actualizar`) | Hito B: escrito, sin registrar ni probar | `src/commands/actualizar.js`; Base protegida contra versiones anteriores (`BASE_TOO_NEW`) | Pruebas de extremo a extremo |
+| Pruebas de producto (12 recorridos del Hito A) desde la carpeta extraída | Implementado y probado | `scripts/producto-12-casos.mjs` (PATH vacío, Claude Code real en el caso 4) y `scripts/producto-cuarentena-macos.mjs`, en CI para las 5 plataformas | — |
 | Comparativas con y sin Mind | En construcción (subagente F) | — | Resultados reales |
 | Firma de código y notarización | Bloqueado | El usuario decidió no pagar certificados | Avisos documentados; cuarentena de macOS mitigada (opción B) |
 
@@ -53,6 +53,7 @@ Estados: **Implementado y probado** · **Desarrollado, pendiente de integración
 | 2026-11-01 | Archivos eliminados fuera de Mind: rastro de solo metadatos durante 30 días y referencias de continuidad marcadas como rotas, en versión simple. |
 | 2026-11-01 | Automatizaciones fuera de sesión: se construyen ya, con el programador del sistema operativo, con autorización explícita del usuario. |
 | 2026-11-01 | Sin firma de código de pago. En macOS, Mind verifica los SHA-256 de sus propios runtimes y retira la cuarentena solo en su carpeta (opción B). |
+| 2026-11-02 | Hito A: primer producto portable con las capacidades ya probadas. Organizar, papelera, propiedades, CSV, automatizaciones, respaldo y `mind actualizar` pasan al Hito B y no se ofrecen hasta estar conectados y probados. |
 
 ## Decisiones técnicas del desarrollo
 
@@ -81,14 +82,14 @@ Estados: **Implementado y probado** · **Desarrollado, pendiente de integración
 
 - [ ] Las cinco funciones cubren sus requisitos aprobados o identifican explícitamente un alcance pendiente de aprobación.
 - [ ] Las capacidades funcionan integradas.
-- [ ] El usuario puede descargar y extraer la carpeta portable.
-- [x] Un agente compatible reconoce e inicia Mind con mínima intervención (Claude Code, desde el repositorio). Falta confirmarlo desde el paquete.
+- [x] El usuario puede descargar y extraer la carpeta portable (Hito A: artefactos del CI, sin publicación de producción).
+- [x] Un agente compatible reconoce e inicia Mind con mínima intervención (Claude Code, desde la carpeta extraída en las 5 plataformas).
 - [x] El Motor usa la Base persistente correctamente.
 - [x] La observación se activa durante la sesión y se detiene al cerrarla.
 - [x] El agente no puede falsificar las autorizaciones a través de Mind.
 - [x] Los originales permanecen en sus ubicaciones.
 - [ ] Actualizar el Motor no destruye la Base: probado de extremo a extremo (`mind actualizar`).
 - [x] Hay pruebas automatizadas de los recorridos principales. Falta añadir las de las áreas en construcción.
-- [ ] Los paquetes se comprobaron en las plataformas declaradas.
-- [x] Hay pruebas reales con agentes. Falta repetirlas desde el paquete.
+- [x] Los paquetes se comprobaron en las plataformas declaradas (CI en las 5; el modelo real, solo en Linux x64).
+- [x] Hay pruebas reales con agentes, también desde la carpeta extraída del paquete.
 - [ ] Los resultados comparativos se presentan con evidencia.

@@ -80,11 +80,14 @@ async function eventually(probe, { timeoutMs = 30_000, intervalMs = 200 } = {}) 
   }
 }
 
-function run(command, commandArgs, { env, cwd, timeoutMs = 120_000, shell = false } = {}) {
+function run(command, commandArgs, { env, cwd, timeoutMs = 120_000, shell = false, verbatim = false } = {}) {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
-    const child = spawn(command, commandArgs, { cwd, env, shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Con shell, la orden se pasa ya compuesta (los argumentos de estas pruebas no llevan espacios).
+    const child = shell
+      ? spawn([command, ...commandArgs].join(' '), { cwd, env, shell: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn(command, commandArgs, { cwd, env, windowsHide: true, windowsVerbatimArguments: verbatim, stdio: ['ignore', 'pipe', 'pipe'] });
     const timer = setTimeout(() => child.kill(), timeoutMs);
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -183,7 +186,8 @@ try {
 
   await step(3, 'El iniciador ejecuta Mind', PACKAGE, async () => {
     const result = windows
-      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `"${path.join(mind, 'mind.cmd')}" version`], { env: isolatedEnv() })
+      // Como lo escribe una persona en cmd: "<Mind>\mind.cmd" version (argumentos literales).
+      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" version"`], { env: isolatedEnv(), verbatim: true })
       : await run(path.join(mind, 'mind'), ['version'], { env: isolatedEnv() });
     check(result.code === 0, `Código ${result.code}: ${result.stderr}`);
     const reported = JSON.parse(result.stdout);
