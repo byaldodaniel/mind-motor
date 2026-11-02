@@ -124,7 +124,7 @@ class Posix(writer.Posix):
     def directory_identity(self, handle):
         return self._identity(os.fstat(handle))
 
-    def mkdir(self, parent, name, delete=False):
+    def mkdir(self, parent, name):
         os.mkdir(component(name), 0o777, dir_fd=parent)
         try:
             return os.open(name, self.DIRECTORY, dir_fd=parent)
@@ -380,9 +380,9 @@ class Windows(writer.Windows):
             raise Refusal('UNSAFE_PATH')
         self._raise(result)
 
-    def mkdir(self, parent, name, delete=False):
+    def mkdir(self, parent, name):
         name = component(name)
-        access = SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | FILE_TRAVERSE | (DELETE if delete else 0)
+        access = SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | FILE_TRAVERSE
         # FILE_CREATE nunca abre ni reemplaza algo existente.
         status, result, handle = self._create(parent, name, access, SHARE_ALL, FILE_CREATE,
                                               DIRECTORY_FILE | SYNC_IO | OPEN_REPARSE_POINT)
@@ -825,7 +825,9 @@ def trash_entry(root, relative, trash_id, expect=None, confirm=None, after_direc
         stack.callback(backend.close, trash)
         if backend.check(trash, True) != volume:
             raise Refusal('UNSAFE_PATH')
-        holder = backend.mkdir(trash, trash_id, delete=True)
+        # Sin DELETE: Windows abre el padre de destino del renombrado sin compartir
+        # el borrado, y un handle con DELETE sobre él lo rechazaría (SHARING_VIOLATION).
+        holder = backend.mkdir(trash, trash_id)
         stack.callback(backend.close, holder)
         moved = False
         try:
@@ -838,8 +840,19 @@ def trash_entry(root, relative, trash_id, expect=None, confirm=None, after_direc
         finally:
             if not moved:
                 with contextlib.suppress(OSError, Refusal):
-                    backend.remove_directory(trash, trash_id, holder)
+                    discard_holder(backend, trash, trash_id, holder)
         return {'type': entry.kind, **meta, 'sha256': sha256}
+
+
+def discard_holder(backend, trash, trash_id, holder):
+    """Elimina la carpeta creada para un borrado fallido, solo si sigue siendo ella y está vacía."""
+    handle = backend.open_directory(trash, trash_id, delete=True)
+    try:
+        if backend.directory_identity(handle) != backend.directory_identity(holder):
+            raise Refusal('ENTRY_CHANGED')
+        backend.remove_directory(trash, trash_id, handle)
+    finally:
+        backend.close(handle)
 
 
 def open_holder(backend, stack, top, volume, trash_id):

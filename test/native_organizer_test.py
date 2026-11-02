@@ -95,6 +95,27 @@ class Organizer(unittest.TestCase):
         self.assertGreaterEqual(removed['removed'], 3)
         self.assertEqual(os.listdir(self.data / '.papelera-mind'), [])
 
+    def test_failed_trash_discards_only_its_empty_holder(self):
+        holder = self.data / '.papelera-mind' / TRASH_ID
+
+        def fail():
+            raise RuntimeError('interrumpido')
+
+        with self.assertRaises(RuntimeError):
+            native.trash_entry(str(self.data), 'a/x.txt', TRASH_ID, before_change=fail)
+        self.assertFalse(holder.exists())
+        self.assertEqual((self.data / 'a' / 'x.txt').read_text(encoding='utf-8'), 'hola')
+
+        def occupy_and_fail():
+            (holder / 'ajeno.txt').write_text('ajeno', encoding='utf-8')
+            raise RuntimeError('interrumpido')
+
+        # Con contenido ajeno la carpeta no se elimina: solo se descarta vacía.
+        with self.assertRaises(RuntimeError):
+            native.trash_entry(str(self.data), 'a/x.txt', TRASH_ID, before_change=occupy_and_fail)
+        self.assertEqual((holder / 'ajeno.txt').read_text(encoding='utf-8'), 'ajeno')
+        self.assertEqual((self.data / 'a' / 'x.txt').read_text(encoding='utf-8'), 'hola')
+
     @unittest.skipIf(os.name == 'nt', 'enlaces simbólicos de POSIX')
     def test_links_are_refused(self):
         outside = self.root / 'fuera'
