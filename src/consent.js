@@ -85,6 +85,14 @@ export async function validateCandidateFolder(folderPath, { protectedDirectories
   return canonical;
 }
 
+/** Versión exacta de una función cuya activación automática se solicita. */
+function validAutomation(value) {
+  return value && typeof value === 'object' && typeof value.functionId === 'string'
+    && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.functionId)
+    && typeof value.generation === 'string' && /^[a-f0-9-]{36}$/.test(value.generation)
+    && typeof value.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(value.fingerprint);
+}
+
 /** Solicitudes pendientes de aprobación en la consola de Mind (canal 2). */
 export function createConsentRequests(baseDirectory) {
   const filename = (id) => {
@@ -94,20 +102,26 @@ export function createConsentRequests(baseDirectory) {
 
   function valid(data) {
     return data && data.format === 'mind-consent-request' && data.version === 1
-      && ['carpeta', 'continuidad'].includes(data.kind) && typeof data.createdAt === 'string'
+      && ['carpeta', 'continuidad', 'automatizacion'].includes(data.kind) && typeof data.createdAt === 'string'
       && typeof data.expiresAt === 'string' && Array.isArray(data.requested)
-      && (data.kind === 'continuidad' || (typeof data.path === 'string' && path.isAbsolute(data.path)));
+      && (data.kind !== 'carpeta' || (typeof data.path === 'string' && path.isAbsolute(data.path)))
+      && (data.kind !== 'automatizacion' || validAutomation(data.automation));
   }
 
   return Object.freeze({
-    async create({ kind, path: folderPath = null, requested, reason, client }) {
+    async create({ kind, path: folderPath = null, requested, reason, client, automation = null }) {
       const id = randomUUID();
       const now = Date.now();
       const record = {
         format: 'mind-consent-request', version: 1, id, kind, path: folderPath,
         requested, reason: untrustedText(reason), client: untrustedText(client, 120),
         createdAt: new Date(now).toISOString(), expiresAt: new Date(now + REQUEST_TTL_MS).toISOString(),
+        // Automatización: solo la versión exacta solicitada; la consola recalcula la descripción.
+        ...(kind === 'automatizacion' ? { automation: {
+          functionId: automation?.functionId, generation: automation?.generation, fingerprint: automation?.fingerprint,
+        } } : {}),
       };
+      if (kind === 'automatizacion' && !valid(record)) throw new MotorError('INVALID_REQUEST', 'La solicitud de activación no es válida.');
       await writeJson(filename(id), record);
       return record;
     },
@@ -242,6 +256,36 @@ export function createConsent({ connection, requests }) {
       for (const level of asked) if (response.content?.[level] === true) access[level] = true;
       if (asked.every((level) => !access[level])) return { status: 'declined' };
       return { status: 'approved', access, channel: 'formulario-del-cliente' };
+    },
+
+    /**
+     * Activación automática de una función. lines: descripción construida por
+     * Mind (lo aportado por el agente ya va acotado y entre comillas). La
+     * aprobación vale solo para la versión exacta indicada en automation.
+     * @param {{ automation: { functionId: string, generation: string, fingerprint: string }, lines: string[], reason?: string, clientInfo?: object }} request
+     */
+    async askAutomation({ automation, lines, reason, clientInfo }) {
+      const who = clientName(clientInfo);
+      const pending = async (cancelled) => {
+        const record = await requests.create({ kind: 'automatizacion', requested: ['activar'], reason, client: who, automation });
+        return { status: 'pending', request: record, ...(cancelled ? { cancelled: true } : {}) };
+      };
+      if (!form()) return pending(false);
+      const why = untrustedText(reason);
+      const message = [
+        `${who} solicita, mediante Mind, activar una automatización que se ejecutará sin que lo pidas cada vez:`,
+        '',
+        ...lines,
+        ...(why ? ['', `Motivo indicado por el agente (no verificado): «${why}»`] : []),
+        '',
+        'Usará los permisos que ya concediste en cada carpeta. Si la definición cambia, esta autorización caduca. Puedes desactivarla cuando quieras. Autoriza solo si reconoces esta solicitud.',
+      ].join('\n');
+      const response = await elicit(message, {
+        activar: { type: 'boolean', title: 'Activar esta automatización', default: false },
+      }, ['activar']);
+      if (response.action === 'decline') return { status: 'declined' };
+      if (response.action !== 'accept') return pending(true);
+      return response.content?.activar === true ? { status: 'approved', channel: 'formulario-del-cliente' } : { status: 'declined' };
     },
 
     /** Confirmación puntual de una operación que el usuario debe aprobar expresamente. */

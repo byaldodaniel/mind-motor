@@ -5,6 +5,7 @@ import { MotorError } from './errors.js';
 import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, PRESET_LABELS, minimumPreset, normalizeAccess, describeAccess } from './access-policy.js';
 import { CONTINUITY_ACCESS_LABELS, validateCandidateFolder, untrustedText } from './consent.js';
 import { liveSessions } from './session.js';
+import { reviewAutomationRequest } from './automations/service.js';
 
 /**
  * Consola de Mind para el usuario: aprobar solicitudes, autorizar carpetas,
@@ -120,6 +121,11 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
       } else {
         prompt.write('Rechazada.');
       }
+    } else if (request.kind === 'automatizacion') {
+      // Activación automática de una función: se revisa la versión exacta solicitada.
+      const outcome = await reviewAutomationRequest({ session, prompt, request });
+      if (outcome.approved) changes += 1;
+      if (outcome.keep) continue;
     } else {
       prompt.write(`Continuidad: ${request.requested.join(', ')}`);
       if (await prompt.yes('¿Autorizar?', false)) {
