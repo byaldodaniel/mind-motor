@@ -10,10 +10,10 @@ const launcher = fileURLToPath(new URL('../../bin/mind.js', import.meta.url));
  */
 export function startMcp({ args = [], env = {}, command = process.execPath, commandArgs = [launcher, 'mcp'],
   capabilities = { elicitation: { form: {} } }, clientInfo = { name: 'cliente-de-prueba', version: '1.0' },
-  protocolVersion = '2025-11-25', onElicit = null, cwd } = {}) {
+  protocolVersion = '2025-11-25', onElicit = null, cwd, baseEnv = process.env } = {}) {
   const child = spawn(command, [...commandArgs, ...args], {
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd,
-    env: { ...process.env, ...env },
+    env: { ...baseEnv, ...env },
   });
   const waiting = new Map();
   const elicitations = [];

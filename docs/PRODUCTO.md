@@ -9,12 +9,12 @@ información original.
 
 ```
 Mind/
-  mind, mind.cmd                       iniciadores (sin instalar nada)
-  Autorizar Mind.command / .cmd        consola de autorización con doble clic
+  mind (macOS, Linux) o mind.cmd       iniciador (sin instalar nada)
+  Autorizar Mind.command / .cmd        consola de autorización con doble clic (macOS, Windows)
   mind-producto.json                   manifiesto: versión, plataforma y SHA-256 de cada archivo
-  AGENTS.md, CLAUDE.md, GEMINI.md      instrucciones de reconocimiento para agentes
-  LEEME.md, LICENCIA.txt, LICENCIAS/   documentación mínima y licencias
-  .mcp.json y equivalentes             declaración del servidor MCP "mind" para cada cliente
+  AGENTS.md, CLAUDE.md                 instrucciones de reconocimiento para agentes
+  LEEME.md, LICENCIA.txt, LICENCIAS/   guía de primer uso y licencias
+  .mcp.json                            servidor MCP "mind" del proyecto para Claude Code (rutas relativas)
   Motor/                               código del Motor; se sustituye al actualizar
   Runtime/node, Runtime/python         runtimes incluidos (Node.js 24, CPython 3.12)
   Base/                                datos persistentes; se crea en el primer uso
@@ -78,9 +78,9 @@ mediante Mind.
 | `editar` | leer y escribir | Reemplazos exactos con control de versión |
 | `continuidad_*` | continuidad | Registrar, consultar, actualizar, exportar e importar |
 
-Las áreas en construcción añaden herramientas mediante `src/tools/index.js`
-(organizar, borrar, propiedades, índices CSV, funciones y respaldo). El estado de
-cada una está en [AVANCE.md](AVANCE.md).
+El Hito B añadirá herramientas mediante `src/tools/index.js` (organizar,
+papelera, propiedades, índices CSV, funciones y respaldo). Hasta que estén
+conectadas y probadas no se ofrecen al agente.
 
 ## Consentimiento y permisos
 
@@ -120,8 +120,8 @@ cada una está en [AVANCE.md](AVANCE.md).
 
 | Agente | Estado |
 |---|---|
-| Claude Code 2.1.316 (CLI) | Verificado: descubrimiento y conexión del servidor de proyecto, y sesiones reales con el modelo (`docs/evidencia/`). En modo sin interfaz (`-p`) el formulario se cancela y la solicitud queda pendiente para la consola. |
-| Gemini CLI, Cursor, VS Code, Codex | Configuración incluida en el paquete, sin verificar. |
+| Claude Code 2.1.316 (CLI) | Verificado desde la carpeta extraída del paquete: descubrimiento y conexión del servidor de proyecto (`docs/DISTRIBUCION.md`) y sesiones reales con el modelo (`docs/evidencia/`). En modo sin interfaz (`-p`) el formulario se cancela y la solicitud queda pendiente para la consola. |
+| Otros clientes MCP | Sin configuración en el primer producto. |
 | Agentes sin MCP con terminal | `mind herramienta …` (operaciones individuales). |
 
 ## Órdenes para el usuario
@@ -134,5 +134,6 @@ cada una está en [AVANCE.md](AVANCE.md).
 | `mind reparar` | Limpia bloqueos y temporales tras un cierre abrupto |
 | `mind version` | Versiones |
 
-Las áreas en construcción añaden `respaldo`, `actualizar`, `programador` y
-`programadas` mediante `src/commands/index.js`.
+El Hito B añadirá `respaldo`, `actualizar`, `programador` y `programadas`
+mediante `src/commands/index.js`. En el primer producto, actualizar consiste en
+extraer el paquete nuevo y trasladar la carpeta `Base` con el agente cerrado.

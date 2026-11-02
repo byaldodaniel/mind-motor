@@ -1,0 +1,10 @@
+#!/bin/sh
+# Iniciador de Mind para macOS y Linux. Usa exclusivamente el Node.js incluido
+# en Runtime/ y solo órdenes internas del shell: no depende de programas
+# instalados en el equipo ni del PATH.
+case "$0" in
+  */*) DIR=${0%/*} ;;
+  *) DIR=. ;;
+esac
+DIR=$(cd -P -- "$DIR" && pwd -P) || exit 1
+NODE_OPTIONS= exec "$DIR/Runtime/node/bin/node" "$DIR/Motor/bin/mind.js" "$@"

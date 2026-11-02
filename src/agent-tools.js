@@ -19,7 +19,7 @@ import { TOOL_FACTORIES } from './tools/index.js';
  * opaca. El agente nunca recibe el Motor, ni permisos reutilizables.
  */
 
-export const AGENT_INSTRUCTIONS = `Mind es un motor local que te permite trabajar con la información del usuario a su manera: encontrar, leer, crear, modificar y organizar archivos en las carpetas que el usuario autorice, y conservar continuidad entre sesiones y agentes.
+export const AGENT_INSTRUCTIONS = `Mind es un motor local que te permite trabajar con la información del usuario a su manera: encontrar, leer, crear y modificar archivos en las carpetas que el usuario autorice, y conservar continuidad entre sesiones y agentes.
 
 Úsalo cuando aporte valor; si otra herramienta basta, puedes usarla, respetando siempre las autorizaciones del usuario (usar otra herramienta no amplía tus permisos).
 

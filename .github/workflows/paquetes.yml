@@ -1,0 +1,100 @@
+name: Paquetes portables
+# Construye los paquetes de Mind (Hito A), comprueba que son reproducibles y los
+# prueba extraídos en cada sistema, con sus propios runtimes y una ruta con
+# espacios y caracteres no ASCII. Los paquetes quedan como artefactos de la
+# ejecución; no es una publicación de producción.
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  construir:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - name: Construir los cinco paquetes (huellas contrastadas con las listas oficiales)
+        run: node scripts/construir-paquetes.mjs --sumas-oficiales --salida dist
+      - name: Reproducibilidad (segunda construcción idéntica byte a byte)
+        run: |
+          node scripts/construir-paquetes.mjs --salida dist-2
+          diff dist/SHA256SUMS dist-2/SHA256SUMS
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with: { name: Mind-linux-x64, path: dist/Mind-*-linux-x64.tar.gz, compression-level: 0, if-no-files-found: error }
+      - uses: actions/upload-artifact@v4
+        with: { name: Mind-linux-arm64, path: dist/Mind-*-linux-arm64.tar.gz, compression-level: 0, if-no-files-found: error }
+      - uses: actions/upload-artifact@v4
+        with: { name: Mind-darwin-arm64, path: dist/Mind-*-darwin-arm64.tar.gz, compression-level: 0, if-no-files-found: error }
+      - uses: actions/upload-artifact@v4
+        with: { name: Mind-darwin-x64, path: dist/Mind-*-darwin-x64.tar.gz, compression-level: 0, if-no-files-found: error }
+      - uses: actions/upload-artifact@v4
+        with: { name: Mind-win32-x64, path: dist/Mind-*-win32-x64.zip, compression-level: 0, if-no-files-found: error }
+      - uses: actions/upload-artifact@v4
+        with: { name: SHA256SUMS, path: dist/SHA256SUMS, if-no-files-found: error }
+
+  probar:
+    needs: construir
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+          - { os: macos-latest, target: darwin-arm64 }
+          - { os: macos-15-intel, target: darwin-x64 }
+          - { os: windows-latest, target: win32-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: 'Mind-${{ matrix.target }}', path: descarga }
+      # Claude Code es el agente del usuario: trae su propio runtime. Mind no lo usa.
+      - name: Instalar Claude Code (agente del usuario)
+        run: npm install -g @anthropic-ai/claude-code@2.1.316
+
+      - name: Extraer y probar (macOS y Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/Carpeta de prueba ñ"
+          mkdir -p "$D"
+          tar -xzf descarga/Mind-*.tar.gz -C "$D"
+          M="$D/Mind"
+          # Sin ningún programa en PATH salvo Claude Code: la prueba usa el Node incluido.
+          CLAUDE="$(command -v claude)"
+          env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" PATH="$(dirname "$CLAUDE"):$(dirname "$(command -v node)"):/usr/bin:/bin" \
+            "$M/Runtime/node/bin/node" scripts/producto-12-casos.mjs --mind "$M" --claude "$CLAUDE" --informe "informe-${{ matrix.target }}.json"
+
+      - name: Cuarentena de macOS (carpeta nueva marcada como descargada)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/Cuarentena ñ"
+          mkdir -p "$D"
+          tar -xzf descarga/Mind-*.tar.gz -C "$D"
+          xattr -r -w com.apple.quarantine "0083;$(printf '%x' "$(date +%s)");Safari;" "$D/Mind"
+          "$D/Mind/Runtime/node/bin/node" scripts/producto-cuarentena-macos.mjs --mind "$D/Mind"
+
+      - name: Extraer y probar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $d = Join-Path $env:RUNNER_TEMP 'Carpeta de prueba ñ'
+          New-Item -ItemType Directory -Force $d | Out-Null
+          $zip = Get-ChildItem descarga -Filter 'Mind-*-win32-x64.zip' | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath $d
+          $m = Join-Path $d 'Mind'
+          $claude = (Get-Command claude.cmd).Source
+          # PATH mínimo: el sistema y Claude Code (con el Node que trae su instalación).
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$(Split-Path $claude);$(Split-Path (Get-Command node).Source)"
+          & (Join-Path $m 'Runtime\node\node.exe') scripts/producto-12-casos.mjs --mind $m --claude claude --informe "informe-${{ matrix.target }}.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'informe-${{ matrix.target }}', path: 'informe-${{ matrix.target }}.json', if-no-files-found: warn }

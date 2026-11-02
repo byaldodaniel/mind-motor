@@ -39,3 +39,5 @@ continuity-*.json
 
 # Worktrees locales de agentes de desarrollo
 /.claude/worktrees/
+/dist/
+/.cache/
