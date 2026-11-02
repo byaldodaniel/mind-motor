@@ -100,11 +100,12 @@ def parts_of(relative):
 
 
 class Posix(writer.Posix):
-    DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-
     def __init__(self):
         super().__init__()
+        # Solo se evalúan después de comprobar las primitivas POSIX. Windows
+        # importa este módulo para usar Windows(), sin disponer de esos flags.
+        self.DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        self.FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         if (not all(function in os.supports_dir_fd for function in (os.mkdir, os.rmdir, os.unlink, os.stat, os.link))
                 or os.scandir not in os.supports_fd):
             raise Refusal('SAFE_OPEN_UNAVAILABLE')

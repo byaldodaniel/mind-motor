@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 MOTOR = Path(__file__).resolve().parents[1]
 DEVELOPMENT = MOTOR.parent
@@ -12,6 +13,24 @@ spec = importlib.util.spec_from_file_location('native_organizer', MOTOR / 'src' 
 native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
 TRASH_ID = '20261102T000000Z-0123456789ab'
+
+
+class PlatformImport(unittest.TestCase):
+    def test_import_without_posix_flags_and_fail_closed(self):
+        # Reproduce el conjunto de atributos de Windows sin fingir que sus
+        # operaciones nativas se han ejecutado en un anfitrión POSIX.
+        flags = ('O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_CLOEXEC')
+        with patch.dict(os.__dict__):
+            for name in flags:
+                if hasattr(os, name):
+                    delattr(os, name)
+            spec = importlib.util.spec_from_file_location('organizer_without_posix', MOTOR / 'src' / 'native_organizer.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertTrue(callable(module.Windows))
+            with self.assertRaises(module.Refusal) as caught:
+                module.Posix()
+            self.assertEqual(str(caught.exception), 'SAFE_OPEN_UNAVAILABLE')
 
 
 class Organizer(unittest.TestCase):

@@ -8,6 +8,32 @@ la memoria de ninguna conversación. Se actualiza en cada hito.
 - Estado global: **candidato parcial**. No declarar terminado hasta cumplir los
   criterios de la sección final.
 
+## Continuación de Codex — 2026-11-01 (America/Lima)
+
+- Rama de trabajo: `codex/mind-1.0-hito-b`, creada desde el HEAD remoto
+  `be2c73b7ab28a954e6a9e4a0f830ce65ca6ae74e` de la rama de integración.
+  Consulta mediante `git ls-remote`: no había commits posteriores en esa rama.
+- B1: corregida la importación de `native_organizer.py` sin constantes POSIX
+  en Windows. Los flags se evalúan al construir el backend POSIX, después de
+  comprobar las primitivas seguras; no se sustituyen por valores permisivos.
+  Regresión de importación sin flags y denegación cerrada incluida.
+- Linux x64, Node 24.19.0 y Python 3.12.14: suite de partida completa aprobada
+  (246 JavaScript aprobadas y 1 específica de Windows omitida; suites Python
+  de lectura 10/10, índice 13/13, escritura 12 aprobadas y 3 de Windows omitidas,
+  extracción 4/4, organización 6/6). Tras la corrección B1: organización nativa
+  7/7 y organización del agente 8/8, incluida concurrencia, exclusiones,
+  revocaciones, confirmaciones, papelera y restauración con propiedades.
+- **Bloqueo de validación multiplataforma:** el proxy rechaza la API de GitHub
+  (`api.github.com`, respuesta `Forbidden`). El acceso Git funciona. Se guardó
+  la adición del dominio en el borrador del entorno, pendiente de aplicación por
+  el usuario. No se ha observado el CI actual ni ejecutado Windows/macOS en
+  esta continuación. B1 no se declara cerrado hasta verificar esa matriz.
+- B2: detectada herencia de propiedades al sustituir un archivo entre recorridos
+  del índice. Corrección y pruebas adicionales en curso; B2 no está cerrado.
+- B3 sigue siendo WIP; se investiga y prueba de forma independiente con datos
+  ficticios. B4–B7 continúan pendientes. No se ha publicado una versión de
+  producción ni fusionado ninguna rama.
+
 ## Estado por componente
 
 Estados: **Implementado y probado** · **Desarrollado, pendiente de integración** ·
