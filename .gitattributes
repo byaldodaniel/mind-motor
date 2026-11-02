@@ -1,0 +1,5 @@
+# Archivos de texto siempre con LF en la copia de trabajo, sea cual sea
+# core.autocrlf: el paquete se construye desde ella y debe ser idéntico byte a
+# byte en cualquier sistema. Los iniciadores .cmd se convierten a CRLF al
+# empaquetar.
+* text=auto eol=lf
