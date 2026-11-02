@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process';
 
+const failed = [];
+
 for (const [command, args] of [
   [process.execPath, ['--test', 'test/*.test.js']],
   [process.platform === 'win32' ? 'python' : 'python3', ['-I', '-B', 'test/native_reader_test.py']],
@@ -10,5 +12,10 @@ for (const [command, args] of [
 ]) {
   const result = spawnSync(command, args, { stdio: 'inherit', windowsHide: true });
   if (result.error) console.error(result.error.message);
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  // Se ejecutan todas las suites aunque una falle, para ver todos los diagnósticos.
+  if (result.status !== 0) failed.push(args.at(-1));
+}
+if (failed.length > 0) {
+  console.error(`Suites con fallos: ${failed.join(', ')}`);
+  process.exit(1);
 }

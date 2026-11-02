@@ -81,11 +81,12 @@ test('las propiedades siguen al elemento al moverlo o renombrarlo y no pasan a o
 test('índice CSV: crea el archivo con los campos elegidos, escapa los datos y no reemplaza nada', async (t) => {
   const { call, folder } = await authorized(t, {
     files: {
-      'Facturas/f-001.pdf': 'pdf ficticio', 'Facturas/f-002, "copia".pdf': 'pdf ficticio 2', 'Facturas/notas.txt': 'x',
+      'Facturas/f-001.pdf': 'pdf ficticio', 'Facturas/f-002, copia.pdf': 'pdf ficticio 2', 'Facturas/notas.txt': 'x',
       'ya-existe.csv': 'archivo del usuario\n',
     },
   });
   await call('asignar_propiedades', { ruta: 'Facturas/f-001.pdf', asignar: { cliente: '=HYPERLINK("x")', importe: 120.5 } });
+  await call('asignar_propiedades', { ruta: 'Facturas/f-002, copia.pdf', asignar: { cliente: 'Comillas "dobles", y coma' } });
   const occupied = await call('crear_indice', { nombre: 'Ocupado', campos: ['ruta'], ruta_csv: 'ya-existe.csv' });
   assert.equal(occupied.data.error?.codigo, 'CUSTOM_INDEX_DESTINATION_EXISTS', JSON.stringify(occupied.data));
   assert.equal(await fs.readFile(path.join(folder, 'ya-existe.csv'), 'utf8'), 'archivo del usuario\n');
@@ -104,7 +105,7 @@ test('índice CSV: crea el archivo con los campos elegidos, escapa los datos y n
   assert.deepEqual(parseCsv(text), [
     ['nombre', 'bytes', 'propiedad:cliente', 'propiedad:importe'],
     ['f-001.pdf', '12', `'=HYPERLINK("x")`, '120.5'],
-    ['f-002, "copia".pdf', '14', '', ''],
+    ['f-002, copia.pdf', '14', 'Comillas "dobles", y coma', ''],
   ]);
   assert.equal(csvCell('-1'), "'-1");
   assert.equal((await call('crear_indice', { nombre: 'Malo', campos: ['inventado'], ruta_csv: 'x.csv' })).isError, true);
