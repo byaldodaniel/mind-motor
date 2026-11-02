@@ -68,18 +68,24 @@ export async function moveEntry(session, { requester, folder, from, to, target =
   const authorization = await session.motor.grantMove({
     requester, folderId: folder.id, from, to, ...(crossing ? { targetFolderId: target.id } : {}),
   });
-  const moved = await session.motor.moveEntry({ requester, authorization });
-  let properties = { moved: 0 };
+  // Las propiedades se retiran antes de mover: una reconciliación intermedia
+  // que vea desaparecer el origen no las borra; se reponen en el destino.
+  const taken = await session.motor.takeProperties(folder.id, from).catch(() => []);
+  let moved;
   try {
-    if (crossing) {
-      const taken = await session.motor.takeProperties(folder.id, from);
-      if (taken.length > 0) await session.motor.putProperties(target.id, to, taken);
-      properties = { moved: taken.length };
-    } else {
-      properties = await session.motor.renameProperties(folder.id, from, to);
-    }
+    moved = await session.motor.moveEntry({ requester, authorization });
   } catch (error) {
-    properties = { moved: 0, error: error?.code ?? 'PROPERTIES_FAILED' };
+    if (taken.length > 0) await session.motor.putProperties(folder.id, from, taken).catch(() => {});
+    throw error;
+  }
+  let properties = { moved: 0 };
+  if (taken.length > 0) {
+    try {
+      const put = await session.motor.putProperties(target.id, to, taken);
+      properties = { moved: put.restored };
+    } catch (error) {
+      properties = { moved: 0, error: error?.code ?? 'PROPERTIES_FAILED' };
+    }
   }
   await session.reindex(folder.id).catch(() => {});
   if (crossing) await session.reindex(target.id).catch(() => {});

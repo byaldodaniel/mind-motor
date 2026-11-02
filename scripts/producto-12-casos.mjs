@@ -50,7 +50,9 @@ const HITO_A_TOOLS = ['estado', 'solicitar_acceso', 'retirar_acceso', 'buscar', 
   'modificar', 'editar', 'continuidad_registrar', 'continuidad_consultar', 'continuidad_actualizar',
   'continuidad_exportar', 'continuidad_importar',
   // Hito B: Función 03 (organizar y papelera).
-  'crear_carpeta', 'mover', 'renombrar', 'borrar', 'papelera', 'restaurar', 'vaciar_papelera'];
+  'crear_carpeta', 'mover', 'renombrar', 'borrar', 'papelera', 'restaurar', 'vaciar_papelera',
+  // Hito B: propiedades e índices personalizados.
+  'propiedades', 'asignar_propiedades', 'indices_personalizados', 'crear_indice', 'actualizar_indice', 'modificar_indice', 'retirar_indice'];
 
 function check(condition, message) {
   if (!condition) throw new Error(message);

@@ -73,7 +73,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
   {
     name: 'buscar',
     title: 'Buscar archivos',
-    description: 'Busca en los índices persistentes de Mind por nombre o ruta, con filtros de tipo, extensión, subcarpeta, tamaño y fecha. No recorre el disco ni abre contenido. Requiere el permiso "encontrar".',
+    description: 'Busca en los índices persistentes de Mind por nombre o ruta, con filtros de tipo, extensión, subcarpeta, tamaño, fecha y propiedades. No recorre el disco ni abre contenido. Requiere el permiso "encontrar".',
     inputSchema: schema({
       consulta: { type: 'string', description: 'Texto buscado; sin distinguir mayúsculas ni tildes. Vacío: todo.' },
       carpetas: { type: 'array', items: { type: 'string' }, description: 'Ids o rutas de carpetas; por defecto, todas las que permiten encontrar.' },
@@ -86,6 +86,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
       tamano_max: { type: 'integer', minimum: 0 },
       modificado_desde: { type: 'string', description: 'Fecha ISO 8601, inclusiva.' },
       modificado_hasta: { type: 'string', description: 'Fecha ISO 8601, exclusiva.' },
+      propiedades: { type: 'object', description: 'Propiedades que deben coincidir todas, por ejemplo {"estado": "revisar"}.', additionalProperties: { type: ['string', 'number', 'boolean'] } },
       orden: { type: 'string', enum: Object.keys(SORT_IN) },
       limite: { type: 'integer', minimum: 1, maximum: 500 },
       desde: { type: 'integer', minimum: 0, description: 'Desplazamiento para paginar.' },
@@ -483,7 +484,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
 
     async buscar(args) {
       only(args, ['consulta', 'carpetas', 'modo', 'campo', 'tipos', 'extensiones', 'dentro_de', 'tamano_min', 'tamano_max',
-        'modificado_desde', 'modificado_hasta', 'orden', 'limite', 'desde']);
+        'modificado_desde', 'modificado_hasta', 'propiedades', 'orden', 'limite', 'desde']);
       const list = await folders();
       let selected;
       if (args.carpetas !== undefined) {
@@ -512,6 +513,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       if (args.tamano_max !== undefined) request.maxSize = integer(args.tamano_max, 'tamano_max');
       if (args.modificado_desde !== undefined) request.modifiedAfter = text(args.modificado_desde, 'modificado_desde', { max: 64 });
       if (args.modificado_hasta !== undefined) request.modifiedBefore = text(args.modificado_hasta, 'modificado_hasta', { max: 64 });
+      if (args.propiedades !== undefined) {
+        if (!args.propiedades || typeof args.propiedades !== 'object' || Array.isArray(args.propiedades)) throw invalid('propiedades debe ser un objeto { clave: valor }.');
+        request.properties = args.propiedades;
+      }
       if (args.orden !== undefined) request.sort = SORT_IN[args.orden] ?? (() => { throw invalid('orden no válido.'); })();
       request.limit = integer(args.limite, 'limite', { min: 1, max: 500 }) ?? 50;
       if (args.desde !== undefined) request.offset = integer(args.desde, 'desde');
@@ -524,10 +529,13 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         truncado: found.truncated,
         resultados: found.results.map((result) => {
           const folder = byId.get(result.folderId);
-          return entryOut(folder, {
-            path: result.relativePath, type: result.type, size: result.size, modifiedAt: result.modifiedAt,
-            createdAt: result.createdAt, state: result.status === 'indexed' ? 'indexed' : 'unverified', reason: result.reason,
-          });
+          return {
+            ...entryOut(folder, {
+              path: result.relativePath, type: result.type, size: result.size, modifiedAt: result.modifiedAt,
+              createdAt: result.createdAt, state: result.status === 'indexed' ? 'indexed' : 'unverified', reason: result.reason,
+            }),
+            ...(result.properties ? { propiedades: result.properties } : {}),
+          };
         }),
         carpetas: found.scopes.map((scope) => ({
           carpeta: scope.folderId, estado: scope.status, indexado: scope.indexedAt, completo: scope.complete,

@@ -11,7 +11,11 @@
  * Para añadir un área: importar su fábrica y agregarla a la lista.
  */
 import { createOrganizeTools } from './organizar.js';
+import { createPropertyTools } from './propiedades.js';
+import { createIndexTools } from './indices.js';
 
 export const TOOL_FACTORIES = Object.freeze([
   createOrganizeTools, // Función 03: organizar y papelera.
+  createPropertyTools, // Función 02: propiedades.
+  createIndexTools, // Función 01: índices personalizados en CSV.
 ]);

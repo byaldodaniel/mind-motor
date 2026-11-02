@@ -225,6 +225,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     renameProperties: properties.renameProperties,
     takeProperties: properties.takeProperties,
     putProperties: properties.putProperties,
+    dropProperties: properties.dropProperties,
     removeFolderProperties: properties.removeFolderProperties,
     // Organización: solo anfitrión. Cada operación exige un permiso concedido por él.
     ...organizer,

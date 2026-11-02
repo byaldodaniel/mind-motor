@@ -465,6 +465,26 @@ export function createPropertyStore({
       });
     },
 
+    /**
+     * Retira las propiedades de rutas que desaparecieron del índice (y de sus
+     * descendientes): un elemento nuevo con el mismo nombre no las hereda.
+     */
+    async dropProperties(folderId, relativePaths) {
+      if (!Array.isArray(relativePaths) || relativePaths.length === 0) return { dropped: 0 };
+      const roots = relativePaths.map((item) => validatePropertyPath(item));
+      const folder = await folderFor(folderId);
+      return mutate(folderId, folder, (entries) => {
+        let dropped = 0;
+        for (const entryPath of [...entries.keys()]) {
+          if (roots.some((root) => inside(entryPath, root))) {
+            entries.delete(entryPath);
+            dropped += 1;
+          }
+        }
+        return { changed: dropped > 0, value: { dropped } };
+      });
+    },
+
     /** Elimina todas las propiedades de la carpeta, aunque ya no esté autorizada. */
     async removeFolderProperties(folderId) {
       const target = filename(folderId);

@@ -86,6 +86,8 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     const state = track(folderId);
     state.chain = state.chain.then(async () => {
       if (removed.length > 0 && state.entries) await removals.record(folderId, removed, state.entries);
+      // Lo que desapareció ya no tiene propiedades: un elemento nuevo con ese nombre no las hereda.
+      if (removed.length > 0) await motor.dropProperties(folderId, removed).catch(() => {});
       state.entries = await indexedEntries(folderId);
     }).catch((error) => log('aviso', 'No se pudo anotar lo eliminado', { carpeta: folderId, error: String(error) }));
     return state.chain;
