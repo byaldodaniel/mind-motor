@@ -63,7 +63,12 @@ function report(error) {
 /** Sesión sin observación: cada operación reconcilia bajo demanda lo que necesita. */
 async function withSession(options, task, { observe = false } = {}) {
   const { openSession } = await import('./session.js');
-  const session = await openSession({ layout: await resolveLayout({ base: options.base }), motorVersion: MOTOR_VERSION, observe });
+  const layout = await resolveLayout({ base: options.base });
+  // macOS: retira la cuarentena de Runtime/ tras verificar sus hashes, antes del primer uso de Python.
+  const { releaseQuarantine } = await import('./quarantine.js');
+  const quarantine = await releaseQuarantine(layout);
+  if (quarantine.aviso) process.stderr.write(`Aviso: ${quarantine.aviso}\n`);
+  const session = await openSession({ layout, motorVersion: MOTOR_VERSION, observe });
   try {
     await session.start();
     return await task(session);
