@@ -218,3 +218,25 @@ test('dos movimientos simultáneos del mismo archivo: solo uno ocurre y nada se 
   assert.equal(present.length, 1);
   assert.equal(await fs.readFile(path.join(folder, present[0]), 'utf8'), 'Notas ficticias\n');
 });
+
+test('revocar mientras se confirma borrar impide usar la respuesta tardía', async (t) => {
+  let entered;
+  const waiting = new Promise((resolve) => { entered = resolve; });
+  let answer;
+  const response = new Promise((resolve) => { answer = resolve; });
+  const { call, folder } = await authorized(t, {
+    onElicit: async () => { entered(); return response; },
+  });
+  const deleting = call('borrar', { ruta: 'notas.txt' });
+  await waiting;
+  try {
+    const revoked = await call('retirar_acceso', { todo: true });
+    assert.ok(!revoked.isError, JSON.stringify(revoked.data));
+  } finally {
+    answer(yes);
+  }
+  const result = await deleting;
+  assert.ok(result.isError, JSON.stringify(result.data));
+  assert.equal(await fs.readFile(path.join(folder, 'notas.txt'), 'utf8'), 'Notas ficticias\n');
+  assert.ok(!(await exists(path.join(folder, '.papelera-mind'))));
+});
