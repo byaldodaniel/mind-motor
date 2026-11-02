@@ -21,18 +21,47 @@ la memoria de ninguna conversación. Se actualiza en cada hito.
   (246 JavaScript aprobadas y 1 específica de Windows omitida; suites Python
   de lectura 10/10, índice 13/13, escritura 12 aprobadas y 3 de Windows omitidas,
   extracción 4/4, organización 6/6). Tras la corrección B1: organización nativa
-  7/7 y organización del agente 8/8, incluida concurrencia, exclusiones,
-  revocaciones, confirmaciones, papelera y restauración con propiedades.
+  7/7 y organización del agente 9/9, incluida concurrencia, exclusiones,
+  revocaciones durante la confirmación, papelera y restauración con propiedades.
 - **Bloqueo de validación multiplataforma:** el proxy rechaza la API de GitHub
   (`api.github.com`, respuesta `Forbidden`). El acceso Git funciona. Se guardó
   la adición del dominio en el borrador del entorno, pendiente de aplicación por
   el usuario. No se ha observado el CI actual ni ejecutado Windows/macOS en
   esta continuación. B1 no se declara cerrado hasta verificar esa matriz.
-- B2: detectada herencia de propiedades al sustituir un archivo entre recorridos
-  del índice. Corrección y pruebas adicionales en curso; B2 no está cerrado.
-- B3 sigue siendo WIP; se investiga y prueba de forma independiente con datos
-  ficticios. B4–B7 continúan pendientes. No se ha publicado una versión de
-  producción ni fusionado ninguna rama.
+- B2: corregida la herencia de propiedades al sustituir un archivo entre
+  recorridos, incluso conservando nombre, tamaño y fecha. El índice y las
+  propiedades se ligan a identidad física; las modificaciones explícitas,
+  movimientos y restauraciones conservan ese vínculo. Añadida cobertura entre
+  procesos y frente a ediciones externas del CSV. Compatibilidad histórica y
+  límites en [PROPIEDADES_INDICES.md](PROPIEDADES_INDICES.md).
+  La Base eleva su marcador a formato 2 antes de publicar índices v3 o
+  propiedades v2. Los manifiestos de paquetes declaran esa capacidad desde
+  la misma constante. Leer Bases v1 no las migra; las propiedades históricas
+  sin identidad se preservan sin atribuirlas automáticamente a archivos actuales.
+- B3: dos defectos corregidos: restaurar no comprobaba correctamente las sesiones
+  activas y configurar un destino inexistente dejaba una clave parcial que impedía
+  reintentar. Las 12 pruebas de Linux cubren ambos medios de recuperación,
+  alteración, scrypt de producción, protección de la Base, órdenes y herramienta.
+  Uso y límites en [RESPALDO.md](RESPALDO.md). Pendientes plataformas, terminal
+  interactivo real, paquetes y revisión criptográfica independiente.
+- B4: 7 pruebas Linux nuevas del núcleo existente (permisos, consentimiento,
+  caducidad, deduplicación y eventos). No se ha registrado la extensión de sesión
+  ni integrado herramientas, órdenes o programador real.
+- B5: 8 pruebas Linux del actualizador, incluyendo Motor real y Node copiado,
+  conservación de toda la Base, rechazo de alteraciones y rollback. Corregida la
+  pérdida potencial de Bases personalizadas dentro de elementos sustituidos,
+  también con enlaces y nombres que empiezan por `..`. El Python del paquete de
+  prueba es un marcador: no equivale al producto portable completo. La orden
+  todavía no está registrada. Se rechazan también paquetes que solo admiten
+  formato 1 al actualizar una Base migrada a formato 2.
+- Verificación conjunta final: `npm test`, salida 0. JavaScript: 289 aprobadas,
+  1 omitida; Python: 46 aprobadas, 3 omitidas por ser específicas de Windows.
+  Total de los runners: **335 aprobadas, 4 omitidas, cero fallos**. Las ocho
+  pruebas nuevas de formato incluyen orden de publicación, fallos, concurrencia,
+  consulta conservadora y generación de manifiestos para cinco plataformas;
+  esto último no equivale a ejecutar sus paquetes.
+- B6 y B7 siguen pendientes. No se ha publicado una versión de producción ni
+  fusionado ninguna rama. Los avances se publican solo en la rama de trabajo.
 
 ## Estado por componente
 
@@ -54,14 +83,14 @@ Estados: **Implementado y probado** · **Desarrollado, pendiente de integración
 | Recuperación automática de bloqueos abandonados | Implementado y probado | `src/index-lock.js`; `test/index-lock.test.js`; `docs/CONCURRENCIA_INDICES.md` | — |
 | Consola: autorizar, permisos, reparar, estado, herramienta | Implementado y probado | `src/console.js`, `src/product-cli.js` | — |
 | Prueba con agente real (Claude Code 2.1.316) | Implementado y probado | `docs/evidencia/AGENTE_REAL_2026-11-01.md`; desde la carpeta extraída del paquete Linux x64: `docs/evidencia/HITO_A_AGENTE_REAL_2026-11-02.md` | Formulario interactivo con una persona; otros agentes sin configurar |
-| Organizar (crear carpetas, mover) | Hito B: escrito, sin conectar | `src/organizer.js`, `src/native_organizer.py` (WIP del subagente A) | Conectar al Motor y al agente; pruebas en 3 sistemas |
-| Borrar con confirmación, auditoría y papelera | Hito B: escrito, sin conectar | `src/trash.js` (WIP) | Conectar, confirmación, pruebas |
-| Propiedades y búsqueda por propiedades | Hito B: en el Motor, sin herramienta | `src/properties.js` (WIP del subagente C) | Herramienta del agente, pruebas |
-| Índices personalizados CSV | Hito B: sin empezar | — | Diseño, código, pruebas |
-| Función 04: ejecutores, automatizaciones en sesión y programador del sistema | Hito B: escrito, sin registrar | Registro y ejecución manual en el Motor (#20); `src/automations/`, `src/executors/` (WIP) | Herramienta, consentimiento de activación, órdenes, pruebas |
-| Respaldo cifrado y recuperación (código físico y archivo protegido) | Hito B: módulo escrito, sin conectar | `src/backup.js` (WIP; prueba manual) | Orden, pruebas, revisión criptográfica externa |
+| Organizar (crear carpetas, mover) | Integrado y probado en Linux | `src/organizer.js`, `src/native_organizer.py`, `test/organize-agent.test.js` | CI Windows/macOS |
+| Borrar con confirmación, auditoría y papelera | Integrado y probado en Linux | `src/trash.js`, herramientas de organización; confirmación tardía tras revocación rechazada | CI Windows/macOS |
+| Propiedades y búsqueda por propiedades | Integrado y probado en Linux | `src/properties.js`, `test/properties-indexes.test.js`, `docs/PROPIEDADES_INDICES.md`; migración global protegida | CI Windows/macOS y paquetes reales |
+| Índices personalizados CSV | Integrado y probado en Linux | `src/custom-index.js`, herramientas de índices; edición externa, exclusiones y reinicio entre procesos | CI Windows/macOS |
+| Función 04: ejecutores, automatizaciones en sesión y programador del sistema | Núcleo probado en Linux, sin registrar | `test/automation.test.js` (7 casos); `src/automations/`, `src/executors/` | Herramientas, órdenes, extensión sesión y programador real en 3 sistemas |
+| Respaldo cifrado y recuperación (código físico y archivo protegido) | Integrado y probado en Linux | `test/backup.test.js` (12 casos), `docs/RESPALDO.md` | Windows/macOS, terminal real, paquetes y revisión criptográfica externa |
 | Paquetes portables (Hito A): linux-x64, linux-arm64, darwin-arm64, darwin-x64, win32-x64 | Implementado y probado | `scripts/construir-paquetes.mjs` (reproducible, huellas oficiales), `packaging/iniciadores/`, `.github/workflows/paquetes.yml`, `docs/DISTRIBUCION.md` | Experiencia sin firma (Gatekeeper, SmartScreen) comprobada por una persona |
-| Actualización segura del Motor (`mind actualizar`) | Hito B: escrito, sin registrar ni probar | `src/commands/actualizar.js`; Base protegida contra versiones anteriores (`BASE_TOO_NEW`) | Pruebas de extremo a extremo |
+| Actualización segura del Motor (`mind actualizar`) | Probado en Linux, sin registrar | `test/update.test.js` (8 casos), Base conservada byte a byte, rollback, formatos y solapamientos | Paquetes completos y Windows/macOS antes de registrar orden |
 | Pruebas de producto (12 recorridos del Hito A) desde la carpeta extraída | Implementado y probado | `scripts/producto-12-casos.mjs` (PATH vacío, Claude Code real en el caso 4) y `scripts/producto-cuarentena-macos.mjs`, en CI para las 5 plataformas | — |
 | Comparativas con y sin Mind | En construcción (subagente F) | — | Resultados reales |
 | Firma de código y notarización | Bloqueado | El usuario decidió no pagar certificados | Avisos documentados; cuarentena de macOS mitigada (opción B) |
