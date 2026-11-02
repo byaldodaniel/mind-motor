@@ -217,7 +217,7 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
   await extractPython(pythonArchive, stage, target);
 
   // Documentación, instrucciones para agentes e iniciadores.
-  for (const name of ['AGENTS.md', 'CLAUDE.md', 'LEEME.md']) {
+  for (const name of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'LEEME.md']) {
     await copyFile(path.join(PACKAGING, 'plantilla', name), path.join(stage, name));
   }
   const launchers = path.join(PACKAGING, 'iniciadores');

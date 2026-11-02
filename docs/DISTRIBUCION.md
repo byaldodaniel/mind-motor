@@ -26,7 +26,7 @@ para obtener el paquete.
 ```
 Mind/
   .mcp.json                 servidor MCP "mind" del proyecto, con rutas relativas
-  AGENTS.md, CLAUDE.md      instrucciones para agentes (CLAUDE.md importa AGENTS.md)
+  AGENTS.md, CLAUDE.md, GEMINI.md  instrucciones para agentes (CLAUDE.md y GEMINI.md importan AGENTS.md)
   LEEME.md                  guía de primer uso
   LICENCIA.txt, LICENCIAS/  licencia de Mind y de Node.js y CPython, con sus orígenes y huellas
   mind | mind.cmd           iniciador del sistema

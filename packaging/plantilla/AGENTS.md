@@ -1,8 +1,8 @@
 # Mind — instrucciones para agentes de IA
 
 Esta carpeta es **Mind**, un motor local que permite a los agentes de IA trabajar
-la información del usuario a su manera. Mind encuentra, lee, crea y
-modifica archivos de texto en las carpetas que el usuario autoriza, y conserva continuidad
+la información del usuario a su manera. Mind encuentra, lee, crea, modifica y
+organiza archivos en las carpetas que el usuario autoriza, y conserva continuidad
 entre sesiones y agentes. Los archivos originales permanecen donde están: Mind
 no los copia.
 
@@ -11,6 +11,9 @@ no los copia.
 - **Claude Code:** el servidor MCP `mind` está declarado en `.mcp.json`. Al abrir
   esta carpeta, Claude Code pide al usuario que lo apruebe una vez. Sus
   herramientas aparecen como `mcp__mind__<herramienta>`.
+- **Otros agentes con MCP (Codex CLI, Gemini CLI…):** el usuario registra el
+  servidor una vez con las instrucciones de `LEEME.md`. Es un servidor stdio:
+  `Runtime/node` ejecuta `Motor/bin/mind.js mcp`.
 - **Sin MCP:** si puedes ejecutar programas, `./mind` (macOS y Linux) o
   `mind.cmd` (Windows) ofrecen operaciones individuales (`mind ayuda`). En ese
   modo no hay observación continua: cada orden reconcilia el índice al usarse.
@@ -40,13 +43,25 @@ servidor del proyecto en su cliente. No intentes iniciarlo ni configurarlo tú.
    30 días (solo metadatos; Mind no guarda copias).
 7. Registra decisiones, resultados y contexto útiles con `continuidad_registrar`
    y recupera trabajos anteriores con `continuidad_consultar`.
+8. Con acceso completo puedes organizar: `crear_carpeta`, `mover` y `renombrar`
+   nunca reemplazan nada. `borrar` lleva a la papelera de Mind y el usuario lo
+   confirma cada vez; `papelera` y `restaurar` lo recuperan. `vaciar_papelera`
+   elimina para siempre y pide una doble confirmación al usuario.
+9. `asignar_propiedades` etiqueta archivos sin modificarlos; `buscar` filtra por
+   esas propiedades. `crear_indice` mantiene un índice en CSV dentro de una
+   carpeta autorizada.
+10. `crear_funcion` define tareas reutilizables sobre el catálogo de ejecutores
+    de Mind; `ejecutar_funcion` las ejecuta con los permisos ya concedidos y
+    `activar_funcion` pide al usuario que autorice su ejecución automática.
+    `crear_respaldo` cifra la Base en el destino que el usuario configuró.
 
 ## Reglas
 
 - Mind es opcional: úsalo cuando aporte valor. Si otra herramienta basta, puedes
   usarla, pero eso no amplía tus permisos.
-- Esta versión no organiza, mueve ni borra archivos. No lo ofrezcas como
-  hecho mediante Mind.
+- Las confirmaciones (borrar, vaciar la papelera, activar funciones) son del
+  usuario. Si tu cliente no puede mostrarlas, quedan pendientes para
+  `mind autorizar`: díselo al usuario, no las des por hechas.
 - No modifiques el contenido de esta carpeta (`Motor/`, `Runtime/`, `Base/`,
   iniciadores y configuraciones). Son el programa y los datos técnicos del usuario.
 - No uses rutas, ids de carpeta ni nombres de agente como si fueran permisos.

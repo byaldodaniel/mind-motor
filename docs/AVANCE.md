@@ -8,6 +8,43 @@ la memoria de ninguna conversación. Se actualiza en cada hito.
 - Estado global: **candidato parcial**. No declarar terminado hasta cumplir los
   criterios de la sección final.
 
+## Validación en Windows — 2026-11-01 (equipo local, sin Actions)
+
+GitHub Actions está bloqueado por facturación; Windows 10 x64 se validó en un
+equipo local (Node 24.18.0, Python 3.12.10). macOS sigue pendiente.
+
+- **B1 en Windows, corregido (`c169599`).** Mover a `.papelera-mind/<id>/`
+  fallaba con `FILE_IN_USE`. Causa: la carpeta `<id>` se abría con acceso
+  DELETE y el renombrado (FileRenameInformation) abre el padre de destino sin
+  compartir el borrado. Descartadas por experimento la lectura previa del
+  SHA-256 y OneDrive/antivirus: fallaba igual sin lectura, en `C:mind-dev` y
+  en `%TEMP%`. Es determinista: no se añadió reintento. La carpeta de un
+  borrado fallido se reabre, se comprueba su identidad y solo se elimina vacía.
+- **Paquetes reproducibles con cualquier `core.autocrlf` (`41c916b`).** El
+  empaquetador copia la copia de trabajo; con `autocrlf=true` salían CRLF y el
+  paquete del mismo commit difería. `.gitattributes` fija `eol=lf`; un clon
+  con `autocrlf=true` produce ahora el mismo SHA-256.
+- `node scripts/test.mjs`: 295 pruebas JavaScript, 293 aprobadas, 2 omitidas,
+  0 fallos; suites Python en verde.
+- **Producto desde la carpeta extraída** (ruta con espacios y «ñ», PATH mínimo,
+  Claude Code 2.1.309 real en el caso 4): **23/23 superados**, incluido el caso
+  23, `mind actualizar` de 1.0.0-rc.1 a un paquete rc.2 real conservando
+  autorizaciones, propiedades, continuidad, funciones e índices.
+- Codex CLI 0.156.1 y Gemini CLI 0.61.0: registro del servidor con
+  `codex mcp add` (CODEX_HOME temporal) y `gemini mcp add -s project`
+  comprobado; el servidor responde lanzado desde otro directorio y usa siempre
+  la Base de su carpeta. Gemini lo deja desactivado hasta que el usuario confía
+  en la carpeta. Sin sesión real con esos modelos.
+- Guías: `LEEME.md` y `AGENTS.md` del paquete describían el Hito A («no
+  organiza ni borra»); actualizadas con las herramientas del Hito B y la
+  conexión de otros agentes. `GEMINI.md` no se empaquetaba: incluido.
+  `mind ayuda` mostraba las órdenes del Hito B bajo «Opciones»: corregido.
+- Comparativa de caché: véase
+  [COMPARATIVA_CACHE_WINDOWS_2026-11-01.md](evidencia/COMPARATIVA_CACHE_WINDOWS_2026-11-01.md).
+  Con 100 000 entradas el Motor rechaza la carpeta por su límite de 100 000
+  entradas indexables; se midió con 90 000. Decisión de producto pendiente.
+- `paquetes.yml` construye además los paquetes rc.2 y pasa `--actualizacion`.
+
 ## Continuación de Codex — 2026-11-01 (America/Lima)
 
 - Rama de trabajo: `codex/mind-1.0-hito-b`, creada desde el HEAD remoto
@@ -83,16 +120,16 @@ Estados: **Implementado y probado** · **Desarrollado, pendiente de integración
 | Recuperación automática de bloqueos abandonados | Implementado y probado | `src/index-lock.js`; `test/index-lock.test.js`; `docs/CONCURRENCIA_INDICES.md` | — |
 | Consola: autorizar, permisos, reparar, estado, herramienta | Implementado y probado | `src/console.js`, `src/product-cli.js` | — |
 | Prueba con agente real (Claude Code 2.1.316) | Implementado y probado | `docs/evidencia/AGENTE_REAL_2026-11-01.md`; desde la carpeta extraída del paquete Linux x64: `docs/evidencia/HITO_A_AGENTE_REAL_2026-11-02.md` | Formulario interactivo con una persona; otros agentes sin configurar |
-| Organizar (crear carpetas, mover) | Integrado y probado en Linux | `src/organizer.js`, `src/native_organizer.py`, `test/organize-agent.test.js` | CI Windows/macOS |
-| Borrar con confirmación, auditoría y papelera | Integrado y probado en Linux | `src/trash.js`, herramientas de organización; confirmación tardía tras revocación rechazada | CI Windows/macOS |
-| Propiedades y búsqueda por propiedades | Integrado y probado en Linux | `src/properties.js`, `test/properties-indexes.test.js`, `docs/PROPIEDADES_INDICES.md`; migración global protegida | CI Windows/macOS y paquetes reales |
-| Índices personalizados CSV | Integrado y probado en Linux | `src/custom-index.js`, herramientas de índices; edición externa, exclusiones y reinicio entre procesos | CI Windows/macOS |
-| Función 04: ejecutores, automatizaciones en sesión y programador del sistema | Núcleo probado en Linux, sin registrar | `test/automation.test.js` (7 casos); `src/automations/`, `src/executors/` | Herramientas, órdenes, extensión sesión y programador real en 3 sistemas |
-| Respaldo cifrado y recuperación (código físico y archivo protegido) | Integrado y probado en Linux | `test/backup.test.js` (12 casos), `docs/RESPALDO.md` | Windows/macOS, terminal real, paquetes y revisión criptográfica externa |
+| Organizar (crear carpetas, mover) | Integrado y probado en Linux y Windows | `src/organizer.js`, `src/native_organizer.py`, `test/organize-agent.test.js` | macOS |
+| Borrar con confirmación, auditoría y papelera | Integrado y probado en Linux y Windows | `src/trash.js`, herramientas de organización; confirmación tardía tras revocación rechazada | macOS |
+| Propiedades y búsqueda por propiedades | Integrado y probado en Linux y Windows | `src/properties.js`, `test/properties-indexes.test.js`, `docs/PROPIEDADES_INDICES.md`; migración global protegida | macOS |
+| Índices personalizados CSV | Integrado y probado en Linux y Windows | `src/custom-index.js`, herramientas de índices; edición externa, exclusiones y reinicio entre procesos | macOS |
+| Función 04: ejecutores, automatizaciones en sesión y programador del sistema | Integrado (herramientas y órdenes registradas); probado en Linux y Windows | `test/automation.test.js`, `test/functions-agent.test.js`; casos 17 y 20 desde el paquete | Instalación real de `mind programador` en el sistema y macOS |
+| Respaldo cifrado y recuperación (código físico y archivo protegido) | Integrado y probado en Linux y Windows (casos 21-22 desde el paquete) | `test/backup.test.js` (12 casos), `docs/RESPALDO.md` | macOS, terminal real con una persona y revisión criptográfica externa |
 | Paquetes portables (Hito A): linux-x64, linux-arm64, darwin-arm64, darwin-x64, win32-x64 | Implementado y probado | `scripts/construir-paquetes.mjs` (reproducible, huellas oficiales), `packaging/iniciadores/`, `.github/workflows/paquetes.yml`, `docs/DISTRIBUCION.md` | Experiencia sin firma (Gatekeeper, SmartScreen) comprobada por una persona |
-| Actualización segura del Motor (`mind actualizar`) | Probado en Linux, sin registrar | `test/update.test.js` (8 casos), Base conservada byte a byte, rollback, formatos y solapamientos | Paquetes completos y Windows/macOS antes de registrar orden |
+| Actualización segura del Motor (`mind actualizar`) | Registrado; probado en Linux y, con paquetes reales, en Windows (caso 23) | `test/update.test.js` (8 casos), Base conservada byte a byte, rollback, formatos y solapamientos | Linux y macOS con paquetes reales (CI bloqueado) |
 | Pruebas de producto (12 recorridos del Hito A) desde la carpeta extraída | Implementado y probado | `scripts/producto-12-casos.mjs` (PATH vacío, Claude Code real en el caso 4) y `scripts/producto-cuarentena-macos.mjs`, en CI para las 5 plataformas | — |
-| Comparativas con y sin Mind | En construcción (subagente F) | — | Resultados reales |
+| Comparativas con y sin Mind | Caché de búsqueda medida en Windows | `docs/evidencia/COMPARATIVA_CACHE_WINDOWS_2026-11-01.md` | Límite de 100 000 entradas (decisión), Linux/macOS y demás comparativas |
 | Firma de código y notarización | Bloqueado | El usuario decidió no pagar certificados | Avisos documentados; cuarentena de macOS mitigada (opción B) |
 
 ## Decisiones vigentes (aprobadas por el usuario)

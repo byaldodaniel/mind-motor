@@ -12,7 +12,7 @@ Mind/
   mind (macOS, Linux) o mind.cmd       iniciador (sin instalar nada)
   Autorizar Mind.command / .cmd        consola de autorización con doble clic (macOS, Windows)
   mind-producto.json                   manifiesto: versión, plataforma y SHA-256 de cada archivo
-  AGENTS.md, CLAUDE.md                 instrucciones de reconocimiento para agentes
+  AGENTS.md, CLAUDE.md, GEMINI.md      instrucciones de reconocimiento para agentes
   LEEME.md, LICENCIA.txt, LICENCIAS/   guía de primer uso y licencias
   .mcp.json                            servidor MCP "mind" del proyecto para Claude Code (rutas relativas)
   Motor/                               código del Motor; se sustituye al actualizar
@@ -78,9 +78,16 @@ mediante Mind.
 | `editar` | leer y escribir | Reemplazos exactos con control de versión |
 | `continuidad_*` | continuidad | Registrar, consultar, actualizar, exportar e importar |
 
-El Hito B añadirá herramientas mediante `src/tools/index.js` (organizar,
-papelera, propiedades, índices CSV, funciones y respaldo). Hasta que estén
-conectadas y probadas no se ofrecen al agente.
+| `crear_carpeta`, `mover`, `renombrar` | organizar | Nunca reemplazan; las propiedades siguen al elemento |
+| `borrar`, `papelera`, `restaurar`, `vaciar_papelera` | organizar (papelera: encontrar) | Papelera de Mind recuperable; borrar se confirma cada vez y vaciar dos veces |
+| `propiedades`, `asignar_propiedades` | encontrar / organizar | Etiquetas en la Base, sin modificar el archivo; `buscar` filtra por ellas |
+| `indices_personalizados`, `crear_indice`, `actualizar_indice`, `modificar_indice`, `retirar_indice` | encontrar y escribir | Índices en CSV dentro de una carpeta autorizada; no sobrescriben ediciones externas |
+| `funciones`, `crear_funcion`, `modificar_funcion`, `retirar_funcion`, `ejecutar_funcion`, `activar_funcion`, `desactivar_funcion`, `historial_funcion` | según el ejecutor | Catálogo fijo de ejecutores; la activación automática la autoriza el usuario |
+| `crear_respaldo` | — | Respaldo cifrado de la Base en el destino configurado por el usuario |
+
+Las herramientas del Hito B se registran mediante `src/tools/index.js` y están
+probadas en Linux y Windows (`node scripts/test.mjs` y los 23 casos de
+`scripts/producto-12-casos.mjs` desde la carpeta extraída). macOS sigue pendiente.
 
 ## Consentimiento y permisos
 
@@ -121,7 +128,8 @@ conectadas y probadas no se ofrecen al agente.
 | Agente | Estado |
 |---|---|
 | Claude Code 2.1.316 (CLI) | Verificado desde la carpeta extraída del paquete: descubrimiento y conexión del servidor de proyecto (`docs/DISTRIBUCION.md`) y sesiones reales con el modelo (`docs/evidencia/`). En modo sin interfaz (`-p`) el formulario se cancela y la solicitud queda pendiente para la consola. |
-| Otros clientes MCP | Sin configuración en el primer producto. |
+| Codex CLI 0.156.1, Gemini CLI 0.61.0 | El usuario registra el servidor una vez (`LEEME.md`). Verificado en Windows: el registro con `codex mcp add` y `gemini mcp add` y la conexión del servidor lanzado desde otro directorio. Gemini lo deja desactivado hasta que el usuario confía en la carpeta. Sin sesión real con el modelo en esta versión. |
+| Otros clientes MCP | Servidor stdio: `Runtime/node` + `Motor/bin/mind.js mcp`, con `NODE_OPTIONS` vacía. |
 | Agentes sin MCP con terminal | `mind herramienta …` (operaciones individuales). |
 
 ## Órdenes para el usuario
@@ -134,6 +142,9 @@ conectadas y probadas no se ofrecen al agente.
 | `mind reparar` | Limpia bloqueos y temporales tras un cierre abrupto |
 | `mind version` | Versiones |
 
-El Hito B añadirá `respaldo`, `actualizar`, `programador` y `programadas`
-mediante `src/commands/index.js`. En el primer producto, actualizar consiste en
-extraer el paquete nuevo y trasladar la carpeta `Base` con el agente cerrado.
+| `mind actualizar <paquete> [--forzar]` | Sustituye Motor y runtimes por los de un paquete nuevo y conserva la Base (la versión anterior queda en `.anterior-<versión>`) |
+| `mind respaldo configurar|crear|estado|verificar|restaurar` | Respaldos cifrados de la Base y su recuperación |
+| `mind programador instalar|estado|desinstalar` | Funciones automáticas autorizadas también con Mind cerrado |
+| `mind programadas` | Ejecuta los turnos vencidos (lo usa el programador del sistema) |
+
+Estas órdenes se registran mediante `src/commands/index.js`.

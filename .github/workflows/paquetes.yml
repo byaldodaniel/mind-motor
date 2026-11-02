@@ -1,7 +1,8 @@
 name: Paquetes portables
-# Construye los paquetes de Mind (Hito A), comprueba que son reproducibles y los
-# prueba extraídos en cada sistema, con sus propios runtimes y una ruta con
-# espacios y caracteres no ASCII. Los paquetes quedan como artefactos de la
+# Construye los paquetes de Mind, comprueba que son reproducibles y los prueba
+# extraídos en cada sistema, con sus propios runtimes y una ruta con espacios y
+# caracteres no ASCII, incluida la actualización a un segundo paquete (rc.2)
+# con `mind actualizar`. Los paquetes quedan como artefactos de la
 # ejecución; no es una publicación de producción.
 on: [push, workflow_dispatch]
 permissions:
@@ -21,6 +22,10 @@ jobs:
           node scripts/construir-paquetes.mjs --salida dist-2
           diff dist/SHA256SUMS dist-2/SHA256SUMS
           cat dist/SHA256SUMS
+      - name: Paquetes de actualización (mismo Motor, versión 1.0.0-rc.2) para probar mind actualizar
+        run: node scripts/construir-paquetes.mjs --version-paquete 1.0.0-rc.2 --salida dist-rc2
+      - uses: actions/upload-artifact@v4
+        with: { name: Mind-rc2, path: 'dist-rc2/Mind-*', compression-level: 0, if-no-files-found: error }
       - uses: actions/upload-artifact@v4
         with: { name: Mind-linux-x64, path: dist/Mind-*-linux-x64.tar.gz, compression-level: 0, if-no-files-found: error }
       - uses: actions/upload-artifact@v4
@@ -50,6 +55,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: 'Mind-${{ matrix.target }}', path: descarga }
+      - uses: actions/download-artifact@v4
+        with: { name: Mind-rc2, path: actualizacion }
       # Claude Code es el agente del usuario: trae su propio runtime. Mind no lo usa.
       - name: Instalar Claude Code (agente del usuario)
         run: npm install -g @anthropic-ai/claude-code@2.1.316
@@ -66,7 +73,8 @@ jobs:
           # Sin ningún programa en PATH salvo Claude Code: la prueba usa el Node incluido.
           CLAUDE="$(command -v claude)"
           env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" PATH="$(dirname "$CLAUDE"):$(dirname "$(command -v node)"):/usr/bin:/bin" \
-            "$M/Runtime/node/bin/node" scripts/producto-12-casos.mjs --mind "$M" --claude "$CLAUDE" --informe "informe-${{ matrix.target }}.json"
+            "$M/Runtime/node/bin/node" scripts/producto-12-casos.mjs --mind "$M" --claude "$CLAUDE" --informe "informe-${{ matrix.target }}.json" \
+            --actualizacion "$(ls "$PWD"/actualizacion/Mind-*-${{ matrix.target }}.tar.gz)"
 
       - name: Cuarentena de macOS (carpeta nueva marcada como descargada)
         if: runner.os == 'macOS'
@@ -92,7 +100,8 @@ jobs:
           $claude = (Get-Command claude.cmd).Source
           # PATH mínimo: el sistema y Claude Code (con el Node que trae su instalación).
           $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$(Split-Path $claude);$(Split-Path (Get-Command node).Source)"
-          & (Join-Path $m 'Runtime\node\node.exe') scripts/producto-12-casos.mjs --mind $m --claude claude --informe "informe-${{ matrix.target }}.json"
+          $nuevo = (Get-ChildItem actualizacion -Filter 'Mind-*-win32-x64.zip' | Select-Object -First 1).FullName
+          & (Join-Path $m 'Runtime\node\node.exe') scripts/producto-12-casos.mjs --mind $m --claude claude --informe "informe-${{ matrix.target }}.json" --actualizacion $nuevo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4

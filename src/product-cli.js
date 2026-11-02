@@ -29,7 +29,9 @@ Para agentes:
                              Ejecuta una herramienta de Mind en una operación
                              individual (sin observación continua), para agentes
                              sin MCP. Ejemplo: mind herramienta buscar '{"consulta":"acta"}'
+`;
 
+const OPTIONS = `
 Opciones:
   --base <ruta>              Base que se usará (en el producto: la carpeta Base).
 `;
@@ -104,7 +106,8 @@ export async function main(args) {
       case 'ayuda':
       case '--help':
       case '-h':
-        print(USAGE + Object.entries(COMMANDS).map(([name, entry]) => `  ${name.padEnd(26)} ${entry.ayuda ?? ''}`).join('\n'));
+        // Cada ayuda registrada empieza por su propia forma de uso.
+        print(`${USAGE}\nMantenimiento:\n${Object.entries(COMMANDS).map(([name, entry]) => `  ${entry.ayuda ?? name}`).join('\n')}\n${OPTIONS}`);
         return 0;
       case 'version':
       case '--version': {

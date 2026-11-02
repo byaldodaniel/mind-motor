@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { crearAzar } from './azar.mjs';
@@ -438,6 +439,8 @@ export function planificarArbol({ entradas: total, semilla = 'mind-comparativas-
  */
 export function escribirArbol(raiz, plan) {
   const inicio = performance.now();
+  const windows = process.platform === 'win32';
+  const dispersos = [];
   for (const entrada of plan.entradas) {
     const destino = path.join(raiz, ...entrada.ruta.split('/'));
     if (entrada.tipo === 'carpeta') {
@@ -449,13 +452,25 @@ export function escribirArbol(raiz, plan) {
     } else {
       const descriptor = fs.openSync(destino, 'wx');
       try {
-        fs.ftruncateSync(descriptor, entrada.bytes);
+        if (!windows) fs.ftruncateSync(descriptor, entrada.bytes);
       } finally {
         fs.closeSync(descriptor);
+      }
+      // En NTFS ftruncate reserva el tamaño real: se marcan dispersos y se fija después.
+      if (windows) {
+        dispersos.push({ destino, entrada });
+        continue;
       }
     }
     const momento = new Date(entrada.mtimeMs);
     fs.utimesSync(destino, momento, momento);
+  }
+  if (dispersos.length > 0) {
+    dispersarEnWindows(dispersos.map(({ destino, entrada }) => [destino, entrada.bytes]));
+    for (const { destino, entrada } of dispersos) {
+      const momento = new Date(entrada.mtimeMs);
+      fs.utimesSync(destino, momento, momento);
+    }
   }
   // Las fechas de las carpetas, al final y de dentro hacia fuera.
   for (let i = plan.entradas.length - 1; i >= 0; i -= 1) {
@@ -465,6 +480,36 @@ export function escribirArbol(raiz, plan) {
     fs.utimesSync(path.join(raiz, ...entrada.ruta.split('/')), momento, momento);
   }
   return { segundos: (performance.now() - inicio) / 1000 };
+}
+
+// FSCTL_SET_SPARSE y después el tamaño lógico, en un solo proceso para todo el árbol.
+const DISPERSAR = `
+import ctypes, json, sys
+from ctypes import wintypes
+k = ctypes.WinDLL('kernel32', use_last_error=True)
+k.CreateFileW.restype = wintypes.HANDLE
+k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+k.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+k.SetFilePointerEx.argtypes = [wintypes.HANDLE, ctypes.c_longlong, wintypes.LPVOID, wintypes.DWORD]
+k.SetEndOfFile.argtypes = [wintypes.HANDLE]
+k.CloseHandle.argtypes = [wintypes.HANDLE]
+for ruta, tamano in json.loads(sys.stdin.buffer.read().decode('utf-8')):
+    h = k.CreateFileW('\\\\\\\\?\\\\' + ruta, 0xC0000000, 0, None, 3, 0x80, None)
+    if h in (None, wintypes.HANDLE(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        devuelto = wintypes.DWORD()
+        if not (k.DeviceIoControl(h, 0x900C4, None, 0, None, 0, ctypes.byref(devuelto), None)
+                and k.SetFilePointerEx(h, tamano, None, 0) and k.SetEndOfFile(h)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        k.CloseHandle(h)
+`;
+
+function dispersarEnWindows(archivos) {
+  const resultado = spawnSync('python', ['-I', '-c', DISPERSAR], { input: JSON.stringify(archivos), encoding: 'utf8' });
+  if (resultado.error) throw resultado.error;
+  if (resultado.status !== 0) throw new Error(`No se pudieron crear los archivos dispersos: ${resultado.stderr}`);
 }
 
 function nombreDe(ruta) {
