@@ -3,6 +3,7 @@ import { MotorError } from './errors.js';
 import { openSession } from './session.js';
 import { createAgentTools, AGENT_INSTRUCTIONS } from './agent-tools.js';
 import { MOTOR_VERSION } from './version.js';
+import { releaseQuarantine } from './quarantine.js';
 
 /**
  * Sesión MCP ligada al agente: empieza cuando el cliente inicia el proceso y
@@ -13,6 +14,8 @@ export async function runMcpSession({ layout, input = process.stdin, output = pr
   const log = (level, message, data) => {
     process.stderr.write(`${JSON.stringify({ nivel: level, mensaje: message, ...(data ? { datos: data } : {}), fecha: new Date().toISOString() })}\n`);
   };
+  // macOS: retira la cuarentena de Runtime/ tras verificar sus hashes, antes del primer uso de Python.
+  const quarantine = await releaseQuarantine(layout, { log });
   let session;
   try {
     session = await openSession({ layout, motorVersion: MOTOR_VERSION, log });
@@ -32,7 +35,7 @@ export async function runMcpSession({ layout, input = process.stdin, output = pr
     input,
     output,
     serverInfo: { name: 'mind', title: 'Mind', version: MOTOR_VERSION },
-    instructions: AGENT_INSTRUCTIONS,
+    instructions: quarantine.aviso ? `${AGENT_INSTRUCTIONS}\n\nAviso para el usuario: ${quarantine.aviso}` : AGENT_INSTRUCTIONS,
     tools: (connection) => createAgentTools({ session, connection, log }),
     onInitialized: () => session.start(),
     onClose: close,

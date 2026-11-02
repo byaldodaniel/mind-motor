@@ -7,4 +7,9 @@
  *
  * Para añadir una orden: agregar `nombre: { load: () => import('./archivo.js'), ayuda: '...' }`.
  */
-export const COMMANDS = Object.freeze({});
+export const COMMANDS = Object.freeze({
+  actualizar: {
+    load: () => import('./actualizar.js'),
+    ayuda: 'actualizar <paquete> [--forzar]  Sustituye el Motor y los runtimes por los de un paquete nuevo (.zip, .tar.gz o carpeta) y conserva la Base.',
+  },
+});
