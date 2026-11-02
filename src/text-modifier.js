@@ -3,9 +3,11 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { isExcluded } from './paths.js';
+import { DEFAULT_TEXT_BYTES, describeBytes, textLimit } from './text-limits.js';
 
 const helper = fileURLToPath(new URL('./native_modifier.py', import.meta.url));
-export const MAX_MODIFY_BYTES = 1024 * 1024;
+/** Límite predeterminado; el anfitrión puede ampliarlo con maxBytes al conceder (hasta 16 MiB). */
+export const MAX_MODIFY_BYTES = DEFAULT_TEXT_BYTES;
 const VERSION = /^sha256:([0-9a-f]{64})$/;
 const messages = {
   ACCESS_DENIED: 'El sistema denegó la modificación o el archivo es de solo lectura.',
@@ -45,12 +47,22 @@ function relativeName(value) {
   return value;
 }
 
-function encodeText(content) {
+/** Mensaje del límite aplicado; el predeterminado conserva el texto de siempre. */
+function sizeError(code, limit) {
+  if (limit === DEFAULT_TEXT_BYTES) return new MotorError(code, messages[code]);
+  return new MotorError(code, code === 'FILE_TOO_LARGE'
+    ? `El archivo actual supera el límite de ${describeBytes(limit)}.`
+    : `El contenido supera el límite de ${describeBytes(limit)}.`);
+}
+
+function encodeText(content, limit = DEFAULT_TEXT_BYTES) {
   if (typeof content !== 'string' || !content.isWellFormed() || content.includes('\0')) {
     throw new MotorError('INVALID_TEXT', messages.INVALID_TEXT);
   }
+  // Sin convertir textos que ya superan el límite: cada unidad UTF-16 ocupa al menos un byte.
+  if (content.length > limit) throw sizeError('TEXT_TOO_LARGE', limit);
   const bytes = Buffer.from(content, 'utf8');
-  if (bytes.length > MAX_MODIFY_BYTES) throw new MotorError('TEXT_TOO_LARGE', messages.TEXT_TOO_LARGE);
+  if (bytes.length > limit) throw sizeError('TEXT_TOO_LARGE', limit);
   return bytes;
 }
 
@@ -66,8 +78,13 @@ function iso(milliseconds) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
-/** Protocolo: abre y verifica la versión sin escribir, avisa READY, espera W y publica. */
-export function modifyNative({ root, relativePath, expected, bytes, pythonExecutable, confirm }) {
+/**
+ * Protocolo: abre y verifica la versión sin escribir, avisa READY, espera W y publica.
+ * maxBytes (límite del contenido nuevo y de la lectura de verificación del actual)
+ * solo viaja al auxiliar si difiere del predeterminado; el auxiliar aplica el
+ * mínimo con su propio máximo.
+ */
+export function modifyNative({ root, relativePath, expected, bytes, pythonExecutable, confirm, maxBytes = DEFAULT_TEXT_BYTES }) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonExecutable, ['-I', '-B', helper], {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -101,7 +118,8 @@ export function modifyNative({ root, relativePath, expected, bytes, pythonExecut
       if (code !== 0 || !confirmation) {
         const nativeCode = diagnostic.replace('READY\n', '').trim();
         const errorCode = Object.hasOwn(messages, nativeCode) ? nativeCode : 'MODIFY_FAILED';
-        return reject(new MotorError(errorCode, messages[errorCode]));
+        return reject(errorCode === 'TEXT_TOO_LARGE' || errorCode === 'FILE_TOO_LARGE'
+          ? sizeError(errorCode, maxBytes) : new MotorError(errorCode, messages[errorCode]));
       }
       try {
         const result = JSON.parse(output);
@@ -111,7 +129,10 @@ export function modifyNative({ root, relativePath, expected, bytes, pythonExecut
         reject(new MotorError('MODIFY_UNCONFIRMED', messages.MODIFY_UNCONFIRMED, { cause }));
       }
     });
-    child.stdin.write(`${JSON.stringify({ root, relativePath, expected, content: bytes.toString('base64') })}\n`);
+    child.stdin.write(`${JSON.stringify({
+      root, relativePath, expected, content: bytes.toString('base64'),
+      ...(maxBytes !== DEFAULT_TEXT_BYTES ? { maxBytes } : {}),
+    })}\n`);
   });
 }
 
@@ -131,14 +152,20 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
     return folder;
   }
   return {
-    async grantTextModify({ requester, folderId, relativePath } = {}) {
+    /**
+     * Solo anfitrión. maxBytes (opcional, también solo del anfitrión) amplía el
+     * límite de 1 MiB de este permiso, para el contenido nuevo y para la lectura
+     * de verificación del actual, hasta un máximo absoluto de 16 MiB.
+     */
+    async grantTextModify({ requester, folderId, relativePath, maxBytes } = {}) {
       if (!requester || typeof requester !== 'object') throw new MotorError('INVALID_REQUESTER', 'El anfitrión debe proporcionar la identidad opaca del solicitante.');
       const name = relativeName(relativePath);
+      const limit = textLimit(maxBytes);
       const folder = await folderFor(folderId);
       if (isExcluded(folder.exclusions, name)) throw excluded();
       const authorization = Object.freeze(Object.create(null));
       grants.set(authorization, {
-        requester, folderId, generation: folder.generation, relativePath: name, used: false, revoked: false,
+        requester, folderId, generation: folder.generation, relativePath: name, maxBytes: limit, used: false, revoked: false,
       });
       return authorization;
     },
@@ -160,12 +187,12 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
       if (!grant || grant.requester !== requester || grant.used || grant.revoked) throw denied();
       grant.used = true; // Un solo intento; se consume antes de cualquier await o validación.
       const expected = expectedDigest(expectedVersion);
-      const bytes = encodeText(content);
+      const bytes = encodeText(content, grant.maxBytes);
       const folder = await folderFor(grant.folderId);
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const result = await modifyNative({
-        root: folder.path, relativePath: grant.relativePath, expected, bytes, pythonExecutable,
+        root: folder.path, relativePath: grant.relativePath, expected, bytes, pythonExecutable, maxBytes: grant.maxBytes,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();

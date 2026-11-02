@@ -1,6 +1,7 @@
 import { MotorError } from './errors.js';
 import { validateScopeId } from './index-store.js';
 import { isExcluded } from './paths.js';
+import { parsePropertyMap } from './properties.js';
 
 export const DEFAULT_SEARCH_LIMIT = 50;
 export const MAX_SEARCH_LIMIT = 500;
@@ -11,9 +12,12 @@ const MATCHES = new Set(['contains', 'prefix', 'exact']);
 const FIELDS = new Set(['name', 'path']);
 const SORTS = new Set(['relevance', 'path', 'modified', 'size']);
 const KEYS = new Set(['folderIds', 'query', 'match', 'field', 'types', 'extensions', 'pathPrefix',
-  'minSize', 'maxSize', 'modifiedAfter', 'modifiedBefore', 'includeUnverified', 'sort', 'limit', 'offset']);
+  'minSize', 'maxSize', 'modifiedAfter', 'modifiedBefore', 'includeUnverified', 'properties', 'sort', 'limit', 'offset']);
 /** Errores de un índice concreto que no deben ocultar los demás ámbitos. */
 const INDEX_FAILURES = new Set(['INDEX_CORRUPT', 'RECORD_CORRUPT', 'RECORD_LINK']);
+/** Errores de las propiedades de una carpeta: no impiden buscar por nombre en ella. */
+const PROPERTY_FAILURES = new Set(['PROPERTIES_CORRUPT', 'RECORD_CORRUPT', 'RECORD_LINK']);
+export const MAX_PROPERTY_FILTERS = 16;
 
 /**
  * @typedef {object} SearchRequest
@@ -29,6 +33,8 @@ const INDEX_FAILURES = new Set(['INDEX_CORRUPT', 'RECORD_CORRUPT', 'RECORD_LINK'
  * @property {string} [modifiedAfter] Fecha ISO, inclusiva.
  * @property {string} [modifiedBefore] Fecha ISO, exclusiva.
  * @property {boolean} [includeUnverified] Por defecto true; esos resultados se marcan.
+ * @property {Record<string, string | number | boolean>} [properties] Propiedades que deben coincidir todas;
+ *   el texto se compara sin distinguir mayúsculas ni diacríticos y el tipo debe ser el mismo.
  * @property {'relevance' | 'path' | 'modified' | 'size'} [sort]
  * @property {number} [limit]
  * @property {number} [offset]
@@ -48,6 +54,7 @@ const INDEX_FAILURES = new Set(['INDEX_CORRUPT', 'RECORD_CORRUPT', 'RECORD_LINK'
  * @property {'indexed' | 'unverified'} status "indexed": confirmado en indexedAt.
  * @property {string | null} reason Por qué no pudo confirmarse.
  * @property {string} indexedAt Fecha del índice del que procede.
+ * @property {Record<string, string | number | boolean>} [properties] Solo si la entrada tiene propiedades.
  */
 /**
  * @typedef {object} ScopeStatus
@@ -56,7 +63,7 @@ const INDEX_FAILURES = new Set(['INDEX_CORRUPT', 'RECORD_CORRUPT', 'RECORD_LINK'
  * @property {string | null} indexedAt
  * @property {number | null} indexGeneration
  * @property {boolean | null} complete false si el índice tiene carpetas sin listar o entradas sin verificar.
- * @property {string | null} code
+ * @property {string | null} code Motivo del estado; en un ámbito buscado, una incidencia de sus propiedades.
  */
 
 function invalid(message) {
@@ -130,9 +137,19 @@ export function parseSearch(request) {
   const maxSize = size(request.maxSize, 'maxSize');
   const modifiedAfter = date(request.modifiedAfter, 'modifiedAfter');
   const modifiedBefore = date(request.modifiedBefore, 'modifiedBefore');
+  let properties = null;
+  if (request.properties !== undefined) {
+    let parsed;
+    try {
+      parsed = parsePropertyMap(request.properties, { max: MAX_PROPERTY_FILTERS });
+    } catch (error) {
+      throw invalid(`properties no es válido: ${error.message}`);
+    }
+    properties = [...parsed].map(([key, value]) => [key, typeof value === 'string' ? fold(value) : value]);
+  }
   return {
     folderIds, needle: fold(query), match, field, types, extensions, pathPrefix, includeUnverified,
-    minSize, maxSize, modifiedAfter, modifiedBefore, sort, limit, offset,
+    minSize, maxSize, modifiedAfter, modifiedBefore, properties, sort, limit, offset,
   };
 }
 
@@ -150,7 +167,14 @@ function rank(text, needle, match) {
   return text.includes(needle) ? 2 : null;
 }
 
-function matches(entry, criteria) {
+/** Todas las propiedades pedidas, con el mismo tipo; el texto, sin mayúsculas ni diacríticos. */
+function hasProperties(properties, wanted) {
+  if (!properties) return false;
+  return wanted.every(([key, value]) => Object.hasOwn(properties, key) && typeof properties[key] === typeof value
+    && (typeof value === 'string' ? fold(properties[key]) === value : properties[key] === value));
+}
+
+function matches(entry, criteria, properties = null) {
   if (!criteria.types.has(entry.type)) return null;
   if (entry.state === 'unverified' && !criteria.includeUnverified) return null;
   if (criteria.pathPrefix && !entry.path.startsWith(`${criteria.pathPrefix}/`)) return null;
@@ -168,6 +192,7 @@ function matches(entry, criteria) {
     if (criteria.modifiedAfter !== null && modified < criteria.modifiedAfter) return null;
     if (criteria.modifiedBefore !== null && modified >= criteria.modifiedBefore) return null;
   }
+  if (criteria.properties && !hasProperties(properties, criteria.properties)) return null;
   return rank(fold(criteria.field === 'name' ? name : entry.path), criteria.needle, criteria.match);
 }
 
@@ -191,14 +216,18 @@ function comparator(sort) {
 }
 
 /**
- * Búsqueda sobre los índices persistidos. No recorre carpetas ni abre archivos.
+ * Recorre los índices vigentes de los ámbitos pedidos y devuelve todas las
+ * coincidencias, sin ordenar ni paginar. No recorre carpetas ni abre archivos.
  * Los ámbitos llegan del anfitrión; su vigencia se comprueba con el registro
- * existente, sin un sistema de permisos propio.
+ * existente, sin un sistema de permisos propio. Sin readFolderProperties, las
+ * entradas no tienen propiedades y el resultado es el de la búsqueda por nombre.
  * @param {object} options
  * @param {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} options.readFolderIndex
- * @param {(folderId: string) => Promise<{ id: string, generation?: string | null } | null>} options.loadAuthorizedFolder
+ * @param {(folderId: string) => Promise<{ id: string, path?: string, generation?: string | null, exclusions?: string[] } | null>} options.loadAuthorizedFolder
+ * @param {(folderId: string) => Promise<import('./properties.js').FolderProperties | null>} [options.readFolderProperties]
+ * @returns {(criteria: ReturnType<typeof parseSearch>) => Promise<{ found: { rank: number, key: string, result: SearchResult }[], scopes: ScopeStatus[], folders: Map<string, object> }>}
  */
-export function createIndexSearch({ readFolderIndex, loadAuthorizedFolder }) {
+export function createIndexCollector({ readFolderIndex, loadAuthorizedFolder, readFolderProperties = null }) {
   async function readScope(folderId) {
     try {
       const index = await readFolderIndex(folderId);
@@ -215,12 +244,91 @@ export function createIndexSearch({ readFolderIndex, loadAuthorizedFolder }) {
     }
   }
 
+  /** Propiedades de la misma autorización que el índice; las de otra concesión no se aplican. */
+  async function readProperties(folderId, index) {
+    if (typeof readFolderProperties !== 'function') return { map: null, code: null };
+    try {
+      const stored = await readFolderProperties(folderId);
+      if (!stored || (stored.authorizationGeneration ?? null) !== (index.authorizationGeneration ?? null)) {
+        return { map: null, code: null };
+      }
+      return { map: new Map(stored.entries.map((entry) => [entry.path, entry.properties])), code: null };
+    } catch (error) {
+      // Una retirada se confirma a continuación con el registro.
+      if (error?.code === 'FOLDER_NOT_AUTHORIZED') return { map: null, code: null };
+      if (PROPERTY_FAILURES.has(error?.code)) return { map: null, code: error.code };
+      throw error;
+    }
+  }
+
   /** Confirma que la concesión que produjo el índice sigue vigente al responder; devuelve el registro. */
   async function stillAuthorized(folderId, index) {
     const folder = await loadAuthorizedFolder(folderId);
     return folder !== null && (folder.generation ?? null) === index.authorizationGeneration ? folder : null;
   }
 
+  return async function collect(criteria) {
+    const read = await Promise.all(criteria.folderIds.map(readScope));
+    const found = [];
+    const folders = new Map();
+    for (const { scope, index } of read) {
+      if (!index) continue;
+      const properties = await readProperties(scope.folderId, index);
+      const folder = await stillAuthorized(scope.folderId, index);
+      if (!folder) {
+        Object.assign(scope, status(scope.folderId, 'not-authorized', null, 'FOLDER_NOT_AUTHORIZED'));
+        continue;
+      }
+      if (properties.code) {
+        // Sin propiedades legibles no se puede filtrar por ellas; buscar por nombre sí.
+        if (criteria.properties) {
+          Object.assign(scope, status(scope.folderId, 'index-unavailable', null, properties.code));
+          continue;
+        }
+        scope.code = properties.code;
+      }
+      folders.set(scope.folderId, folder);
+      for (const entry of index.entries) {
+        if (isExcluded(folder.exclusions, entry.path)) continue;
+        const entryProperties = properties.map?.get(entry.path) ?? null;
+        const level = matches(entry, criteria, entryProperties);
+        if (level === null) continue;
+        found.push({
+          rank: level,
+          key: fold(nameOf(entry.path)),
+          result: {
+            folderId: scope.folderId,
+            relativePath: entry.path,
+            name: nameOf(entry.path),
+            type: entry.type,
+            size: entry.size,
+            modifiedAt: entry.modifiedAt,
+            changedAt: entry.changedAt,
+            createdAt: entry.createdAt,
+            status: entry.state === 'unverified' ? 'unverified' : 'indexed',
+            reason: entry.state === 'unverified' ? entry.reason : null,
+            indexedAt: index.updatedAt,
+            ...(entryProperties ? { properties: { ...entryProperties } } : {}),
+          },
+        });
+      }
+    }
+    return { found, scopes: read.map(({ scope }) => scope), folders };
+  };
+}
+
+/**
+ * Búsqueda sobre los índices persistidos. No recorre carpetas ni abre archivos.
+ * Los ámbitos llegan del anfitrión; su vigencia se comprueba con el registro
+ * existente, sin un sistema de permisos propio.
+ * @param {object} options
+ * @param {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} options.readFolderIndex
+ * @param {(folderId: string) => Promise<{ id: string, generation?: string | null } | null>} options.loadAuthorizedFolder
+ * @param {(folderId: string) => Promise<import('./properties.js').FolderProperties | null>} [options.readFolderProperties]
+ *   Opcional: añade el filtro y la salida de propiedades. Sin él, el comportamiento es el anterior.
+ */
+export function createIndexSearch({ readFolderIndex, loadAuthorizedFolder, readFolderProperties = null }) {
+  const collect = createIndexCollector({ readFolderIndex, loadAuthorizedFolder, readFolderProperties });
   return {
     /**
      * @param {SearchRequest} request
@@ -228,38 +336,7 @@ export function createIndexSearch({ readFolderIndex, loadAuthorizedFolder }) {
      */
     async searchFiles(request) {
       const criteria = parseSearch(request);
-      const read = await Promise.all(criteria.folderIds.map(readScope));
-      const found = [];
-      for (const { scope, index } of read) {
-        if (!index) continue;
-        const folder = await stillAuthorized(scope.folderId, index);
-        if (!folder) {
-          Object.assign(scope, status(scope.folderId, 'not-authorized', null, 'FOLDER_NOT_AUTHORIZED'));
-          continue;
-        }
-        for (const entry of index.entries) {
-          if (isExcluded(folder.exclusions, entry.path)) continue;
-          const level = matches(entry, criteria);
-          if (level === null) continue;
-          found.push({
-            rank: level,
-            key: fold(nameOf(entry.path)),
-            result: {
-              folderId: scope.folderId,
-              relativePath: entry.path,
-              name: nameOf(entry.path),
-              type: entry.type,
-              size: entry.size,
-              modifiedAt: entry.modifiedAt,
-              changedAt: entry.changedAt,
-              createdAt: entry.createdAt,
-              status: entry.state === 'unverified' ? 'unverified' : 'indexed',
-              reason: entry.state === 'unverified' ? entry.reason : null,
-              indexedAt: index.updatedAt,
-            },
-          });
-        }
-      }
+      const { found, scopes } = await collect(criteria);
       found.sort(comparator(criteria.sort));
       const page = found.slice(criteria.offset, criteria.offset + criteria.limit);
       return {
@@ -268,7 +345,7 @@ export function createIndexSearch({ readFolderIndex, loadAuthorizedFolder }) {
         offset: criteria.offset,
         limit: criteria.limit,
         truncated: criteria.offset + page.length < found.length,
-        scopes: read.map(({ scope }) => scope),
+        scopes,
       };
     },
   };

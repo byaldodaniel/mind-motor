@@ -39,6 +39,10 @@ _spec.loader.exec_module(reader)
 Refusal = reader.Refusal
 component = reader.component
 MAX_BYTES = 1024 * 1024
+# Máximo propio del auxiliar: el anfitrión puede pedir un límite menor o mayor
+# que el predeterminado (maxBytes), pero nunca por encima de este. Se aplica al
+# contenido nuevo y a la lectura de verificación del archivo actual.
+ABSOLUTE_MAX_BYTES = 16 * 1024 * 1024
 WINDOWS_EPOCH = 116444736000000000
 
 
@@ -82,10 +86,11 @@ class Posix(reader.Posix):
             self.close(handle)
             raise
 
-    def read(self, handle):
+    def read(self, handle, limit=MAX_BYTES):
+        """Lee como máximo limit + 1 bytes: lo justo para saber si supera el límite."""
         chunks, size = [], 0
-        while size <= MAX_BYTES:
-            chunk = os.read(handle, min(65536, MAX_BYTES + 1 - size))
+        while size <= limit:
+            chunk = os.read(handle, min(65536, limit + 1 - size))
             if not chunk:
                 break
             chunks.append(chunk)
@@ -244,13 +249,14 @@ class Windows(reader.Windows):
             self.close(handle)
             raise
 
-    def read(self, handle):
+    def read(self, handle, limit=MAX_BYTES):
+        """Lee como máximo limit + 1 bytes: lo justo para saber si supera el límite."""
         c, w = self.c, self.w
         chunks, size = [], 0
         buffer = c.create_string_buffer(65536)
-        while size <= MAX_BYTES:
+        while size <= limit:
             count = w.DWORD()
-            if not self.kernel.ReadFile(handle, buffer, min(65536, MAX_BYTES + 1 - size), c.byref(count), None):
+            if not self.kernel.ReadFile(handle, buffer, min(65536, limit + 1 - size), c.byref(count), None):
                 self._error()
             if count.value == 0:
                 break
@@ -409,13 +415,16 @@ def open_parent(backend, stack, root, parts, after_directory=None):
     return parent, volume
 
 
-def modify_file(root, relative, expected, data, confirm=None, after_directory=None, before_publish=None, backend=None):
+def modify_file(root, relative, expected, data, confirm=None, after_directory=None, before_publish=None, backend=None,
+                max_bytes=MAX_BYTES):
     """Sustituye el contenido si la versión actual coincide con expected (SHA-256 hex).
 
     after_directory y before_publish son barreras deterministas solo para pruebas.
-    Devuelve los metadatos del archivo publicado.
+    max_bytes limita la lectura de verificación del archivo actual, acotado por el
+    máximo propio del auxiliar. Devuelve los metadatos del archivo publicado.
     """
     backend = backend or (Windows() if os.name == 'nt' else Posix())
+    limit = min(max_bytes, ABSOLUTE_MAX_BYTES)
     parts = [component(part) for part in relative.split('/')]
     name = parts[-1]
     with contextlib.ExitStack() as stack:
@@ -424,8 +433,8 @@ def modify_file(root, relative, expected, data, confirm=None, after_directory=No
         stack.callback(backend.close, target)
         if target_volume != volume:
             raise Refusal('UNSAFE_PATH')
-        current = backend.read(target)
-        if len(current) > MAX_BYTES:
+        current = backend.read(target, limit)
+        if len(current) > limit:
             raise Refusal('FILE_TOO_LARGE')
         check_text(current, 'TEXT_UNREADABLE')
         if hashlib.sha256(current).hexdigest() != expected:
@@ -470,12 +479,23 @@ def error_code(error):
     return 'MODIFY_FAILED' if code == 'READ_FAILED' else code
 
 
+def size_limit(request):
+    """Límite pedido por el anfitrión (maxBytes), acotado por el máximo propio; 1 MiB si no se indica."""
+    if 'maxBytes' not in request:
+        return MAX_BYTES
+    value = request['maxBytes']
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise Refusal('MODIFY_FAILED')
+    return min(value, ABSOLUTE_MAX_BYTES)
+
+
 def decode(request):
-    if (not isinstance(request, dict) or set(request) != {'root', 'relativePath', 'expected', 'content'}
+    required = {'root', 'relativePath', 'expected', 'content'}
+    if (not isinstance(request, dict) or not required <= set(request) <= required | {'maxBytes'}
             or not isinstance(request['expected'], str) or not re.fullmatch(r'[0-9a-f]{64}', request['expected'])):
         raise Refusal('MODIFY_FAILED')
     data = base64.b64decode(request['content'], validate=True)
-    if len(data) > MAX_BYTES:
+    if len(data) > size_limit(request):
         raise Refusal('TEXT_TOO_LARGE')
     check_text(data, 'INVALID_TEXT')
     return request['root'], request['relativePath'], request['expected'], data
@@ -490,8 +510,10 @@ def run():
             raise Refusal('MODIFY_FAILED')
 
     try:
-        root, relative, expected, data = decode(json.loads(sys.stdin.buffer.readline(3 * MAX_BYTES)))
-        sys.stdout.write(json.dumps(modify_file(root, relative, expected, data, confirm)))
+        request = json.loads(sys.stdin.buffer.readline(3 * ABSOLUTE_MAX_BYTES))
+        root, relative, expected, data = decode(request)
+        result = modify_file(root, relative, expected, data, confirm, max_bytes=size_limit(request))
+        sys.stdout.write(json.dumps(result))
         return 0
     except Exception as error:
         sys.stderr.write(error_code(error) + '\n')

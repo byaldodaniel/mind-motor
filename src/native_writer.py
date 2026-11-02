@@ -34,6 +34,9 @@ _spec.loader.exec_module(reader)
 Refusal = reader.Refusal
 component = reader.component
 MAX_BYTES = 1024 * 1024
+# Máximo propio del auxiliar: el anfitrión puede pedir un límite menor o mayor
+# que el predeterminado (maxBytes), pero nunca por encima de este.
+ABSOLUTE_MAX_BYTES = 16 * 1024 * 1024
 WINDOWS_EPOCH = 116444736000000000
 STATUS_ACCESS_DENIED = 0xC0000022
 STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
@@ -316,11 +319,23 @@ def error_code(error):
     return 'CREATE_FAILED' if code == 'READ_FAILED' else code
 
 
+def size_limit(request, failure):
+    """Límite pedido por el anfitrión (maxBytes), acotado por el máximo propio; 1 MiB si no se indica."""
+    if 'maxBytes' not in request:
+        return MAX_BYTES
+    value = request['maxBytes']
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise Refusal(failure)
+    return min(value, ABSOLUTE_MAX_BYTES)
+
+
 def decode(request):
-    if not isinstance(request, dict) or set(request) != {'root', 'relativePath', 'content'}:
+    required = {'root', 'relativePath', 'content'}
+    if not isinstance(request, dict) or not required <= set(request) <= required | {'maxBytes'}:
         raise Refusal('CREATE_FAILED')
+    limit = size_limit(request, 'CREATE_FAILED')
     data = base64.b64decode(request['content'], validate=True)
-    if len(data) > MAX_BYTES:
+    if len(data) > limit:
         raise Refusal('TEXT_TOO_LARGE')
     try:
         data.decode('utf-8', 'strict')
@@ -340,7 +355,7 @@ def run():
             raise Refusal('CREATE_FAILED')
 
     try:
-        root, relative, data = decode(json.loads(sys.stdin.buffer.readline(3 * MAX_BYTES)))
+        root, relative, data = decode(json.loads(sys.stdin.buffer.readline(3 * ABSOLUTE_MAX_BYTES)))
         result = create_file(root, relative, data, confirm)
         sys.stdout.write(json.dumps(result))
         return 0

@@ -16,6 +16,7 @@ import { createTextModifier } from './text-modifier.js';
 import { createFolderIndexer } from './indexer.js';
 import { createIndexSearch } from './search.js';
 import { createIndexObserver } from './index-observer.js';
+import { createPropertyStore } from './properties.js';
 
 export { MotorError } from './errors.js';
 export { textVersion } from './text-modifier.js';
@@ -55,6 +56,11 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * @property {(folderId: string) => Promise<import('./indexer.js').IndexResult>} indexFolder Solo administración local.
  * @property {(folderId: string) => Promise<import('./index-store.js').FolderIndex | null>} readFolderIndex Solo administración local.
  * @property {(request: import('./search.js').SearchRequest) => Promise<object>} searchFiles Solo anfitrión, sobre ámbitos que él autoriza.
+ * @property {(folderId: string, relativePath: string, changes: {set?: object, remove?: string[]}) => Promise<{folderId: string, relativePath: string, properties: object, generation: number | null}>} setProperties Solo anfitrión.
+ * @property {(folderId: string, relativePath: string) => Promise<object>} getProperties Solo anfitrión.
+ * @property {(folderId: string) => Promise<import('./properties.js').FolderProperties | null>} readFolderProperties Solo anfitrión.
+ * @property {(folderId: string, from: string, to: string) => Promise<{moved: number, discarded: number, generation: number | null}>} renameProperties Solo anfitrión: lo llama quien mueve entradas.
+ * @property {(folderId: string) => Promise<boolean>} removeFolderProperties Solo anfitrión.
  * @property {(request: {content: unknown, kind?: string, source?: string, references?: object[]}) => Promise<import('./continuity.js').ContinuityEntry>} recordContinuity Solo anfitrión administrativo.
  * @property {(id: string) => Promise<import('./continuity.js').ContinuityEntry | null>} getContinuity Solo anfitrión administrativo.
  * @property {(id: string, changes: object, options?: {expectedRevision?: number}) => Promise<import('./continuity.js').ContinuityEntry>} updateContinuity Solo anfitrión administrativo.
@@ -154,6 +160,10 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   // Definiciones como datos en la Base; el código ejecutable solo llega del catálogo del anfitrión.
   const functions = createFunctionRegistry({ baseDirectory: base });
   const runner = createFunctionRunner({ functions, executors: functionExecutors });
+  // Propiedades de entradas (Función 02): en la Base, ligadas a la generación de la autorización.
+  const properties = createPropertyStore({
+    baseDirectory: base, loadAuthorizedFolder, readFolderIndex: indexer.readFolderIndex,
+  });
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
   /** Observadores abiertos en esta instancia; solo existen si el anfitrión los abre. */
@@ -200,7 +210,15 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     runFunction: runner.runFunction,
     indexFolder: indexer.indexFolder,
     readFolderIndex: indexer.readFolderIndex,
-    ...createIndexSearch({ readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder }),
+    ...createIndexSearch({
+      readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder, readFolderProperties: properties.readFolderProperties,
+    }),
+    // Propiedades: operaciones del anfitrión. Los agentes las usan a través de sus herramientas.
+    setProperties: properties.setProperties,
+    getProperties: properties.getProperties,
+    readFolderProperties: properties.readFolderProperties,
+    renameProperties: properties.renameProperties,
+    removeFolderProperties: properties.removeFolderProperties,
     // Continuidad: administración del anfitrión. El agente recibe solo la vista
     // { readContext, recordResult } de bindContinuityAgent, nunca estas operaciones.
     recordContinuity: continuity.recordContinuity,
@@ -249,6 +267,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
       // Coordinado con publicaciones (#18). Dentro del bloqueo se revoca antes de
       // limpiar; un fallo de limpieza no restaura la autoridad ya retirada.
       let attempted = false;
+      let failure = null;
       try {
         return await indexer.removeFolderIndex(id, () => {
           attempted = true;
@@ -257,11 +276,24 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
       } catch (error) {
         // Conserva el error público de validación del registro, sin hacer E/S.
         if (error.code === 'INVALID_SCOPE_ID') return folders.revokeFolder(id);
+        failure = error;
         throw error;
       } finally {
         // Fuera del bloqueo: la reconciliación que detiene la observación también lo pide.
         // Se detiene aunque falle la limpieza, solo si la retirada llegó a ejecutarse.
-        if (attempted) await stopObservation(id);
+        if (attempted) {
+          try {
+            // Después del registro y del índice, con su propio bloqueo: una escritura de
+            // propiedades en curso termina antes y ninguna posterior supera la revalidación.
+            await properties.removeFolderProperties(id);
+          } catch (error) {
+            if (!failure) failure = error;
+          } finally {
+            await stopObservation(id);
+          }
+          // El primer fallo de limpieza se informa; la carpeta sigue retirada.
+          if (failure) throw failure;
+        }
       }
     },
 
