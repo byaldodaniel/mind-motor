@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { MotorError } from './errors.js';
-import { contains, samePath, isExcluded } from './paths.js';
+import { contains, samePath, isExcluded, TRASH_DIRECTORY } from './paths.js';
 import { scanFolder } from './index-scan.js';
 import { createIndexStore, validateScopeId } from './index-store.js';
 
@@ -137,6 +137,66 @@ export function createFolderIndexer({
     return current;
   }
 
+  const reconcile = (code, generation = null) => ({ status: 'needs-reconciliation', generation, code });
+  const sameEntry = (first, second) => ['type', 'size', 'modifiedAt', 'changedAt', 'createdAt', 'state', 'reason']
+    .every((field) => first[field] === second[field]);
+  const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
+  /** Las carpetas padre de relativePath deben figurar como carpetas indexadas. */
+  function parentsCurrent(known, relativePath) {
+    const parts = relativePath.split('/');
+    for (let depth = 1; depth < parts.length; depth += 1) {
+      const parent = known.get(parts.slice(0, depth).join('/'));
+      if (parent?.type !== 'directory' || parent.state !== 'indexed') return false;
+    }
+    return true;
+  }
+
+  /**
+   * Publica una actualización incremental bajo la cola del ámbito y el bloqueo
+   * entre procesos, revalidando la autorización como recordCreatedFile.
+   * prepare(index, scope) devuelve { result } para no publicar o
+   * { entries, issues? } para publicar la generación siguiente.
+   */
+  async function publishIncremental(scopeId, prepare) {
+    validateScopeId(scopeId);
+    const requestedScope = await authorized(scopeId);
+    return exclusive(scopeId, () => store.exclusive(scopeId, async () => {
+      const scope = await authorized(scopeId);
+      requireSameAuthorization(requestedScope, scope);
+      const index = boundIndex(await store.load(scopeId), scope);
+      const prepared = prepare(index, scope);
+      if (prepared.result) return prepared.result;
+      requireSameAuthorization(scope, await authorized(scopeId));
+      const latest = boundIndex(await store.load(scopeId), scope);
+      if (latest?.generation !== index.generation) return reconcile('INDEX_CONFLICT');
+      const generation = index.generation + 1;
+      // save valida la forma completa; una entrada mal formada no se publica.
+      await store.save({ ...index, generation, entries: prepared.entries, issues: prepared.issues ?? index.issues });
+      return { status: 'updated', generation, code: null, ...(prepared.extra ?? {}) };
+    }));
+  }
+
+  /** Incorpora una entrada nueva (archivo o carpeta vacía) creada por el Motor. */
+  function recordNewEntry(scopeId, entry, type, invalidCode) {
+    return publishIncremental(scopeId, (index, scope) => {
+      if (entry?.type !== type || entry.state !== 'indexed' || typeof entry.path !== 'string') {
+        return { result: reconcile(invalidCode) };
+      }
+      if (isExcluded(scope.exclusions, entry.path)) return { result: reconcile('PATH_EXCLUDED') };
+      if (!index) return { result: { status: 'not-indexed', generation: null, code: null } };
+      const known = new Map(index.entries.map((item) => [item.path, item]));
+      const existing = known.get(entry.path);
+      if (existing) {
+        return { result: sameEntry(existing, entry) ? { status: 'current', generation: index.generation, code: null }
+          : reconcile('INDEX_ENTRY_CONFLICT', index.generation) };
+      }
+      if (!parentsCurrent(known, entry.path)) return { result: reconcile('INDEX_PARENT_NOT_CURRENT', index.generation) };
+      if (index.entries.length + 1 > maxEntries) return { result: reconcile('INDEX_LIMIT_EXCEEDED', index.generation) };
+      return { entries: [...index.entries, entry].sort(byPath) };
+    });
+  }
+
   return Object.freeze({
     /**
      * Crea el índice inicial o lo reconcilia con el estado actual de la carpeta.
@@ -152,8 +212,10 @@ export function createFolderIndexer({
           requireSameAuthorization(scope, await authorized(scopeId));
           return boundIndex(await store.load(scopeId), scope);
         });
+        // La papelera de Mind es una exclusión implícita: nunca se recorre ni se indexa.
         const { entries, issues } = await scanFolder(scope.path, {
-          previous: previous?.entries ?? [], maxEntries, pythonExecutable, exclude: scope.exclusions ?? [],
+          previous: previous?.entries ?? [], maxEntries, pythonExecutable,
+          exclude: [...(scope.exclusions ?? []), TRASH_DIRECTORY],
         });
         // El recorrido no retiene el bloqueo. Se descarta si cambió su base.
         requireSameAuthorization(scope, await authorized(scopeId));
@@ -283,6 +345,94 @@ export function createFolderIndexer({
         await store.save({ ...index, generation, entries });
         return { status: 'updated', generation, code: null };
       }));
+    },
+
+    /**
+     * Incorpora la carpeta vacía que el Motor acaba de crear, con las mismas
+     * condiciones que recordCreatedFile: padres listados y verificados, sin otra
+     * entrada con ese nombre. Si no, deja el índice intacto y pide reconciliar.
+     * @param {string} scopeId
+     * @param {import('./index-scan.js').IndexEntry} entry
+     */
+    recordCreatedDirectory(scopeId, entry) {
+      return recordNewEntry(scopeId, entry, 'directory', 'INVALID_CREATED_ENTRY');
+    },
+
+    /**
+     * Refleja un movimiento o cambio de nombre hecho por el Motor sin recorrer la
+     * carpeta. Mover una carpeta cambia el prefijo de todos sus descendientes;
+     * las entradas conservan sus metadatos y estado, y la movida toma los leídos
+     * del objeto movido. Solo publica si el índice conocía el origen con ese tipo,
+     * no tenía nada en el destino y conoce sus carpetas padre; si no, deja el
+     * índice intacto y pide una reconciliación explícita.
+     * @param {string} scopeId
+     * @param {{ from: string, to: string, type: 'file' | 'directory', entry: import('./index-scan.js').IndexEntry }} move
+     */
+    recordMovedEntry(scopeId, { from, to, type, entry } = {}) {
+      return publishIncremental(scopeId, (index, scope) => {
+        if (typeof from !== 'string' || typeof to !== 'string' || from === to || !['file', 'directory'].includes(type)
+            || entry?.type !== type || entry.path !== to || entry.state !== 'indexed') {
+          return { result: reconcile('INVALID_MOVED_ENTRY') };
+        }
+        if (isExcluded(scope.exclusions, from) || isExcluded(scope.exclusions, to)) {
+          return { result: reconcile('PATH_EXCLUDED') };
+        }
+        if (!index) return { result: { status: 'not-indexed', generation: null, code: null } };
+        const known = new Map(index.entries.map((item) => [item.path, item]));
+        const source = known.get(from);
+        const target = known.get(to);
+        const prefix = `${from}/`;
+        if (!source) {
+          // Otro proceso pudo reconciliar ya el movimiento.
+          const settled = target && sameEntry(target, entry) && !index.entries.some((item) => item.path.startsWith(prefix));
+          return { result: settled ? { status: 'current', generation: index.generation, code: null }
+            : reconcile('INDEX_ENTRY_MISSING', index.generation) };
+        }
+        if (source.type !== type) return { result: reconcile('INDEX_ENTRY_CONFLICT', index.generation) };
+        const destination = `${to}/`;
+        if (target || index.entries.some((item) => item.path.startsWith(destination) && !item.path.startsWith(prefix))) {
+          return { result: reconcile('INDEX_ENTRY_CONFLICT', index.generation) };
+        }
+        if (!parentsCurrent(known, to)) return { result: reconcile('INDEX_PARENT_NOT_CURRENT', index.generation) };
+        const rename = (relative) => (relative === from ? to
+          : relative.startsWith(prefix) ? `${to}${relative.slice(from.length)}` : relative);
+        const entries = index.entries.map((item) => (item.path === from ? entry
+          : item.path.startsWith(prefix) ? { ...item, path: rename(item.path) } : item)).sort(byPath);
+        const issues = index.issues.map((issue) => (issue.path === '' ? issue : { ...issue, path: rename(issue.path) }))
+          .sort(byPath);
+        return { entries, issues };
+      });
+    },
+
+    /**
+     * Retira del índice la entrada que el Motor acaba de mover a la papelera y,
+     * si es una carpeta, todos sus descendientes. Solo publica si el índice tenía
+     * esa entrada con ese tipo; si ya no la tenía, el índice ya está al día.
+     * @param {string} scopeId
+     * @param {{ path: string, type: 'file' | 'directory' }} removal
+     */
+    recordRemovedEntry(scopeId, { path: relative, type } = {}) {
+      return publishIncremental(scopeId, (index, scope) => {
+        if (typeof relative !== 'string' || relative === '' || !['file', 'directory'].includes(type)) {
+          return { result: reconcile('INVALID_REMOVED_ENTRY') };
+        }
+        if (isExcluded(scope.exclusions, relative)) return { result: reconcile('PATH_EXCLUDED') };
+        if (!index) return { result: { status: 'not-indexed', generation: null, code: null } };
+        const prefix = `${relative}/`;
+        const existing = index.entries.find((item) => item.path === relative);
+        const inside = (item) => item.path === relative || item.path.startsWith(prefix);
+        const removed = index.entries.filter(inside);
+        if (!existing) {
+          return { result: removed.length === 0 ? { status: 'current', generation: index.generation, code: null }
+            : reconcile('INDEX_ENTRY_MISSING', index.generation) };
+        }
+        if (existing.type !== type) return { result: reconcile('INDEX_ENTRY_CONFLICT', index.generation) };
+        return {
+          entries: index.entries.filter((item) => !inside(item)),
+          issues: index.issues.filter((issue) => issue.path === '' || !inside(issue)),
+          extra: { removed: removed.length },
+        };
+      });
     },
 
     /**
