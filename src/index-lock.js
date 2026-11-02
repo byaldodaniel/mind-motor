@@ -80,6 +80,11 @@ async function recover(filename, examined) {
   return true;
 }
 
+/** Nombre de bloqueo por defecto: el de los índices de carpeta. */
+export const INDEX_LOCK_NAME = 'folder-index';
+const LOCK_NAME = /^[a-z][a-z0-9-]{0,40}$/;
+const LOCK_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
 /**
  * Coordinación cooperativa por índice en una Base local de confianza.
  *
@@ -88,9 +93,17 @@ async function recover(filename, examined) {
  * confirma que su proceso ya no existe. Si el PID se reutilizó, el bloqueo se
  * considera vivo (fallo seguro) y queda la recuperación guiada `mind reparar`.
  * Nunca se recupera por antigüedad un bloqueo con dueño vivo ni uno de otro equipo.
+ *
+ * lockName permite que otros datos de la Base ligados a un id (propiedades,
+ * índices personalizados) usen su propio archivo `<lockName>-<id>.lock` con la
+ * misma espera y la misma política de recuperación.
  */
-export async function withIndexLock(baseDirectory, scopeId, task) {
-  const filename = path.join(baseDirectory, `folder-index-${scopeId}.lock`);
+export async function withIndexLock(baseDirectory, scopeId, task, lockName = INDEX_LOCK_NAME) {
+  if (typeof lockName !== 'string' || !LOCK_NAME.test(lockName)
+      || (lockName !== INDEX_LOCK_NAME && (typeof scopeId !== 'string' || !LOCK_ID.test(scopeId)))) {
+    throw new MotorError('INVALID_LOCK_NAME', 'El nombre del bloqueo no es válido.');
+  }
+  const filename = path.join(baseDirectory, `${lockName}-${scopeId}.lock`);
   const started = performance.now();
   const deadline = started + WAIT_MS;
   let handle;
@@ -108,7 +121,9 @@ export async function withIndexLock(baseDirectory, scopeId, task) {
         if (examined && await recover(filename, examined)) continue;
       }
       if (now >= deadline) {
-        throw new MotorError('INDEX_LOCK_TIMEOUT', 'El índice está bloqueado por otro proceso de Mind. Si cerraste todos los agentes y persiste, ejecuta "mind reparar".');
+        throw new MotorError('INDEX_LOCK_TIMEOUT', lockName === INDEX_LOCK_NAME
+          ? 'El índice está bloqueado por otro proceso de Mind. Si cerraste todos los agentes y persiste, ejecuta "mind reparar".'
+          : 'Otro proceso de Mind está actualizando estos datos. Si cerraste todos los agentes y persiste, ejecuta "mind reparar".');
       }
       await delay(Math.min(RETRY_MS, Math.max(1, deadline - performance.now())));
     }

@@ -2,9 +2,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { isExcluded } from './paths.js';
+import { DEFAULT_TEXT_BYTES, describeBytes, textLimit } from './text-limits.js';
 
 const helper = fileURLToPath(new URL('./native_writer.py', import.meta.url));
-export const MAX_CREATE_BYTES = 1024 * 1024;
+/** Límite predeterminado; el anfitrión puede ampliarlo con maxBytes al conceder (hasta 16 MiB). */
+export const MAX_CREATE_BYTES = DEFAULT_TEXT_BYTES;
 const messages = {
   ACCESS_DENIED: 'El sistema denegó la creación.',
   FILE_EXISTS: 'Ya existe un elemento con ese nombre; no se sobrescribe.',
@@ -26,12 +28,19 @@ function relativeName(value) {
   return value;
 }
 
-function encodeText(content) {
+function tooLarge(limit) {
+  return new MotorError('TEXT_TOO_LARGE', limit === DEFAULT_TEXT_BYTES ? messages.TEXT_TOO_LARGE
+    : `El contenido supera el límite de ${describeBytes(limit)}.`);
+}
+
+function encodeText(content, limit = DEFAULT_TEXT_BYTES) {
   if (typeof content !== 'string' || !content.isWellFormed() || content.includes('\0')) {
     throw new MotorError('INVALID_TEXT', messages.INVALID_TEXT);
   }
+  // Sin convertir textos que ya superan el límite: cada unidad UTF-16 ocupa al menos un byte.
+  if (content.length > limit) throw tooLarge(limit);
   const bytes = Buffer.from(content, 'utf8');
-  if (bytes.length > MAX_CREATE_BYTES) throw new MotorError('TEXT_TOO_LARGE', messages.TEXT_TOO_LARGE);
+  if (bytes.length > limit) throw tooLarge(limit);
   return bytes;
 }
 
@@ -41,8 +50,12 @@ function iso(milliseconds) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
-/** Protocolo: adquiere el padre sin crear nada, avisa READY, espera W y crea. */
-export function createNative({ root, relativePath, bytes, pythonExecutable, confirm }) {
+/**
+ * Protocolo: adquiere el padre sin crear nada, avisa READY, espera W y crea.
+ * maxBytes solo viaja al auxiliar si difiere del predeterminado; el auxiliar
+ * aplica el mínimo con su propio máximo.
+ */
+export function createNative({ root, relativePath, bytes, pythonExecutable, confirm, maxBytes = DEFAULT_TEXT_BYTES }) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonExecutable, ['-I', '-B', helper], {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -76,7 +89,7 @@ export function createNative({ root, relativePath, bytes, pythonExecutable, conf
       if (code !== 0 || !confirmation) {
         const nativeCode = diagnostic.replace('READY\n', '').trim();
         const errorCode = Object.hasOwn(messages, nativeCode) ? nativeCode : 'CREATE_FAILED';
-        return reject(new MotorError(errorCode, messages[errorCode]));
+        return reject(errorCode === 'TEXT_TOO_LARGE' ? tooLarge(maxBytes) : new MotorError(errorCode, messages[errorCode]));
       }
       try {
         const result = JSON.parse(output);
@@ -87,7 +100,10 @@ export function createNative({ root, relativePath, bytes, pythonExecutable, conf
         reject(new MotorError('CREATE_UNCONFIRMED', 'No se pudo confirmar el resultado de la creación.', { cause }));
       }
     });
-    child.stdin.write(`${JSON.stringify({ root, relativePath, content: bytes.toString('base64') })}\n`);
+    child.stdin.write(`${JSON.stringify({
+      root, relativePath, content: bytes.toString('base64'),
+      ...(maxBytes !== DEFAULT_TEXT_BYTES ? { maxBytes } : {}),
+    })}\n`);
   });
 }
 
@@ -107,14 +123,19 @@ export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = pro
     return folder;
   }
   return {
-    async grantTextCreate({ requester, folderId, relativePath } = {}) {
+    /**
+     * Solo anfitrión. maxBytes (opcional, también solo del anfitrión) amplía el
+     * límite de 1 MiB de este permiso hasta un máximo absoluto de 16 MiB.
+     */
+    async grantTextCreate({ requester, folderId, relativePath, maxBytes } = {}) {
       if (!requester || typeof requester !== 'object') throw new MotorError('INVALID_REQUESTER', 'El anfitrión debe proporcionar la identidad opaca del solicitante.');
       const name = relativeName(relativePath);
+      const limit = textLimit(maxBytes);
       const folder = await folderFor(folderId);
       if (isExcluded(folder.exclusions, name)) throw excluded();
       const authorization = Object.freeze(Object.create(null));
       grants.set(authorization, {
-        requester, folderId, generation: folder.generation, relativePath: name, used: false, revoked: false,
+        requester, folderId, generation: folder.generation, relativePath: name, maxBytes: limit, used: false, revoked: false,
       });
       return authorization;
     },
@@ -134,12 +155,12 @@ export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = pro
       const grant = grants.get(authorization);
       if (!grant || grant.requester !== requester || grant.used || grant.revoked) throw denied();
       grant.used = true; // Un solo intento; se consume antes de cualquier await o validación.
-      const bytes = encodeText(content);
+      const bytes = encodeText(content, grant.maxBytes);
       const folder = await folderFor(grant.folderId);
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const result = await createNative({
-        root: folder.path, relativePath: grant.relativePath, bytes, pythonExecutable,
+        root: folder.path, relativePath: grant.relativePath, bytes, pythonExecutable, maxBytes: grant.maxBytes,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();

@@ -36,10 +36,10 @@ def main():
                     raise
             return handle
 
-        def read(self, handle):
+        def read(self, handle, *limit):
             if mode == 'before_read':
                 checkpoint('before_read')
-            return super().read(handle)
+            return super().read(handle, *limit)
 
     def confirm():
         if mode == 'verified':
