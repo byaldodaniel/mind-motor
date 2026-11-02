@@ -7,6 +7,7 @@ import { BASE_MARKER, BASE_FORMAT_VERSION } from '../base-format.js';
 import { readJson } from '../storage.js';
 import {
   prepareBackupSetup, describeBackupKey, checkRecoveryLocation, saveRecoveryFile, configureBackupDestination,
+  checkBackupDestination,
   readBackupConfig, createBackup, createConfiguredBackup, listBackups, inspectBackup, verifyBackup, restoreBackup,
   PASSPHRASE_MIN_LENGTH,
 } from '../backup.js';
@@ -78,6 +79,9 @@ function parse(parameters) {
 /** Configuración: frase, archivo de recuperación guardado, clave en la Base y código mostrado una vez. */
 export async function configure({ prompt, baseDirectory, destination }) {
   await fs.mkdir(baseDirectory, { recursive: true });
+  // Rechazar destinos inválidos antes de pedir secretos o guardar la clave:
+  // una configuración parcial impediría repetir esta orden con otro destino.
+  destination = await checkBackupDestination({ baseDirectory, destinationDirectory: destination });
   if (await describeBackupKey(baseDirectory)) {
     throw fail('BACKUP_ALREADY_CONFIGURED', 'Los respaldos ya están configurados en esta Base; el código y el archivo de recuperación actuales siguen valiendo.');
   }
@@ -118,7 +122,7 @@ export async function restore({ prompt, baseDirectory, file, recovery }) {
   const header = await inspectBackup(file);
   prompt.write(`Respaldo ${header.backupId} del ${header.createdAt} (Mind ${header.motorVersion}).`);
   const occupied = await fs.readdir(baseDirectory).then((names) => names.length > 0, () => false);
-  if (occupied && (await liveSessions(baseDirectory)).length > 0) {
+  if (occupied && (await liveSessions(baseDirectory)).live.length > 0) {
     throw fail('BASE_IN_USE', 'Hay agentes usando Mind: ciérralos antes de restaurar la Base.');
   }
   const staging = occupied ? `${baseDirectory}.restaurada-${stamp()}` : baseDirectory;
@@ -139,7 +143,7 @@ export async function restore({ prompt, baseDirectory, file, recovery }) {
     prompt.write(`No se cambió la Base. La copia restaurada queda en ${staging}.`);
     return { status: 'preparada', staging, ...restored };
   }
-  if ((await liveSessions(baseDirectory)).length > 0) throw fail('BASE_IN_USE', `Se abrió un agente mientras tanto: no se cambió nada. La copia restaurada queda en ${staging}.`);
+  if ((await liveSessions(baseDirectory)).live.length > 0) throw fail('BASE_IN_USE', `Se abrió un agente mientras tanto: no se cambió nada. La copia restaurada queda en ${staging}.`);
   const previous = `${baseDirectory}.anterior-${stamp()}`;
   await fs.rename(baseDirectory, previous);
   try {

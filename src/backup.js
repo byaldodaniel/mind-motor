@@ -365,6 +365,11 @@ async function physicalDestination(base, destinationDirectory) {
   return destination;
 }
 
+/** Valida el destino sin guardar claves ni configuración. */
+export async function checkBackupDestination({ baseDirectory, destinationDirectory }) {
+  return physicalDestination(await physicalBase(baseDirectory), destinationDirectory);
+}
+
 async function writeAll(handle, buffer) {
   for (let offset = 0; offset < buffer.length;) {
     const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset);
