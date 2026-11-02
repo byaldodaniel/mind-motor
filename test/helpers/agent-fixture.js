@@ -40,6 +40,7 @@ export function scriptedPrompt(...replies) {
     lines,
     write: (line) => lines.push(line),
     ask: async () => replies.shift() ?? '',
+    secret: async () => replies.shift() ?? '',
     yes: async () => ['s'].includes(replies.shift()),
   };
 }

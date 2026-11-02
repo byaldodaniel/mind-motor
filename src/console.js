@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline/promises';
+import { Writable } from 'node:stream';
 import { MotorError } from './errors.js';
 import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, PRESET_LABELS, minimumPreset, normalizeAccess, describeAccess } from './access-policy.js';
 import { CONTINUITY_ACCESS_LABELS, validateCandidateFolder, untrustedText } from './consent.js';
@@ -25,11 +26,31 @@ export function requireInteractive(stdin = process.stdin, stdout = process.stdou
 }
 
 export function createPrompter({ input = process.stdin, output = process.stdout } = {}) {
-  const rl = readline.createInterface({ input, output, terminal: Boolean(output.isTTY) });
+  // Salida silenciable: las frases y los códigos de recuperación se escriben sin eco.
+  const muted = new Writable({
+    write(chunk, encoding, callback) {
+      if (!muted.silent) output.write(chunk, encoding);
+      callback();
+    },
+  });
+  muted.isTTY = output.isTTY;
+  muted.columns = output.columns;
+  const rl = readline.createInterface({ input, output: muted, terminal: Boolean(output.isTTY) });
   return {
     write: (line = '') => output.write(`${line}\n`),
     async ask(question) {
       return (await rl.question(question)).trim();
+    },
+    /** Pregunta sin mostrar lo que se escribe (frases, códigos). No recorta espacios. */
+    async secret(question) {
+      output.write(question);
+      muted.silent = true;
+      try {
+        return await rl.question('');
+      } finally {
+        muted.silent = false;
+        output.write('\n');
+      }
     },
     async yes(question, fallback = false) {
       const answer = (await rl.question(`${question} ${fallback ? '[S/n]' : '[s/N]'} `)).trim().toLowerCase();
