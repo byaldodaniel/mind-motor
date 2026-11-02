@@ -12,7 +12,7 @@ import { safeRelativePath, resolveLinkTarget, compareBytes } from './archive.js'
  *
  * {
  *   "format": "mind-product", "version": 1, "mindVersion": "1.0.0",
- *   "platform": "darwin", "arch": "arm64", "baseFormatVersion": 1,
+ *   "platform": "darwin", "arch": "arm64", "baseFormatVersion": 2,
  *   "components": [...],
  *   "files": { "<ruta>": "<sha256>" },   archivos normales, con "/"
  *   "links": { "<ruta>": "<destino>" }   enlaces simbólicos internos (POSIX)

@@ -62,7 +62,7 @@ test('crea solo el archivo pedido con el texto exacto y prepara la entrada del �
   assert.equal(result.relativePath, 'sub/café 🧠.txt');
   assert.equal(result.size, Buffer.byteLength(content));
   assert.deepEqual(Object.keys(result.indexEntry).sort(),
-    ['changedAt', 'createdAt', 'modifiedAt', 'path', 'reason', 'size', 'state', 'type']);
+    ['changedAt', 'createdAt', 'identity', 'modifiedAt', 'path', 'reason', 'size', 'state', 'type']);
   assert.equal(result.indexEntry.path, 'sub/café 🧠.txt');
   assert.equal(result.indexEntry.type, 'file');
   assert.equal(result.indexEntry.size, result.size);

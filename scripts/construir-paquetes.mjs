@@ -25,6 +25,12 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { readArchive, extractEntries, writeTarGz, writeZip, compareBytes } from '../src/archive.js';
 import { hashFile, scanTree, validateManifest, verifyTree, describeProblems, MANIFEST_NAME } from '../src/product-files.js';
+import { BASE_FORMAT_VERSION } from '../src/base-format.js';
+
+/** El manifiesto declara siempre la capacidad real del Motor que se empaqueta. */
+export function createPackageManifest(metadata) {
+  return validateManifest({ ...metadata, baseFormatVersion: BASE_FORMAT_VERSION });
+}
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PACKAGING = path.join(ROOT, 'packaging');
@@ -242,13 +248,12 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
     if (entry.type === 'file') files[entry.path] = await hashFile(path.join(stage, ...entry.path.split('/')));
     else links[entry.path] = entry.target;
   }
-  const manifest = validateManifest({
+  const manifest = createPackageManifest({
     format: 'mind-product',
     version: 1,
     mindVersion: version,
     platform: target.platform,
     arch: target.arch,
-    baseFormatVersion: 1,
     builtFrom: git(['rev-parse', 'HEAD']).trim(),
     components: [
       { name: 'node', version: components.node.version, source: components.node.plataformas[id].url, sha256: components.node.plataformas[id].sha256 },

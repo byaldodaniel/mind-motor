@@ -233,8 +233,8 @@ class Windows:
         buffer = c.create_string_buffer(size)
         result = []
         while True:
-            # FileFullDirectoryInfo (14) continúa la enumeración del handle.
-            if not self.kernel.GetFileInformationByHandleEx(handle, 14, buffer, size):
+            # FileIdBothDirectoryInfo (10): metadatos e identidad del mismo recorrido.
+            if not self.kernel.GetFileInformationByHandleEx(handle, 10, buffer, size):
                 error = c.get_last_error()
                 if error == 18:  # ERROR_NO_MORE_FILES
                     return result
@@ -249,9 +249,12 @@ class Windows:
                 attributes = int.from_bytes(raw[offset + 56:offset + 60], 'little')
                 length = int.from_bytes(raw[offset + 60:offset + 64], 'little')
                 tag = int.from_bytes(raw[offset + 64:offset + 68], 'little')  # EaSize: etiqueta de reparse
-                name = raw[offset + 68:offset + 68 + length].decode('utf-16-le', 'surrogatepass')
+                file_id = int.from_bytes(raw[offset + 96:offset + 104], 'little')
+                name = raw[offset + 104:offset + 104 + length].decode('utf-16-le', 'surrogatepass')
                 if name not in ('.', '..'):
-                    result.append(self._child(name, attributes, tag, created, written, changed, end, volume))
+                    child = self._child(name, attributes, tag, created, written, changed, end, volume)
+                    child.identity = (volume, file_id) if file_id else None
+                    result.append(child)
                 if following == 0:
                     break
                 offset += following
@@ -331,7 +334,8 @@ def scan(root, max_entries, backend=None, before_open=None, exclude=()):
                 continue
             record = {'path': relative, 'type': child.type, 'size': child.size,
                       'modifiedMs': child.modified, 'changedMs': child.changed,
-                      'createdMs': child.created, 'listing': child.listing}
+                      'createdMs': child.created, 'listing': child.listing,
+                      'identity': f'{os.name}:' + ':'.join(str(part) for part in child.identity) if child.identity else None}
             add(record)
             if child.type != 'directory' or child.listing is not None:
                 continue

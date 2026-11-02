@@ -19,6 +19,7 @@ import { createIndexObserver } from './index-observer.js';
 import { createPropertyStore } from './properties.js';
 import { createOrganizer } from './organizer.js';
 import { createTrashRegistry } from './trash.js';
+import { readBaseMarker } from './base-format.js';
 
 export { MotorError } from './errors.js';
 export { textVersion } from './text-modifier.js';
@@ -133,6 +134,9 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   if (contains(motor, base) || contains(base, motor)) {
     throw new MotorError('BASE_OVERLAPS_MOTOR', 'Motor y Base deben ser directorios independientes, sin contenerse.');
   }
+  // El núcleo no crea una marca al consultar, pero respeta la protección global
+  // de una Base de producto o de una Base del núcleo que ya fue migrada.
+  await readBaseMarker(base);
 
   function filename(id) {
     validateId(id);
@@ -271,6 +275,12 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
       } catch (error) {
         // El cambio ya está publicado: un fallo del índice no lo anula ni publica datos dudosos.
         index = { status: 'needs-reconciliation', generation: null, code: error?.code ?? 'INDEX_UPDATE_FAILED' };
+      }
+      try {
+        await properties.rebindModifiedProperties(modified.folderId, modified.relativePath,
+          modified.previousIdentity, modified.indexEntry.identity);
+      } catch (error) {
+        index = { ...index, status: 'needs-reconciliation', code: error?.code ?? 'PROPERTIES_UPDATE_FAILED' };
       }
       return { ...modified, index };
     },

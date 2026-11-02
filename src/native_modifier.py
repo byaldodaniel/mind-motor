@@ -175,7 +175,8 @@ class Posix(reader.Posix):
         birth = getattr(info, 'st_birthtime', None)
         return {'size': info.st_size, 'modifiedMs': info.st_mtime_ns // 1_000_000,
                 'changedMs': info.st_ctime_ns // 1_000_000,
-                'createdMs': int(birth * 1000) if birth else None}
+                'createdMs': int(birth * 1000) if birth else None,
+                'identity': f'posix:{info.st_dev}:{info.st_ino}'}
 
 
 class Windows(reader.Windows):
@@ -391,7 +392,8 @@ class Windows(reader.Windows):
             self._error()
         ms = lambda value: (value - WINDOWS_EPOCH) // 10_000 if value > 0 else None
         return {'size': (info.size_high << 32) | info.size_low, 'modifiedMs': ms(basic.written),
-                'changedMs': ms(basic.changed), 'createdMs': ms(basic.created)}
+                'changedMs': ms(basic.changed), 'createdMs': ms(basic.created),
+                'identity': f'nt:{info.volume}:{(info.index_high << 32) | info.index_low}'}
 
 
 def open_parent(backend, stack, root, parts, after_directory=None):
@@ -440,6 +442,7 @@ def modify_file(root, relative, expected, data, confirm=None, after_directory=No
         if hashlib.sha256(current).hexdigest() != expected:
             raise Refusal('VERSION_CONFLICT')
         original = backend.inspect(target)
+        previous_identity = backend.metadata(target).get('identity')
         if confirm:
             confirm()
         temporary = temporary_name()
@@ -462,7 +465,7 @@ def modify_file(root, relative, expected, data, confirm=None, after_directory=No
         if not backend.confirm_replaced(target):
             raise Refusal('MODIFY_UNCONFIRMED')
         try:
-            return backend.metadata(temp)
+            return {**backend.metadata(temp), 'previousIdentity': previous_identity}
         except OSError:
             return {'size': len(data), 'modifiedMs': None, 'changedMs': None, 'createdMs': None}
 

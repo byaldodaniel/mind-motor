@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { MotorError } from './errors.js';
 import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
+import { withIndexLock } from './index-lock.js';
 
 /**
  * Marca de formato de la Base del producto. Permite que un Motor reconozca una
@@ -11,13 +12,47 @@ import { contains } from './paths.js';
  * alterarla (protección ante volver a una versión anterior del Motor).
  */
 export const BASE_MARKER = 'mind-base.json';
-export const BASE_FORMAT_VERSION = 1;
+export const BASE_FORMAT_VERSION = 2;
 
 function validMarker(data) {
   return data && typeof data === 'object' && !Array.isArray(data)
     && data.format === 'mind-base' && Number.isSafeInteger(data.version) && data.version >= 1
     && typeof data.baseId === 'string' && /^[a-f0-9-]{36}$/.test(data.baseId)
     && typeof data.createdAt === 'string';
+}
+
+/** Lectura sin creación ni migración: también la usa la API del núcleo. */
+export async function readBaseMarker(baseDirectory) {
+  const stored = await readJson(path.join(baseDirectory, BASE_MARKER));
+  if (stored === null) return null;
+  if (!validMarker(stored.data)) {
+    throw new MotorError('BASE_MARKER_CORRUPT', 'La marca de formato de la Base no es válida; no se modifica la Base.');
+  }
+  if (stored.data.version > BASE_FORMAT_VERSION) {
+    throw new MotorError('BASE_TOO_NEW', 'La Base fue creada por una versión más reciente de Mind. Actualiza el Motor; esta versión no la modificará.');
+  }
+  return stored.data;
+}
+
+/**
+ * Barrera anterior a publicar subformatos incompatibles. Bajo un bloqueo global
+ * solo eleva la marca, conservando identidad y fechas; nunca reescribe datos.
+ * Si la publicación posterior falla, conservar una marca más alta es seguro.
+ */
+export async function prepareBaseFormat(baseDirectory, version, { motorVersion } = {}) {
+  if (!Number.isSafeInteger(version) || version < 1 || version > BASE_FORMAT_VERSION) {
+    throw new MotorError('BASE_TOO_NEW', 'Este Motor no puede escribir ese formato de Base.');
+  }
+  return withIndexLock(baseDirectory, 'migration', async () => {
+    const current = await readBaseMarker(baseDirectory);
+    if (current && current.version >= version) return current;
+    const marker = current ? { ...current, version } : {
+      format: 'mind-base', version, baseId: randomUUID(),
+      createdAt: new Date().toISOString(), createdBy: motorVersion ?? null,
+    };
+    await writeJson(path.join(baseDirectory, BASE_MARKER), marker);
+    return marker;
+  }, 'base-format');
 }
 
 /**
@@ -53,21 +88,9 @@ export async function ensureBase(baseDirectory, { create = true, motorVersion, p
     created = true;
   }
   const physical = await fs.realpath(baseDirectory);
-  const markerPath = path.join(physical, BASE_MARKER);
-  const stored = await readJson(markerPath);
-  if (stored !== null) {
-    if (!validMarker(stored.data)) {
-      throw new MotorError('BASE_MARKER_CORRUPT', 'La marca de formato de la Base no es válida; no se modifica la Base.');
-    }
-    if (stored.data.version > BASE_FORMAT_VERSION) {
-      throw new MotorError('BASE_TOO_NEW', 'La Base fue creada por una versión más reciente de Mind. Actualiza el Motor; esta versión no la modificará.');
-    }
-    return { baseDirectory: physical, baseId: stored.data.baseId, createdAt: stored.data.createdAt, created, version: stored.data.version };
-  }
-  const marker = {
-    format: 'mind-base', version: BASE_FORMAT_VERSION, baseId: randomUUID(),
-    createdAt: new Date().toISOString(), createdBy: motorVersion ?? null,
-  };
-  await writeJson(markerPath, marker);
+  // Abrir una Base v1 no la migra. La primera escritura de un subformato nuevo
+  // eleva su marca antes de publicar; una Base nueva empieza en formato actual.
+  const marker = await readBaseMarker(physical)
+    ?? await prepareBaseFormat(physical, BASE_FORMAT_VERSION, { motorVersion });
   return { baseDirectory: physical, baseId: marker.baseId, createdAt: marker.createdAt, created, version: marker.version };
 }

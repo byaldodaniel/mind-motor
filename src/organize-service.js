@@ -78,6 +78,9 @@ export async function moveEntry(session, { requester, folder, from, to, target =
     if (taken.length > 0) await session.motor.putProperties(folder.id, from, taken).catch(() => {});
     throw error;
   }
+  // Primero conocer la identidad del destino; después ligar a ella las propiedades.
+  await session.reindex(folder.id).catch(() => {});
+  if (crossing) await session.reindex(target.id).catch(() => {});
   let properties = { moved: 0 };
   if (taken.length > 0) {
     try {
@@ -87,8 +90,6 @@ export async function moveEntry(session, { requester, folder, from, to, target =
       properties = { moved: 0, error: error?.code ?? 'PROPERTIES_FAILED' };
     }
   }
-  await session.reindex(folder.id).catch(() => {});
-  if (crossing) await session.reindex(target.id).catch(() => {});
   await session.audit('elemento-movido', {
     carpeta: folder.id, destino: target.id, desde: from, hasta: to, tipo: moved.type, cliente: source,
   });
@@ -123,11 +124,11 @@ export async function restoreEntry(session, { requester, folder, trashId, source
   const stored = await session.motor.getTrashEntry(folder.id, trashId);
   const authorization = await session.motor.grantRestore({ requester, folderId: folder.id, trashId });
   const restored = await session.motor.restoreEntry({ requester, authorization });
+  await session.reindex(folder.id).catch(() => {});
   let properties = 0;
   if (Array.isArray(stored.properties) && stored.properties.length > 0) {
     properties = (await session.motor.putProperties(folder.id, restored.relativePath, stored.properties).catch(() => ({ restored: 0 }))).restored;
   }
-  await session.reindex(folder.id).catch(() => {});
   await session.audit('elemento-restaurado', {
     carpeta: folder.id, papelera: trashId, ruta: restored.relativePath, renombrado: restored.renamed, cliente: source,
   });

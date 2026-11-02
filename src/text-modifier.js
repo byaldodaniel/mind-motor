@@ -204,11 +204,13 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
         relativePath: grant.relativePath,
         size: result.size,
         previousVersion: expectedVersion,
+        previousIdentity: result.previousIdentity ?? null,
         version: textVersion(content),
         // Entrada con la forma del índice para que la integración la reemplace sin recorrer.
         indexEntry: {
           path: grant.relativePath, type: 'file', size: result.size, state: 'indexed', reason: null,
           modifiedAt: iso(result.modifiedMs), changedAt: iso(result.changedMs), createdAt: iso(result.createdMs),
+          identity: result.identity ?? null,
         },
       };
     },

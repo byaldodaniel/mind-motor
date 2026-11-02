@@ -175,6 +175,7 @@ export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = pro
         indexEntry: {
           path: grant.relativePath, type: 'file', size: result.size, state: 'indexed', reason: null,
           modifiedAt: iso(result.modifiedMs), changedAt: iso(result.changedMs), createdAt: iso(result.createdMs),
+          identity: result.identity ?? null,
         },
       };
     },

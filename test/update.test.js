@@ -8,6 +8,7 @@ import { updateMind } from '../src/commands/actualizar.js';
 import { hashFile, scanTree, readManifestFile } from '../src/product-files.js';
 import { agentFixture } from './helpers/agent-fixture.js';
 import { openMotor } from '../src/motor.js';
+import { BASE_FORMAT_VERSION } from '../src/base-format.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 
@@ -19,7 +20,7 @@ async function snapshot(root) {
   return result;
 }
 
-async function packageAt(root, version, { real = false, platform = process.platform, baseFormatVersion = 1 } = {}) {
+async function packageAt(root, version, { real = false, platform = process.platform, baseFormatVersion = BASE_FORMAT_VERSION } = {}) {
   await fs.mkdir(path.join(root, 'Motor'), { recursive: true });
   await fs.mkdir(path.join(root, 'Runtime', 'python', 'bin'), { recursive: true });
   await fs.writeFile(path.join(root, 'LEEME.md'), `Paquete ficticio ${version}\n`);
@@ -111,9 +112,22 @@ test('sesiones activas y formato de Base incompatible impiden la sustitución', 
   await active.close();
   const markerPath = path.join(f.layout.baseDirectory, 'mind-base.json');
   const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
-  await fs.writeFile(markerPath, JSON.stringify({ ...marker, version: 2 }));
+  await fs.writeFile(markerPath, JSON.stringify({ ...marker, version: BASE_FORMAT_VERSION + 1 }));
   const before = await snapshot(f.mind);
   await assert.rejects(updateMind(f.options), { code: 'UPDATE_BASE_INCOMPATIBLE' });
+  assert.deepEqual(await snapshot(f.mind), before);
+});
+
+test('un Motor anterior que solo admite formato 1 no puede sustituir el Motor de una Base 2', async (t) => {
+  const f = await fixture(t);
+  const markerPath = path.join(f.layout.baseDirectory, 'mind-base.json');
+  const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
+  await fs.writeFile(markerPath, JSON.stringify({ ...marker, version: 2 }));
+  await packageAt(f.source, '1.1.0', { baseFormatVersion: 1 });
+  const before = await snapshot(f.mind);
+  let confirmed = false;
+  await assert.rejects(updateMind({ ...f.options, confirm: () => { confirmed = true; return true; } }), { code: 'UPDATE_BASE_INCOMPATIBLE' });
+  assert.equal(confirmed, false, 'rechaza el formato antes de ofrecer la sustitución');
   assert.deepEqual(await snapshot(f.mind), before);
 });
 

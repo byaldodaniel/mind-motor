@@ -34,6 +34,7 @@ const DEFAULT_MAX_ENTRIES = 100_000;
 /** Los cambios de accesibilidad se informan como incidencias, no como modificaciones. */
 function changed(before, after) {
   if (before.type !== after.type) return true;
+  if ((before.identity ?? null) !== (after.identity ?? null)) return true;
   // La fecha de una carpeta cambia con sus hijos; esos cambios se informan en los hijos.
   return after.type !== 'directory'
     && (before.size !== after.size || before.modifiedAt !== after.modifiedAt);
@@ -282,7 +283,7 @@ export function createFolderIndexer({
         const known = new Map(index.entries.map((item) => [item.path, item]));
         const existing = known.get(entry.path);
         if (existing) {
-          const same = ['type', 'size', 'modifiedAt', 'changedAt', 'createdAt', 'state', 'reason']
+          const same = ['type', 'size', 'modifiedAt', 'changedAt', 'createdAt', 'identity', 'state', 'reason']
             .every((field) => existing[field] === entry[field]);
           return same ? { status: 'current', generation: index.generation, code: null }
             : reconcile('INDEX_ENTRY_CONFLICT', index.generation);
@@ -333,7 +334,7 @@ export function createFolderIndexer({
         const existing = index.entries[position];
         if (!existing) return reconcile('INDEX_ENTRY_MISSING', index.generation);
         if (existing.type !== 'file') return reconcile('INDEX_ENTRY_CONFLICT', index.generation);
-        const same = ['type', 'size', 'modifiedAt', 'changedAt', 'createdAt', 'state', 'reason']
+        const same = ['type', 'size', 'modifiedAt', 'changedAt', 'createdAt', 'identity', 'state', 'reason']
           .every((field) => existing[field] === entry[field]);
         if (same) return { status: 'current', generation: index.generation, code: null };
         requireSameAuthorization(scope, await authorized(scopeId));

@@ -111,7 +111,8 @@ class Posix(reader.Posix):
         birth = getattr(info, 'st_birthtime', None)
         return {'size': info.st_size, 'modifiedMs': info.st_mtime_ns // 1_000_000,
                 'changedMs': info.st_ctime_ns // 1_000_000,
-                'createdMs': int(birth * 1000) if birth else None}
+                'createdMs': int(birth * 1000) if birth else None,
+                'identity': f'posix:{info.st_dev}:{info.st_ino}'}
 
 
 class Windows(reader.Windows):
@@ -243,7 +244,8 @@ class Windows(reader.Windows):
             raise self.c.WinError(self.c.get_last_error())
         ms = lambda value: (value - WINDOWS_EPOCH) // 10_000 if value > 0 else None
         return {'size': (info.size_high << 32) | info.size_low, 'modifiedMs': ms(basic.written),
-                'changedMs': ms(basic.changed), 'createdMs': ms(basic.created)}
+                'changedMs': ms(basic.changed), 'createdMs': ms(basic.created),
+                'identity': f'nt:{info.volume}:{(info.index_high << 32) | info.index_low}'}
 
 
 def open_parent(backend, stack, root, parts, after_directory=None):

@@ -50,7 +50,9 @@ test('Motor indexa y reconcilia solo ids del registro; continuidad y funciones s
   assert.equal(typeof motor.createFunction, 'function');
   const requester = {};
   await assert.rejects(motor.readTextFile({ requester, authorization: scope.id }), { code: 'READ_NOT_AUTHORIZED' });
-  assert.equal((await fs.readdir(base)).length, 2);
+  assert.deepEqual((await fs.readdir(base)).sort(), [
+    `folder-authorization-${scope.id}.json`, `folder-index-${scope.id}.json`, 'mind-base.json',
+  ].sort());
 });
 
 test('el índice y su vínculo de autorización sobreviven a un proceso nuevo', async (t) => {
@@ -66,7 +68,7 @@ test('el índice y su vínculo de autorización sobreviven a un proceso nuevo', 
   assert.deepEqual(JSON.parse(result.stdout), await motor.readFolderIndex(scope.id));
   const saved = JSON.parse(await fs.readFile(filename, 'utf8'));
   const registered = JSON.parse(await fs.readFile(path.join(base, `folder-authorization-${scope.id}.json`), 'utf8'));
-  assert.equal(saved.version, 2);
+  assert.equal(saved.version, 3);
   assert.equal(saved.authorizationGeneration, registered.generation);
 });
 

@@ -39,6 +39,7 @@ export function createPropertyTools({ session }) {
       const folder = await resolveFolder(args.carpeta);
       await requireAccess(folder, 'encontrar');
       const relativePath = text(args.ruta, 'ruta');
+      await session.ensureIndex(folder.id, { timeoutMs: 30_000 });
       const properties = await session.motor.getProperties(folder.id, relativePath);
       return { carpeta: folder.id, ruta: relativePath, ruta_absoluta: absolute(folder.path, relativePath), propiedades: properties };
     },

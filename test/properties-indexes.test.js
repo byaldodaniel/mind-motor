@@ -5,6 +5,8 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { agentFixture, connection } from './helpers/agent-fixture.js';
 import { csvCell } from '../src/custom-index.js';
+import { fork } from 'node:child_process';
+import { once } from 'node:events';
 
 const grant = (acceso) => ({ action: 'accept', content: { acceso } });
 const yes = { action: 'accept', content: { confirmar: true } };
@@ -76,6 +78,79 @@ test('las propiedades siguen al elemento al moverlo o renombrarlo y no pasan a o
   await call('solicitar_acceso', { ruta: folder, acceso: 'completo' });
   assert.deepEqual((await call('propiedades', { ruta: 'notas.txt' })).data.propiedades, {});
   void yes;
+});
+
+test('un reemplazo externo entre recorridos no hereda propiedades aunque conserve nombre, tamaño y fecha', async (t) => {
+  const { call, folder, root, session, folderId } = await authorized(t);
+  await call('asignar_propiedades', { ruta: 'notas.txt', asignar: { estado: 'anterior' } });
+  const file = path.join(folder, 'notas.txt');
+  const previous = await fs.stat(file);
+  const content = await fs.readFile(file);
+  // Mantener vivo el objeto anterior impide reutilizar su inode/FileId.
+  await fs.rename(file, path.join(root, 'original ficticio.txt'));
+  await fs.writeFile(file, content);
+  await fs.utimes(file, previous.atime, previous.mtime);
+  await session.reindex(folderId);
+  assert.deepEqual((await call('propiedades', { ruta: 'notas.txt' })).data.propiedades, {});
+  assert.equal((await call('buscar', { propiedades: { estado: 'anterior' } })).data.total, 0);
+  await call('asignar_propiedades', { ruta: 'notas.txt', asignar: { nuevo: true } });
+  assert.deepEqual((await call('propiedades', { ruta: 'notas.txt' })).data.propiedades, { nuevo: true });
+});
+
+test('modificar por Mind conserva propiedades y las liga al nuevo objeto de la publicación atómica', async (t) => {
+  const { call, session, folderId } = await authorized(t);
+  await call('asignar_propiedades', { ruta: 'notas.txt', asignar: { estado: 'revisado' } });
+  const before = (await session.motor.readFolderIndex(folderId)).entries.find((entry) => entry.path === 'notas.txt').identity;
+  const read = await call('leer', { ruta: 'notas.txt' });
+  const modified = await call('modificar', { ruta: 'notas.txt', version: read.data.version, contenido: 'Texto nuevo ficticio\n' });
+  assert.equal(modified.isError, false, JSON.stringify(modified.data));
+  const after = (await session.motor.readFolderIndex(folderId)).entries.find((entry) => entry.path === 'notas.txt').identity;
+  assert.ok(before);
+  assert.ok(after);
+  assert.notEqual(after, before);
+  await session.reindex(folderId);
+  assert.deepEqual((await call('propiedades', { ruta: 'notas.txt' })).data.propiedades, { estado: 'revisado' });
+});
+
+test('reponer propiedades de un movimiento no las atribuye a un reemplazo del destino', async (t) => {
+  const { call, folder, root, session, folderId } = await authorized(t);
+  await call('asignar_propiedades', { ruta: 'notas.txt', asignar: { estado: 'original' } });
+  const taken = await session.motor.takeProperties(folderId, 'notas.txt');
+  assert.ok(taken[0].identity);
+  const file = path.join(folder, 'notas.txt');
+  await fs.rename(file, path.join(root, 'original movido ficticio.txt'));
+  await fs.writeFile(file, 'otro objeto ficticio\n');
+  await session.reindex(folderId);
+  assert.equal((await session.motor.putProperties(folderId, 'notas.txt', taken)).restored, 0);
+  assert.equal((await session.motor.putProperties(folderId, 'notas.txt', [{ path: '', properties: { antiguo: true } }])).restored, 0);
+  assert.deepEqual(await session.motor.getProperties(folderId, 'notas.txt'), {});
+});
+
+test('índices antiguos se reconcilian y propiedades sin identidad se preservan sin atribuirlas', async (t) => {
+  const { call, session, folderId } = await authorized(t);
+  await call('asignar_propiedades', { ruta: 'notas.txt', asignar: { estado: 'histórico' } });
+  const base = session.motor.baseDirectory;
+  const propertiesFile = path.join(base, `folder-properties-${folderId}.json`);
+  const properties = JSON.parse(await fs.readFile(propertiesFile, 'utf8'));
+  properties.version = 1;
+  for (const entry of properties.entries) delete entry.identity;
+  await fs.writeFile(propertiesFile, `${JSON.stringify(properties)}\n`);
+  const original = await fs.readFile(propertiesFile, 'utf8');
+  const indexFile = path.join(base, `folder-index-${folderId}.json`);
+  const index = JSON.parse(await fs.readFile(indexFile, 'utf8'));
+  index.version = 2;
+  for (const entry of index.entries) delete entry.identity;
+  await fs.writeFile(indexFile, `${JSON.stringify(index)}\n`);
+  assert.equal((await session.motor.readFolderIndex(folderId)).entries[0].identity, undefined);
+  await assert.rejects(session.motor.setProperties(folderId, 'notas.txt', { set: { nuevo: true } }), { code: 'ENTRY_IDENTITY_UNAVAILABLE' });
+  await session.reindex(folderId);
+  assert.deepEqual((await call('propiedades', { ruta: 'notas.txt' })).data.propiedades, {});
+  assert.equal(await fs.readFile(propertiesFile, 'utf8'), original, 'consultar no destruye propiedades históricas');
+  await call('asignar_propiedades', { ruta: 'Proyectos/presupuesto.md', asignar: { nuevo: true } });
+  const saved = JSON.parse(await fs.readFile(propertiesFile, 'utf8'));
+  const historical = saved.entries.find((entry) => entry.path === 'notas.txt');
+  assert.equal(historical.identity, null);
+  assert.deepEqual(historical.properties, { estado: 'histórico' });
 });
 
 test('índice CSV: crea el archivo con los campos elegidos, escapa los datos y no reemplaza nada', async (t) => {
@@ -173,4 +248,77 @@ test('índice CSV "al_cambiar": se actualiza solo durante la sesión cuando camb
     await delay(250);
   }
   assert.ok(rows.includes('aparece.txt'), `filas: ${rows.join(', ')}`);
+});
+
+function independentProcess(t, config) {
+  const child = fork(new URL('./fixtures/properties_process.mjs', import.meta.url), [JSON.stringify(config)], {
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exited = once(child, 'exit');
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
+  });
+  return {
+    child,
+    async message(phase) {
+      const [message] = await once(child, 'message');
+      assert.equal(message.phase, phase, JSON.stringify(message));
+      return message;
+    },
+    async exit() {
+      const [code, signal] = await exited;
+      assert.equal(code, 0, `signal=${signal} ${stderr}`);
+    },
+  };
+}
+
+test('propiedades: dos procesos conservan ambas asignaciones sobre el mismo archivo', { timeout: 30_000 }, async (t) => {
+  const { layout, folderId, session } = await authorized(t);
+  const first = independentProcess(t, { operation: 'properties', layout, folderId, properties: { estado: 'revisado' } });
+  const second = independentProcess(t, { operation: 'properties', layout, folderId, properties: { importe: 42 } });
+  await Promise.all([first.message('ready'), second.message('ready')]);
+  const results = Promise.all([first.message('result'), second.message('result')]);
+  first.child.send('continue');
+  second.child.send('continue');
+  await results;
+  await Promise.all([first.exit(), second.exit()]);
+  assert.deepEqual(await session.motor.getProperties(folderId, 'notas.txt'), { estado: 'revisado', importe: 42 });
+});
+
+test('CSV: otro proceso recupera la definición y detecta modificaciones externas después de reiniciar', { timeout: 30_000 }, async (t) => {
+  const { call, folder, layout } = await authorized(t);
+  const created = await call('crear_indice', { nombre: 'Persistente', campos: ['ruta'], ruta_csv: 'persistente.csv' });
+  assert.equal(created.data.estado, 'creado', JSON.stringify(created.data));
+  await fs.writeFile(path.join(folder, 'nuevo-proceso.txt'), 'dato ficticio');
+  const other = independentProcess(t, { operation: 'csv', layout, id: created.data.id });
+  const { result } = await other.message('result');
+  await other.exit();
+  assert.equal(result.status, 'actualizado');
+  const file = path.join(folder, 'persistente.csv');
+  assert.ok(parseCsv(await fs.readFile(file, 'utf8')).some((row) => row[0] === 'nuevo-proceso.txt'));
+  await fs.appendFile(file, 'fila externa\r\n');
+  assert.equal((await call('actualizar_indice', { id: created.data.id })).code, 'CUSTOM_INDEX_MODIFIED_OUTSIDE');
+  assert.match(await fs.readFile(file, 'utf8'), /fila externa/);
+});
+
+test('las propiedades de descendientes acompañan un movimiento entre carpetas y las exclusiones no se exportan al CSV', async (t) => {
+  const { call, root, queue, folderId, session } = await authorized(t);
+  await call('asignar_propiedades', { ruta: 'Proyectos/presupuesto.md', asignar: { estado: 'revisado' } });
+  const destination = path.join(root, 'Destino ficticio');
+  await fs.mkdir(destination);
+  queue.push(grant('completo'));
+  const granted = await call('solicitar_acceso', { ruta: destination, acceso: 'completo' });
+  const destinationId = granted.data.carpeta.id;
+  const moved = await call('mover', { carpeta: folderId, desde: 'Proyectos', hasta: 'Archivo', carpeta_destino: destinationId });
+  assert.equal(moved.data.estado, 'movido', JSON.stringify(moved.data));
+  assert.deepEqual(await session.motor.getProperties(folderId, 'Proyectos/presupuesto.md'), {});
+  assert.deepEqual((await call('propiedades', { carpeta: destinationId, ruta: 'Archivo/presupuesto.md' })).data.propiedades, { estado: 'revisado' });
+  await call('retirar_acceso', { carpeta: destinationId, excluir: ['Archivo'] });
+  assert.equal((await call('propiedades', { carpeta: destinationId, ruta: 'Archivo/presupuesto.md' })).code, 'PATH_EXCLUDED');
+  const created = await call('crear_indice', { carpeta: destinationId, nombre: 'Sin excluidos', campos: ['ruta', 'propiedad:estado'], ruta_csv: 'indice.csv' });
+  assert.equal(created.data.estado, 'creado', JSON.stringify(created.data));
+  assert.deepEqual(parseCsv(await fs.readFile(path.join(destination, 'indice.csv'), 'utf8')), [['ruta', 'propiedad:estado']]);
 });

@@ -4,6 +4,7 @@ import { readJson, writeJson, removeJson } from './storage.js';
 import { withIndexLock } from './index-lock.js';
 import { isExcluded } from './paths.js';
 import { copyJson } from './functions.js';
+import { prepareBaseFormat } from './base-format.js';
 
 /**
  * Propiedades clave/valor sobre entradas de una carpeta autorizada (Función 02:
@@ -241,7 +242,7 @@ export function createPropertyStore({
   function parseRecord(data, folderId) {
     const corrupt = () => new MotorError('PROPERTIES_CORRUPT', 'Las propiedades guardadas no tienen el formato esperado.');
     if (!plainObject(data) || Object.keys(data).sort().join() !== RECORD_KEYS.join()
-        || data.format !== 'mind-folder-properties' || data.version !== 1 || data.folderId !== folderId
+        || data.format !== 'mind-folder-properties' || ![1, 2].includes(data.version) || data.folderId !== folderId
         || !(data.authorizationGeneration === null
           || (typeof data.authorizationGeneration === 'string' && GENERATION.test(data.authorizationGeneration)))
         || !Number.isSafeInteger(data.generation) || data.generation < 1 || !isDate(data.updatedAt)
@@ -251,7 +252,9 @@ export function createPropertyStore({
     const entries = new Map();
     let last = null;
     for (const entry of data.entries) {
-      if (!plainObject(entry) || Object.keys(entry).sort().join() !== 'path,properties') throw corrupt();
+      if (!plainObject(entry) || Object.keys(entry).sort().join() !== (data.version === 1 ? 'path,properties' : 'identity,path,properties')) throw corrupt();
+      if (data.version === 2 && entry.identity !== null
+          && (typeof entry.identity !== 'string' || !/^(posix|nt):[0-9]+:[0-9]+$/u.test(entry.identity))) throw corrupt();
       let map;
       try {
         validatePropertyPath(entry.path);
@@ -265,16 +268,30 @@ export function createPropertyStore({
         throw corrupt();
       }
       last = entry.path;
+      map.identity = entry.identity ?? null;
       entries.set(entry.path, map);
     }
     return { authorizationGeneration: data.authorizationGeneration, generation: data.generation, updatedAt: data.updatedAt, entries };
   }
 
   /** Registro vigente para la autorización actual; los de otra concesión no se aplican. */
-  async function bound(folderId, folder) {
+  async function bound(folderId, folder, transition = null) {
     const stored = await readJson(filename(folderId));
     const record = stored === null ? null : parseRecord(stored.data, folderId);
     if (!record || record.authorizationGeneration !== (folder.generation ?? null)) return null;
+    // Una ruta no identifica al objeto: un archivo reemplazado entre recorridos
+    // no hereda metadatos. Los registros antiguos sin identidad se conservan en
+    // disco hasta una mutación, pero no se atribuyen a ningún objeto nuevo.
+    const index = readFolderIndex ? await readFolderIndex(folderId) : null;
+    const identities = new Map((index?.entries ?? []).filter((entry) => entry.state === 'indexed')
+      .map((entry) => [entry.path, entry.identity]));
+    for (const [entryPath, map] of record.entries) {
+      if (transition && entryPath === transition.path && map.identity === transition.before
+          && identities.get(entryPath) === transition.after) map.identity = transition.after;
+      // Conservar datos históricos sin atribuirlos a un objeto distinto o no
+      // verificable; otra asignación explícita puede reemplazar esa ruta.
+      map.current = Boolean(map.identity) && map.identity === identities.get(entryPath);
+    }
     return record;
   }
 
@@ -299,28 +316,29 @@ export function createPropertyStore({
    * Lectura, cambio y publicación bajo el bloqueo. La autorización se captura al
    * pedir la operación y se exige la misma bajo el bloqueo y antes de publicar.
    */
-  async function mutate(folderId, requested, apply) {
+  async function mutate(folderId, requested, apply, transition = null) {
     return exclusive(folderId, async () => {
       const folder = await folderFor(folderId);
       requireSame(requested, folder);
-      const record = await bound(folderId, folder);
+      const record = await bound(folderId, folder, transition);
       const entries = record?.entries ?? new Map();
-      const { changed, value } = apply(entries, folder);
+      const { changed, value } = await apply(entries, folder);
       if (!changed) return { ...value, generation: record?.generation ?? null };
       if (entries.size > maxEntries) throw limit(`Se admiten propiedades en ${maxEntries} entradas por carpeta como máximo.`);
       const next = {
-        format: 'mind-folder-properties', version: 1, folderId,
+        format: 'mind-folder-properties', version: 2, folderId,
         authorizationGeneration: folder.generation ?? null,
         generation: (record?.generation ?? 0) + 1,
         updatedAt: new Date().toISOString(),
         entries: [...entries].sort(([a], [b]) => byCodeUnits(a, b))
-          .map(([entryPath, map]) => ({ path: entryPath, properties: toObject(map) })),
+          .map(([entryPath, map]) => ({ path: entryPath, identity: map.identity, properties: toObject(map) })),
       };
       if (Buffer.byteLength(JSON.stringify(next), 'utf8') > maxBytes) {
         throw limit('Las propiedades de esta carpeta superan el tamaño máximo permitido.');
       }
       // Una retirada o nueva autorización mientras se preparaba no recibe estos datos.
       requireSame(requested, await folderFor(folderId));
+      await prepareBaseFormat(baseDirectory, 2);
       await writeJson(filename(folderId), next);
       return { ...value, generation: next.generation };
     });
@@ -340,16 +358,25 @@ export function createPropertyStore({
       const { set, remove } = parseChanges(changes);
       const folder = await folderFor(folderId);
       if (isExcluded(folder.exclusions, name)) throw excluded();
+      let identity;
+      if (set.size > 0 && !readFolderIndex) {
+        throw new MotorError('ENTRY_IDENTITY_UNAVAILABLE', 'Las propiedades necesitan un índice con identidad verificada.');
+      }
       if (set.size > 0 && readFolderIndex) {
         const index = await readFolderIndex(folderId);
-        if (!index?.entries.some((entry) => entry.path === name)) {
+        const entry = index?.entries.find((item) => item.path === name);
+        if (!entry) {
           throw new MotorError('PATH_NOT_INDEXED', 'La ruta no figura en el índice vigente de la carpeta; revisa la ruta o reconcilia el índice.');
         }
+        identity = entry.state === 'indexed' ? entry.identity : null;
+        if (!identity) throw new MotorError('ENTRY_IDENTITY_UNAVAILABLE', 'No se pueden asignar propiedades sin una identidad verificada; reconcilia el índice.');
       }
       return mutate(folderId, folder, (entries, current) => {
         if (isExcluded(current.exclusions, name)) throw excluded();
-        const before = entries.get(name) ?? new Map();
+        const existing = entries.get(name);
+        const before = existing?.current ? existing : new Map();
         const after = new Map(before);
+        after.identity = identity ?? before.identity;
         for (const key of remove) after.delete(key);
         for (const [key, value] of set) after.set(key, value);
         if (after.size > MAX_PROPERTIES_PER_ENTRY) {
@@ -367,7 +394,8 @@ export function createPropertyStore({
       const folder = await folderFor(folderId);
       if (isExcluded(folder.exclusions, name)) throw excluded();
       const record = await bound(folderId, folder);
-      return toObject(record?.entries.get(name) ?? new Map());
+      const map = record?.entries.get(name);
+      return toObject(map?.current ? map : new Map());
     },
 
     /**
@@ -383,7 +411,7 @@ export function createPropertyStore({
         authorizationGeneration: record.authorizationGeneration,
         generation: record.generation,
         updatedAt: record.updatedAt,
-        entries: [...record.entries].filter(([entryPath]) => !isExcluded(folder.exclusions, entryPath))
+        entries: [...record.entries].filter(([entryPath, map]) => map.current && !isExcluded(folder.exclusions, entryPath))
           .map(([entryPath, map]) => ({ path: entryPath, properties: toObject(map) })),
       };
     },
@@ -409,7 +437,7 @@ export function createPropertyStore({
         const visible = (entryPath) => !isExcluded(current.exclusions, entryPath);
         const renamed = (entryPath) => `${target}${entryPath.slice(source.length)}`;
         // Nunca se escribe en una ruta excluida: lo que caería en ella se queda donde estaba.
-        const moving = [...entries].filter(([entryPath]) => inside(entryPath, source)
+        const moving = [...entries].filter(([entryPath, map]) => map.current && inside(entryPath, source)
           && visible(entryPath) && visible(renamed(entryPath)));
         for (const entryPath of [...entries.keys()]) {
           if (inside(entryPath, target) && !inside(entryPath, source) && visible(entryPath)) {
@@ -435,9 +463,9 @@ export function createPropertyStore({
       const result = await mutate(folderId, folder, (entries) => {
         const taken = [];
         for (const [entryPath, map] of [...entries]) {
-          if (!inside(entryPath, source)) continue;
+          if (!map.current || !inside(entryPath, source)) continue;
           entries.delete(entryPath);
-          taken.push({ path: entryPath === source ? '' : entryPath.slice(source.length + 1), properties: toObject(map) });
+          taken.push({ path: entryPath === source ? '' : entryPath.slice(source.length + 1), identity: map.identity, properties: toObject(map) });
         }
         return { changed: taken.length > 0, value: { taken } };
       });
@@ -452,17 +480,41 @@ export function createPropertyStore({
       const target = validatePropertyPath(relativePath);
       if (!Array.isArray(items) || items.length === 0) return { restored: 0 };
       const folder = await folderFor(folderId);
-      return mutate(folderId, folder, (entries, current) => {
+      return mutate(folderId, folder, async (entries, current) => {
+        const index = readFolderIndex ? await readFolderIndex(folderId) : null;
+        const identities = new Map((index?.entries ?? []).filter((entry) => entry.state === 'indexed')
+          .map((entry) => [entry.path, entry.identity]));
         let restored = 0;
         for (const item of items) {
           if (!item || typeof item.path !== 'string') continue;
           const entryPath = item.path === '' ? target : `${target}/${validatePropertyPath(item.path)}`;
-          if (isExcluded(current.exclusions, entryPath) || entries.has(entryPath)) continue;
-          entries.set(entryPath, parsePropertyMap(item.properties));
+          if (isExcluded(current.exclusions, entryPath) || entries.get(entryPath)?.current) continue;
+          const identity = identities.get(entryPath);
+          if (!identity) throw new MotorError('ENTRY_IDENTITY_UNAVAILABLE', 'No se pueden restaurar propiedades sin una identidad verificada; reconcilia el índice.');
+          // Mover y restaurar conservan el objeto. Si fue reemplazado durante
+          // la operación (o el respaldo es antiguo y no identifica el objeto),
+          // sus propiedades no se atribuyen al archivo que ahora ocupa la ruta.
+          if (!item.identity || item.identity !== identity) continue;
+          const map = parsePropertyMap(item.properties);
+          map.identity = identity;
+          entries.set(entryPath, map);
           restored += 1;
         }
         return { changed: restored > 0, value: { restored } };
       });
+    },
+
+    /** Una modificación explícita de Mind reemplaza el inode: conserva solo las
+     * propiedades ligadas al objeto anterior verificado por el auxiliar nativo. */
+    async rebindModifiedProperties(folderId, relativePath, before, after) {
+      if (!before || !after) return { rebound: 0 };
+      const name = validatePropertyPath(relativePath);
+      const folder = await folderFor(folderId);
+      return mutate(folderId, folder, (entries, current) => {
+        if (isExcluded(current.exclusions, name)) throw excluded();
+        const rebound = entries.get(name)?.current ? 1 : 0;
+        return { changed: rebound > 0, value: { rebound } };
+      }, { path: name, before, after });
     },
 
     /**
