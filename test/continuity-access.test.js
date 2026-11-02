@@ -202,7 +202,11 @@ test('el contexto es portable: JSON importable en otra Base y Markdown legible',
   assert.equal(typeof json, 'string');
   const { exportedAt, ...object } = await view.readContext({ format: 'object' });
   assert.deepEqual({ ...JSON.parse(json), exportedAt: undefined }, { ...object, exportedAt: undefined });
-  assert.deepEqual(await target.continuity.importContinuity(json), { imported: [decision.id, result.id], unchanged: [] });
+  // El orden sigue la fecha de creación; dos registros del mismo milisegundo se ordenan por id.
+  const { imported, unchanged } = await target.continuity.importContinuity(json);
+  assert.deepEqual(imported, object.entries.map((entry) => entry.id));
+  assert.deepEqual([...imported].sort(), [decision.id, result.id].sort());
+  assert.deepEqual(unchanged, []);
   assert.deepEqual(await target.continuity.getContinuity(result.id), result);
   assert.equal(await target.continuity.getContinuity(note.id), null);
 
