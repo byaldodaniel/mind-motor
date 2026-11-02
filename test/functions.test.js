@@ -75,6 +75,8 @@ test('persiste creación, actualización y retirada entre procesos terminados', 
       ${operation}`;
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', script, base], {
       encoding: 'utf8', timeout: 10_000, windowsHide: true,
+      // Con el terminal interactivo, el ejecutor de pruebas fuerza color y console.log pintaría los booleanos.
+      env: { ...process.env, FORCE_COLOR: undefined, NODE_DISABLE_COLORS: '1' },
     });
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim();
