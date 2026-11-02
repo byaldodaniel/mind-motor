@@ -1491,7 +1491,18 @@ export function createBackupExecutors(session) {
   return Object.freeze({
     respaldo: Object.freeze({
       timeoutMs: 60_000,
-      validateInput: (input) => input === null || (isPlainObject(input) && Object.keys(input).length === 0),
+      etiqueta: 'Crear un respaldo cifrado de la Base',
+      descripcion: 'Crea un respaldo cifrado en la carpeta configurada con "mind respaldo configurar". No admite parámetros.',
+      parametros: {},
+      validarDefinicion: (definition) => {
+        if (definition?.parametros && Object.keys(definition.parametros).length > 0) {
+          throw new MotorError('INVALID_FUNCTION_DEFINITION', 'El ejecutor "respaldo" no admite parámetros.');
+        }
+      },
+      requisitos: () => ({ carpetas: [], continuidad: [] }),
+      describir: () => ['Crea un respaldo cifrado de la Base en la carpeta de respaldos que configuraste.'],
+      // Entrada del anfitrión ({ funcion, origen, fecha, cambios? }) o vacía; nunca parámetros del agente.
+      validateInput: (input) => input === null || (isPlainObject(input) && Object.keys(input).every((key) => ['funcion', 'origen', 'fecha', 'cambios'].includes(key))),
       async run({ signal } = {}) {
         const created = await createConfiguredBackup({ baseDirectory, signal });
         await Promise.resolve(session.audit?.('respaldo-creado', { archivo: created.name, destino: created.destination, origen: 'automatizacion' }))

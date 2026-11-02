@@ -236,8 +236,9 @@ export function createFunctionService(session, { now = Date.now, factories } = {
     };
   }
 
-  function requirementsOf(info) {
-    const declared = info.checked.meta.requisitos ? info.checked.meta.requisitos(info.definition) : null;
+  async function requirementsOf(info) {
+    // Un ejecutor puede consultar la Base para declarar sus requisitos (por ejemplo, el índice CSV).
+    const declared = info.checked.meta.requisitos ? await info.checked.meta.requisitos(info.definition) : null;
     return normalizeRequirements(declared, info.checked.activation);
   }
 
@@ -292,7 +293,7 @@ export function createFunctionService(session, { now = Date.now, factories } = {
     if (!isAutomatic(info.checked.activation)) {
       throw new MotorError('INVALID_ACTIVATION', 'La definición no tiene activación automática (horario o evento); se ejecuta a mano con "ejecutar".');
     }
-    const requirements = requirementsOf(info);
+    const requirements = await requirementsOf(info);
     return { ...info, requirements, missing: await missingPermissions(requirements), lines: await consentLines(info, requirements) };
   }
 

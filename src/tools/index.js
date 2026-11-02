@@ -14,10 +14,12 @@ import { createOrganizeTools } from './organizar.js';
 import { createPropertyTools } from './propiedades.js';
 import { createIndexTools } from './indices.js';
 import { createBackupTools } from './respaldo.js';
+import { createFunctionTools } from './funciones.js';
 
 export const TOOL_FACTORIES = Object.freeze([
   createOrganizeTools, // Función 03: organizar y papelera.
   createPropertyTools, // Función 02: propiedades.
   createIndexTools, // Función 01: índices personalizados en CSV.
   createBackupTools, // Respaldo cifrado (crear; configurar y restaurar son del usuario).
+  createFunctionTools, // Función 04: funciones y automatizaciones.
 ]);

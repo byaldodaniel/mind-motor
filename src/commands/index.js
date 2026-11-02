@@ -8,6 +8,14 @@
  * Para añadir una orden: agregar `nombre: { load: () => import('./archivo.js'), ayuda: '...' }`.
  */
 export const COMMANDS = Object.freeze({
+  programador: {
+    load: () => import('./programador.js'),
+    ayuda: 'programador instalar|estado|desinstalar  Ejecuta las funciones automáticas autorizadas también con Mind cerrado (programador del sistema).',
+  },
+  programadas: {
+    load: () => import('./programadas.js'),
+    ayuda: 'programadas               Ejecuta una vez los turnos vencidos (lo usa el programador del sistema).',
+  },
   respaldo: {
     load: () => import('./respaldo.js'),
     ayuda: 'respaldo configurar|crear|estado|verificar|restaurar  Respaldos cifrados de la Base y su recuperación.',

@@ -1,5 +1,7 @@
 import { MotorError } from '../errors.js';
 import { createNativeExecutors } from './native.js';
+import { createBackupExecutors } from '../backup.js';
+import { createCustomIndexExecutors } from '../custom-index.js';
 
 /**
  * Catálogo de ejecutores de confianza del Motor, por área. Es el único origen
@@ -38,6 +40,8 @@ import { createNativeExecutors } from './native.js';
  */
 export const EXECUTOR_FACTORIES = Object.freeze([
   createNativeExecutors,
+  createBackupExecutors, // 'respaldo'
+  createCustomIndexExecutors, // 'indice-csv'
 ]);
 
 /**

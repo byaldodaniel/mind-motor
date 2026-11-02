@@ -327,3 +327,56 @@ export function createCustomIndexExtension(session) {
     },
   };
 }
+
+/**
+ * Ejecutor de confianza "indice-csv" (src/executors/index.js): una función
+ * programada o por evento regenera un índice personalizado existente. Los
+ * permisos se comprueban de nuevo en cada ejecución (regenerate).
+ */
+export function createCustomIndexExecutors(session) {
+  const indexes = createCustomIndexes({ session });
+  const indexId = (definition) => {
+    const id = definition?.parametros?.indice;
+    if (typeof id !== 'string' || !ID.test(id) || Object.keys(definition.parametros).some((key) => key !== 'indice')) {
+      throw new MotorError('INVALID_FUNCTION_DEFINITION', 'El ejecutor "indice-csv" necesita parametros: { "indice": "<id del índice>" }.');
+    }
+    return id;
+  };
+  return Object.freeze({
+    'indice-csv': Object.freeze({
+      etiqueta: 'Actualizar un índice personalizado (CSV)',
+      descripcion: 'Regenera el CSV de un índice personalizado ya creado con "crear_indice".',
+      parametros: { indice: 'Id del índice personalizado (idx-…).' },
+      timeoutMs: 60_000,
+      validarDefinicion: (definition) => { indexId(definition); },
+      acceptsDefinition: (definition) => { indexId(definition); return true; },
+      async requisitos(definition) {
+        const stored = await indexes.get(indexId(definition));
+        return {
+          carpetas: [
+            { id: stored.source.folderId, permisos: ['encontrar'], uso: `indexar (${stored.name})` },
+            { id: stored.destination.folderId, permisos: ['escribir'], uso: `escribir el CSV «${stored.destination.relativePath}» (nunca sobrescribe cambios ajenos)` },
+          ],
+          continuidad: [],
+        };
+      },
+      validateInput: (input) => {
+        if (!validInput(input)) throw new MotorError('INVALID_FUNCTION_INPUT', 'Entrada no válida.');
+        return true;
+      },
+      async run({ definition }) {
+        const id = indexId(definition);
+        const stored = await indexes.get(id);
+        const result = await indexes.regenerate(id);
+        return {
+          estado: result.status, filas: result.rows,
+          archivos: [{ carpeta: stored.destination.folderId, ruta: stored.destination.relativePath }],
+        };
+      },
+    }),
+  });
+}
+
+function validInput(input) {
+  return input && typeof input === 'object' && !Array.isArray(input) && typeof input.funcion === 'string' && typeof input.origen === 'string';
+}

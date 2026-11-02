@@ -9,10 +9,11 @@
  * Para añadir un área: importar su fábrica y agregarla a la lista.
  */
 import { createCustomIndexExtension } from './custom-index.js';
+import { createAutomationExtension } from './automations/scheduler.js';
 
 export const SESSION_EXTENSIONS = Object.freeze([
   // Función 01: índices personalizados que se actualizan al cambiar su carpeta.
   createCustomIndexExtension,
-  // Hito B: el programador de automatizaciones (src/automations/scheduler.js,
-  // createAutomationExtension) se registrará aquí cuando esté conectado y probado.
+  // Función 04: turnos por horario y por evento mientras hay una sesión con observación.
+  createAutomationExtension,
 ]);
