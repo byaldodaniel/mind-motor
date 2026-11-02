@@ -8,6 +8,10 @@
  * Para añadir una orden: agregar `nombre: { load: () => import('./archivo.js'), ayuda: '...' }`.
  */
 export const COMMANDS = Object.freeze({
+  actualizar: {
+    load: () => import('./actualizar.js'),
+    ayuda: 'actualizar <paquete> [--forzar]  Sustituye el Motor y los runtimes por los de un paquete nuevo (.zip, .tar.gz o carpeta) y conserva la Base.',
+  },
   programador: {
     load: () => import('./programador.js'),
     ayuda: 'programador instalar|estado|desinstalar  Ejecuta las funciones automáticas autorizadas también con Mind cerrado (programador del sistema).',
@@ -20,6 +24,4 @@ export const COMMANDS = Object.freeze({
     load: () => import('./respaldo.js'),
     ayuda: 'respaldo configurar|crear|estado|verificar|restaurar  Respaldos cifrados de la Base y su recuperación.',
   },
-  // Hito B: `actualizar` (src/commands/actualizar.js) se registrará aquí cuando
-  // esté probado de extremo a extremo. No se ofrece en el primer producto.
 });

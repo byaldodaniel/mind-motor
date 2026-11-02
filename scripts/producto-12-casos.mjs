@@ -21,6 +21,7 @@
 // "pendiente", nunca como superado.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,6 +41,7 @@ if (!mindArgument) {
 }
 const mind = await fs.realpath(path.resolve(mindArgument));
 const reportFile = option('--informe');
+const updateArgument = option('--actualizacion');
 const claudeCommand = option('--claude');
 const windows = process.platform === 'win32';
 const results = [];
@@ -52,7 +54,9 @@ const HITO_A_TOOLS = ['estado', 'solicitar_acceso', 'retirar_acceso', 'buscar', 
   // Hito B: Función 03 (organizar y papelera).
   'crear_carpeta', 'mover', 'renombrar', 'borrar', 'papelera', 'restaurar', 'vaciar_papelera',
   // Hito B: propiedades e índices personalizados.
-  'propiedades', 'asignar_propiedades', 'indices_personalizados', 'crear_indice', 'actualizar_indice', 'modificar_indice', 'retirar_indice'];
+  'propiedades', 'asignar_propiedades', 'indices_personalizados', 'crear_indice', 'actualizar_indice', 'modificar_indice', 'retirar_indice',
+  'crear_respaldo', 'funciones', 'crear_funcion', 'modificar_funcion', 'retirar_funcion', 'ejecutar_funcion', 'activar_funcion',
+  'desactivar_funcion', 'historial_funcion'];
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -141,11 +145,14 @@ async function residentProcesses() {
 }
 
 // Simula la respuesta del usuario en el formulario del cliente.
-const acceptAll = (params) => (params.requestedSchema.properties.acceso
-  ? { action: 'accept', content: { acceso: 'completo' } }
-  : params.requestedSchema.properties.confirmar
-    ? { action: 'accept', content: { confirmar: true } }
-    : { action: 'accept', content: { leer: true, registrar: true } });
+const acceptAll = (params) => {
+  const fields = params.requestedSchema.properties;
+  if (fields.acceso) return { action: 'accept', content: { acceso: 'completo' } };
+  if (fields.confirmar) return { action: 'accept', content: { confirmar: true } };
+  if (fields.texto) return { action: 'accept', content: { texto: 'VACIAR' } };
+  if (fields.activar) return { action: 'accept', content: { activar: true } };
+  return { action: 'accept', content: { leer: true, registrar: true } };
+};
 
 const names = (result) => (result.data?.resultados ?? []).map((item) => item.ruta).sort();
 const SIMULATED = 'cliente MCP de prueba (simulación del agente y del usuario)';
@@ -336,6 +343,161 @@ try {
     check(exit.code === 0, `Código de salida ${exit.code}`);
     return { archivos: all, origen: entry.origen };
   });
+
+  // ---------------------------------------------------------------- Hito B
+  const packageModule = (relative) => import(pathToFileURL(path.join(mind, 'Motor', ...relative.split('/'))).href);
+  const scripted = (...replies) => ({
+    lines: [], write(line) { this.lines.push(line); }, ask: async () => replies.shift() ?? '', secret: async () => replies.shift() ?? '',
+    yes: async () => replies.shift() === 's', close() {},
+  });
+  let folderB = null;
+
+  await step(13, 'Organizar: crear carpetas, mover y renombrar sin reemplazar', SIMULATED, async () => {
+    session = await launch({ onElicit: acceptAll, clientInfo: { name: 'agente-de-prueba-C', version: '3.0' } });
+    await session.initialize();
+    folderB = (await session.call('estado')).data.carpetas[0].id;
+    check((await session.call('crear_carpeta', { ruta: 'Archivo' })).data.estado === 'creada', 'crear_carpeta');
+    check((await session.call('crear_carpeta', { ruta: 'Archivo' })).data.error?.codigo === 'FILE_EXISTS', 'crear_carpeta no reemplaza');
+    const moved = await session.call('mover', { desde: 'Proyectos/presupuesto-2026.md', hasta: 'Archivo/presupuesto-2026.md' });
+    check(moved.data.estado === 'movido', JSON.stringify(moved.data));
+    check((await session.call('renombrar', { ruta: 'Archivo', nuevo_nombre: 'Archivo 2026' })).data.estado === 'renombrado', 'renombrar');
+    check((await session.call('mover', { desde: 'nuevo-sin-mind.txt', hasta: 'Proyectos/acta.txt' })).data.error?.codigo === 'FILE_EXISTS', 'mover no reemplaza');
+    check(await fs.readFile(path.join(information, 'Archivo 2026', 'presupuesto-2026.md'), 'utf8').then((text) => /4\.250/.test(text)), 'contenido movido');
+  });
+
+  await step(14, 'Borrado recuperable, restauración y vaciado con doble confirmación', SIMULATED, async () => {
+    const asked = session.elicitations.length;
+    const deleted = await session.call('borrar', { ruta: 'nuevo-sin-mind.txt', motivo: 'prueba' });
+    check(deleted.data.estado === 'en_papelera', JSON.stringify(deleted.data));
+    check(session.elicitations.length === asked + 1, 'el borrado se confirma con el usuario');
+    check((await session.call('papelera')).data.total === 1, 'papelera');
+    const restored = await session.call('restaurar', { id: deleted.data.id });
+    check(restored.data.estado === 'restaurado' && await fs.readFile(path.join(information, 'nuevo-sin-mind.txt'), 'utf8') === 'Escrito con Mind cerrado\n', JSON.stringify(restored.data));
+    const again = await session.call('borrar', { ruta: 'nuevo-sin-mind.txt' });
+    const purged = await session.call('vaciar_papelera', { id: again.data.id });
+    check(purged.data.estado === 'eliminado', JSON.stringify(purged.data));
+    check(session.elicitations.length === asked + 4, 'vaciar pide dos confirmaciones');
+  });
+
+  await step(15, 'Propiedades: asignar, buscar y conservar al mover', SIMULATED, async () => {
+    await session.call('asignar_propiedades', { ruta: 'Archivo 2026/presupuesto-2026.md', asignar: { estado: 'aprobado', importe: 4250 } });
+    await session.call('mover', { desde: 'Archivo 2026/presupuesto-2026.md', hasta: 'presupuesto-2026.md' });
+    const found = await session.call('buscar', { propiedades: { estado: 'aprobado' } });
+    check(found.data.total === 1 && found.data.resultados[0].ruta === 'presupuesto-2026.md', JSON.stringify(found.data));
+    check(found.data.resultados[0].propiedades.importe === 4250, 'propiedad numérica');
+  });
+
+  await step(16, 'Índice personalizado CSV', SIMULATED, async () => {
+    const created = await session.call('crear_indice', { nombre: 'Lista', campos: ['ruta', 'bytes', 'propiedad:estado'], ruta_csv: 'Archivo 2026/lista.csv' });
+    check(created.data.estado === 'creado', JSON.stringify(created.data));
+    const csv = await fs.readFile(path.join(information, 'Archivo 2026', 'lista.csv'), 'utf8');
+    check(csv.startsWith('\uFEFFruta,bytes,propiedad:estado\r\n') && /presupuesto-2026\.md,\d+,aprobado/u.test(csv), csv.slice(0, 300));
+    check((await session.call('modificar_indice', { id: created.data.id, campos: ['nombre'] })).data.estado === 'actualizado', 'cambio de esquema');
+  });
+
+  await step(17, 'Funciones: crear, ejecutar y activar con autorización del usuario', SIMULATED, async () => {
+    const definition = { nombre: 'Nota', ejecutor: 'plantilla-texto', parametros: { destino: { carpeta: folderB, ruta: 'nota-{funcion}.txt' }, plantilla: 'Nota de {funcion}' }, activacion: { tipo: 'horario', frecuencia: 'intervalo', minutos: 15 } };
+    check((await session.call('crear_funcion', { id: 'nota', definicion: definition })).data.estado === 'creada', 'crear_funcion');
+    const run = await session.call('ejecutar_funcion', { id: 'nota' });
+    check(run.data.estado === 'completada' && await fs.readFile(path.join(information, 'nota-nota.txt'), 'utf8') === 'Nota de nota', JSON.stringify(run.data));
+    check((await session.call('activar_funcion', { id: 'nota' })).data.estado === 'activada', 'activar_funcion');
+    check((await session.call('desactivar_funcion', { id: 'nota' })).data.estado === 'desactivada', 'desactivar_funcion');
+  });
+
+  await step(18, 'Concurrencia y revocación', SIMULATED, async () => {
+    const other = await launch({ onElicit: acceptAll, clientInfo: { name: 'agente-de-prueba-D', version: '1.0' } });
+    await other.initialize();
+    const both = await Promise.all([session.call('buscar', { consulta: 'acta' }), other.call('buscar', { consulta: 'acta' })]);
+    check(both.every((item) => item.data.total === 1), JSON.stringify(both.map((item) => item.data.total)));
+    await session.call('retirar_acceso', { permisos: ['leer'] });
+    check((await other.call('leer', { ruta: 'Proyectos/acta.txt' })).data.error?.codigo === 'ACCESS_NOT_GRANTED', 'la retirada vale para todos los agentes al instante');
+    await other.close();
+  });
+
+  await step(19, 'Rendimiento de búsqueda repetida (con índice en memoria)', SIMULATED, async () => {
+    const times = [];
+    for (let i = 0; i < 10; i += 1) {
+      const started = performance.now();
+      await session.call('buscar', { consulta: 'acta' });
+      times.push(performance.now() - started);
+    }
+    times.sort((a, b) => a - b);
+    const exit = await session.close();
+    check(exit.code === 0, `Código de salida ${exit.code}`);
+    return { mediana_ms: Number(((times[4] + times[5]) / 2).toFixed(1)), maximo_ms: Number(times[9].toFixed(1)) };
+  });
+
+  await step(20, 'Funciones fuera de sesión: mind programadas con el iniciador', PACKAGE, async () => {
+    const result = windows
+      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" programadas"`], { env: isolatedEnv(), verbatim: true })
+      : await run(path.join(mind, 'mind'), ['programadas'], { env: isolatedEnv() });
+    check(result.code === 0, `Código ${result.code}: ${result.stderr}`);
+    return JSON.parse(result.stdout);
+  });
+
+  const recoveryDirectory = path.join(temporary, 'Memoria USB ficticia');
+  const backups = path.join(temporary, 'Respaldos');
+  const passphrase = 'frase ficticia de prueba larga';
+  let recoveryCode = null;
+  let backupFile = null;
+  await step(21, 'Respaldo cifrado: configurar, crear y verificar con las dos modalidades', PACKAGE, async () => {
+    await fs.mkdir(recoveryDirectory);
+    await fs.mkdir(backups);
+    const { configure } = await packageModule('src/commands/respaldo.js');
+    const prompt = scripted(recoveryDirectory, passphrase, passphrase, 's');
+    const configured = await configure({ prompt, baseDirectory: base, destination: backups });
+    recoveryCode = prompt.lines.find((line) => /^\s{4}\S/u.test(line))?.trim();
+    check(recoveryCode, 'no se mostró el código');
+    const backup = await packageModule('src/backup.js');
+    const created = await backup.createConfiguredBackup({ baseDirectory: base });
+    backupFile = created.file;
+    const byCode = await backup.verifyBackup({ file: backupFile, recoveryCode });
+    const byFile = await backup.verifyBackup({ file: backupFile, recoveryFile: configured.recoveryFile, passphrase });
+    check(byCode.valid && byFile.valid, 'verificación');
+    const wrong = await backup.verifyBackup({ file: backupFile, recoveryFile: configured.recoveryFile, passphrase: 'otra frase incorrecta' }).catch((error) => error.code);
+    check(wrong === 'BACKUP_KEY_INVALID', `frase incorrecta: ${wrong}`);
+    for (const file of await fs.readdir(base)) {
+      const text = await fs.readFile(path.join(base, file), 'utf8').catch(() => '');
+      check(!text.includes(recoveryCode.replaceAll('-', '').slice(0, 12)) && !text.includes(passphrase), `secreto en la Base: ${file}`);
+    }
+    return { archivo: path.basename(backupFile), recuperacion: path.basename(configured.recoveryFile) };
+  });
+
+  await step(22, 'Restauración por código físico y por archivo protegido, sin la Base original', PACKAGE, async () => {
+    const backup = await packageModule('src/backup.js');
+    const { readdir } = fs;
+    const byCode = path.join(temporary, 'Base por código');
+    const byFile = path.join(temporary, 'Base por archivo');
+    await backup.restoreBackup({ file: backupFile, targetDirectory: byCode, recoveryCode });
+    const recoveryFile = path.join(recoveryDirectory, (await readdir(recoveryDirectory))[0]);
+    await backup.restoreBackup({ file: backupFile, targetDirectory: byFile, recoveryFile, passphrase });
+    for (const restored of [byCode, byFile]) {
+      const marker = JSON.parse(await fs.readFile(path.join(restored, 'mind-base.json'), 'utf8'));
+      check(marker.baseId === baseId, 'la Base restaurada conserva su identidad');
+      check((await readdir(restored)).some((name) => name.startsWith('folder-index-')), 'índices restaurados');
+    }
+  });
+
+  await step(23, 'Actualización del Motor conservando la Base', PACKAGE, async () => {
+    if (!updateArgument) return { pending: 'no se indicó --actualizacion <paquete nuevo>' };
+    const { updateMind } = await packageModule('src/commands/actualizar.js');
+    const before = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8')).mindVersion;
+    const result = await updateMind({ root: mind, source: path.resolve(updateArgument), baseDirectory: base, confirm: async () => true });
+    check(result.status === 'actualizada', JSON.stringify(result));
+    const after = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8')).mindVersion;
+    check(after !== before, `versión ${before} → ${after}`);
+    session = await launch({ clientInfo: { name: 'agente-de-prueba-E', version: '1.0' } });
+    await session.initialize();
+    const status = (await session.call('estado')).data;
+    check(status.carpetas.length === 1 && status.carpetas[0].id === folderB, 'autorizaciones conservadas');
+    check((await session.call('buscar', { propiedades: { estado: 'aprobado' } })).data.total === 1, 'propiedades conservadas');
+    check((await session.call('continuidad_consultar', { texto: 'presupuesto' })).data.total === 1, 'continuidad conservada');
+    check(JSON.stringify((await session.call('funciones')).data.funciones).includes('nota'), 'funciones conservadas');
+    check((await session.call('indices_personalizados')).data.total === 1, 'índices personalizados conservados');
+    const exit = await session.close();
+    check(exit.code === 0, `Código de salida ${exit.code}`);
+    return { desde: before, hasta: after, anterior: path.basename(result.backup ?? '') };
+  });
 } finally {
   for (const client of clients) {
     client.child.stdin.end();
@@ -356,7 +518,7 @@ const summary = {
   fallidos: results.filter((item) => item.resultado === 'fallido').length,
   pendientes: results.filter((item) => item.resultado === 'pendiente').length,
   casos: results,
-  fuera_del_hito_A: ['organizar y papelera', 'propiedades', 'índices personalizados CSV', 'automatizaciones', 'respaldo cifrado', 'actualización del Motor (mind actualizar)'],
+  nota: 'Los casos marcados como simulación usan un cliente MCP de prueba que hace de agente y de usuario; no sustituyen la prueba con una persona.',
 };
 if (reportFile) await fs.writeFile(reportFile, `${JSON.stringify(summary, null, 2)}\n`);
 process.stdout.write(`\nSuperados: ${summary.superados} · Fallidos: ${summary.fallidos} · Pendientes: ${summary.pendientes}\n`);

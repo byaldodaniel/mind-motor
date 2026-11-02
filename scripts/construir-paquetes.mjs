@@ -292,7 +292,10 @@ async function main(argv) {
 
   const components = JSON.parse(await fsp.readFile(path.join(PACKAGING, 'componentes.json'), 'utf8'));
   if (components.formato !== 'mind-componentes' || components.version !== 1) fail('packaging/componentes.json no tiene el formato esperado.');
-  const { version } = JSON.parse(await fsp.readFile(path.join(ROOT, 'package.json'), 'utf8'));
+  const declared = JSON.parse(await fsp.readFile(path.join(ROOT, 'package.json'), 'utf8')).version;
+  // --version-paquete: solo para probar "mind actualizar" con un segundo paquete real (CI).
+  const version = values('--version-paquete')[0] ?? declared;
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)) fail(`Versión no válida: ${version}`);
   const dirty = git(['status', '--porcelain', '--', ...MOTOR_PATHS, 'packaging']).trim();
   if (dirty) process.stdout.write(`Aviso: hay cambios sin commit en el Motor o en packaging; el paquete no será reproducible desde el commit:\n${dirty}\n`);
   const mtime = Number(process.env.SOURCE_DATE_EPOCH ?? git(['log', '-1', '--format=%ct']).trim());
