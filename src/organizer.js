@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { isExcluded, containsExcluded, TRASH_DIRECTORY } from './paths.js';
@@ -30,6 +31,7 @@ const messages = {
   FILE_IN_USE: 'Otro programa u otra operación de Mind está usando ese elemento.',
   NO_SPACE: 'No hay espacio suficiente.',
   ENTRY_CHANGED: 'El elemento cambió desde que se comprobó; no se ha tocado. Vuelve a consultarlo.',
+  CROSS_DEVICE: 'Las dos carpetas están en volúmenes distintos: mover sería copiar. Crea el archivo en el destino y borra el original.',
   TRASH_ENTRY_MISSING: 'La entrada ya no está en la papelera de Mind.',
   SAFE_OPEN_UNAVAILABLE: 'La operación segura no está disponible en este entorno o sistema de archivos.',
 };
@@ -43,6 +45,13 @@ const OPERATIONS = {
 };
 
 const fold = (value) => (FOLD_CASE ? value.toLowerCase() : value);
+
+/** Una ruta física contiene a la otra (o son la misma), comparando como el sistema. */
+function overlapping(a, b) {
+  const left = fold(path.resolve(a));
+  const right = fold(path.resolve(b));
+  return left === right || left.startsWith(`${right}${path.sep}`) || right.startsWith(`${left}${path.sep}`);
+}
 
 function relativeName(value) {
   // Misma sintaxis que lectura y creación: sin absolutas, ADS, dispositivos ni alias Win32.
@@ -257,31 +266,63 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
       return { folderId: grant.folderId, relativePath: grant.relativePath, indexEntry: indexEntry(grant.relativePath, result, 'mkdir') };
     },
 
-    async grantMove({ requester, folderId, from, to } = {}) {
+    /**
+     * Mover o renombrar dentro de una carpeta o, con targetFolderId, a otra carpeta
+     * autorizada del mismo volumen. Ninguna de las dos puede contener a la otra.
+     */
+    async grantMove({ requester, folderId, from, to, targetFolderId = null } = {}) {
       requireRequester(requester);
       const source = relativeName(from);
       const target = relativeName(to);
-      if (source === target || fold(target).startsWith(`${fold(source)}/`)) {
+      const crossing = targetFolderId !== null && targetFolderId !== undefined && targetFolderId !== folderId;
+      if (!crossing && (source === target || fold(target).startsWith(`${fold(source)}/`))) {
         throw new MotorError('INVALID_MOVE', messages.INVALID_MOVE);
       }
       const folder = await folderFor(folderId);
-      guard(folder, [source, target], [source, target]);
-      return moves.issue({ requester, folderId, generation: folder.generation, from: source, to: target });
+      if (!crossing) {
+        guard(folder, [source, target], [source, target]);
+        return moves.issue({ requester, folderId, generation: folder.generation, from: source, to: target, target: null });
+      }
+      const destination = await folderFor(targetFolderId);
+      if (overlapping(folder.path, destination.path)) {
+        throw new MotorError('INVALID_MOVE', 'Una de las carpetas contiene a la otra: mueve dentro de la carpeta que las contiene.');
+      }
+      guard(folder, [source], [source]);
+      guard(destination, [target], [target]);
+      return moves.issue({
+        requester, folderId, generation: folder.generation, from: source, to: target,
+        target: { folderId: targetFolderId, generation: destination.generation },
+      });
     },
 
     revokeMove: (authorization) => moves.revoke(authorization),
 
-    /** @returns {Promise<{ folderId: string, from: string, to: string, type: 'file' | 'directory', indexEntry: object }>} */
+    /** @returns {Promise<{ folderId: string, targetFolderId: string, from: string, to: string, type: 'file' | 'directory', indexEntry: object }>} */
     async moveEntry({ requester, authorization } = {}) {
       const grant = moves.consume(authorization, requester);
-      const revalidate = revalidator(moves, grant, [grant.from, grant.to], [grant.from, grant.to]);
+      let revalidate;
+      if (!grant.target) {
+        revalidate = revalidator(moves, grant, [grant.from, grant.to], [grant.from, grant.to]);
+      } else {
+        const origin = revalidator(moves, grant, [grant.from], [grant.from]);
+        const arrival = revalidator(moves, { folderId: grant.target.folderId, generation: grant.target.generation }, [grant.to], [grant.to]);
+        revalidate = async () => {
+          const current = await origin();
+          const other = await arrival();
+          if (overlapping(current.path, other.path)) throw moves.denied();
+          return { ...current, targetPath: other.path };
+        };
+      }
       const folder = await revalidate();
       const result = await runOrganizer({
         operation: 'move', pythonExecutable, confirm: revalidate,
-        request: { op: 'move', root: folder.path, from: grant.from, to: grant.to },
+        request: { op: 'move', root: folder.path, from: grant.from, to: grant.to, targetRoot: folder.targetPath ?? null },
       });
       const entry = indexEntry(grant.to, result, 'move');
-      return { folderId: grant.folderId, from: grant.from, to: grant.to, type: entry.type, indexEntry: entry };
+      return {
+        folderId: grant.folderId, targetFolderId: grant.target?.folderId ?? grant.folderId,
+        from: grant.from, to: grant.to, type: entry.type, indexEntry: entry,
+      };
     },
 
     /**
@@ -290,7 +331,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
      * cambió, el borrado se rechaza con ENTRY_CHANGED sin tocar nada. by y reason
      * los fija el anfitrión para el registro de la papelera.
      */
-    async grantDelete({ requester, folderId, relativePath, expected = null, by = null, reason = null } = {}) {
+    async grantDelete({ requester, folderId, relativePath, expected = null, by = null, reason = null, properties = null } = {}) {
       requireRequester(requester);
       requireTrash();
       const name = relativeName(relativePath);
@@ -299,6 +340,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
       return deletions.issue({
         requester, folderId, generation: folder.generation, relativePath: name, expected: expectedEntry(expected),
         by: untrustedText(by ?? 'anfitrión', 200) || 'anfitrión', reason: untrustedText(reason ?? '', 300) || null,
+        properties: Array.isArray(properties) && properties.length > 0 ? properties : null,
       });
     },
 
@@ -334,6 +376,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
         modifiedAt: entry.modifiedAt, changedAt: entry.changedAt, createdAt: entry.createdAt,
         deletedAt: new Date().toISOString(), by: grant.by, sha256,
         entries: entry.type === 'directory' ? expected?.entries ?? null : null, reason: grant.reason,
+        ...(grant.properties ? { properties: grant.properties } : {}),
       };
       let recorded = { status: 'recorded', code: null };
       try {

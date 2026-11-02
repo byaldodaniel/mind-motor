@@ -10,4 +10,8 @@
  *
  * Para añadir un área: importar su fábrica y agregarla a la lista.
  */
-export const TOOL_FACTORIES = Object.freeze([]);
+import { createOrganizeTools } from './organizar.js';
+
+export const TOOL_FACTORIES = Object.freeze([
+  createOrganizeTools, // Función 03: organizar y papelera.
+]);

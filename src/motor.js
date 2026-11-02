@@ -17,6 +17,8 @@ import { createFolderIndexer } from './indexer.js';
 import { createIndexSearch } from './search.js';
 import { createIndexObserver } from './index-observer.js';
 import { createPropertyStore } from './properties.js';
+import { createOrganizer } from './organizer.js';
+import { createTrashRegistry } from './trash.js';
 
 export { MotorError } from './errors.js';
 export { textVersion } from './text-modifier.js';
@@ -164,6 +166,9 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   const properties = createPropertyStore({
     baseDirectory: base, loadAuthorizedFolder, readFolderIndex: indexer.readFolderIndex,
   });
+  // Organización (Función 03): carpetas, mover y papelera de Mind, con permisos de un solo intento.
+  const trash = createTrashRegistry({ baseDirectory: base, loadAuthorizedFolder });
+  const organizer = createOrganizer({ loadAuthorizedFolder, pythonExecutable, trash });
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
   /** Observadores abiertos en esta instancia; solo existen si el anfitrión los abre. */
@@ -218,7 +223,13 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     getProperties: properties.getProperties,
     readFolderProperties: properties.readFolderProperties,
     renameProperties: properties.renameProperties,
+    takeProperties: properties.takeProperties,
+    putProperties: properties.putProperties,
     removeFolderProperties: properties.removeFolderProperties,
+    // Organización: solo anfitrión. Cada operación exige un permiso concedido por él.
+    ...organizer,
+    listTrash: trash.list,
+    getTrashEntry: trash.get,
     // Continuidad: administración del anfitrión. El agente recibe solo la vista
     // { readContext, recordResult } de bindContinuityAgent, nunca estas operaciones.
     recordContinuity: continuity.recordContinuity,
@@ -286,6 +297,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
             // Después del registro y del índice, con su propio bloqueo: una escritura de
             // propiedades en curso termina antes y ninguna posterior supera la revalidación.
             await properties.removeFolderProperties(id);
+            // El registro de la papelera describe originales: se retira con la autorización.
+            await trash.removeFolder(id);
           } catch (error) {
             if (!failure) failure = error;
           } finally {

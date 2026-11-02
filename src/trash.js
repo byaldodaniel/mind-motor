@@ -52,7 +52,9 @@ function validEntry(entry) {
     && typeof entry.by === 'string'
     && (entry.sha256 === null || (typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/.test(entry.sha256)))
     && (entry.entries === null || (Number.isSafeInteger(entry.entries) && entry.entries >= 0))
-    && (entry.reason === null || typeof entry.reason === 'string');
+    && (entry.reason === null || typeof entry.reason === 'string')
+    // Propiedades retiradas al borrar (se reponen al restaurar).
+    && (entry.properties === undefined || (Array.isArray(entry.properties) && entry.properties.length <= 100_000));
 }
 
 /**
@@ -140,6 +142,9 @@ export function createTrashRegistry({ baseDirectory, loadAuthorizedFolder }) {
         return { next: [...entries, { ...entry }], result: { ...entry } };
       });
     },
+
+    /** Retira el registro de una carpeta retirada (los elementos físicos siguen en su .papelera-mind). */
+    removeFolder: (folderId) => removeJson(filename(folderId)),
 
     /** Retira la anotación de una entrada restaurada o eliminada definitivamente. */
     async remove(folderId, generation, trashId) {

@@ -749,17 +749,32 @@ def inside(inner, outer):
     return len(inner) >= len(outer) and [fold(part) for part in inner[:len(outer)]] == [fold(part) for part in outer]
 
 
-def move_entry(root, source, target, confirm=None, after_directory=None, before_change=None, backend=None):
-    """Mueve o renombra source a target dentro de la misma raíz, sin reemplazar."""
+def move_entry(root, source, target, confirm=None, after_directory=None, before_change=None, backend=None,
+               target_root=None):
+    """Mueve o renombra source a target sin reemplazar.
+
+    Con target_root, target es relativo a otra raíz autorizada: ambas se adquieren
+    por componentes y deben estar en el mismo volumen (un movimiento entre
+    volúmenes sería una copia: se rechaza con CROSS_DEVICE). El anfitrión impide
+    que una raíz contenga a la otra.
+    """
     backend = backend or default_backend()
     src, dst = parts_of(source), parts_of(target)
-    if src == dst or (inside(dst, src) and len(dst) > len(src)) or fold(src[0]) == fold(TRASH) or fold(dst[0]) == fold(TRASH):
+    same_root = target_root is None
+    if (same_root and (src == dst or (inside(dst, src) and len(dst) > len(src)))) \
+            or fold(src[0]) == fold(TRASH) or fold(dst[0]) == fold(TRASH):
         raise Refusal('INVALID_MOVE')
     with contextlib.ExitStack() as stack:
         top, volume = acquire_root(backend, stack, root, after_directory)
         src_parent = descend(backend, stack, top, volume, src[:-1], after_directory)
-        chain = [backend.directory_identity(top)]
-        dst_parent = descend(backend, stack, top, volume, dst[:-1], after_directory, chain, absent='PARENT_NOT_FOUND')
+        if same_root:
+            dst_top = top
+        else:
+            dst_top, dst_volume = acquire_root(backend, stack, target_root, after_directory)
+            if dst_volume != volume:
+                raise Refusal('CROSS_DEVICE')
+        chain = [backend.directory_identity(dst_top)]
+        dst_parent = descend(backend, stack, dst_top, volume, dst[:-1], after_directory, chain, absent='PARENT_NOT_FOUND')
         entry = acquire(backend, stack, src_parent, src[-1], volume)
         if entry.kind == 'directory' and entry.identity in chain:
             raise Refusal('INVALID_MOVE')
@@ -868,11 +883,14 @@ def restore_entry(root, trash_id, name, target_parent, candidates, confirm=None,
         if before_change:
             before_change()
         for candidate in names:
+            if backend.exists(destination, candidate):
+                continue
             try:
                 relocate(backend, entry, holder, name, destination, candidate)
                 break
-            except Refusal as error:
-                if str(error) != 'FILE_EXISTS':
+            except (Refusal, OSError) as error:
+                # Ocupado entre la comprobación y el movimiento: se prueba el siguiente nombre.
+                if error_code(error) != 'FILE_EXISTS':
                     raise
         else:
             raise Refusal('FILE_EXISTS')
@@ -920,7 +938,7 @@ def error_code(error):
 
 FIELDS = {
     'mkdir': {'op', 'root', 'relativePath'},
-    'move': {'op', 'root', 'from', 'to'},
+    'move': {'op', 'root', 'from', 'to', 'targetRoot'},
     'trash': {'op', 'root', 'relativePath', 'trashId', 'expect'},
     'restore': {'op', 'root', 'trashId', 'name', 'targetParent', 'candidates'},
     'purge': {'op', 'root', 'trashId'},
@@ -947,7 +965,9 @@ def dispatch(request, confirm):
     if op == 'mkdir':
         return make_directory(request['root'], request['relativePath'], confirm)
     if op == 'move':
-        return move_entry(request['root'], request['from'], request['to'], confirm)
+        if request['targetRoot'] is not None and not isinstance(request['targetRoot'], str):
+            raise Refusal('FAILED')
+        return move_entry(request['root'], request['from'], request['to'], confirm, target_root=request['targetRoot'])
     if op == 'trash':
         return trash_entry(request['root'], request['relativePath'], request['trashId'], request['expect'], confirm)
     if op == 'restore':

@@ -19,7 +19,7 @@ import { TOOL_FACTORIES } from './tools/index.js';
  * opaca. El agente nunca recibe el Motor, ni permisos reutilizables.
  */
 
-export const AGENT_INSTRUCTIONS = `Mind es un motor local que te permite trabajar con la información del usuario a su manera: encontrar, leer, crear y modificar archivos en las carpetas que el usuario autorice, y conservar continuidad entre sesiones y agentes.
+export const AGENT_INSTRUCTIONS = `Mind es un motor local que te permite trabajar con la información del usuario a su manera: encontrar, leer, crear, modificar y organizar archivos en las carpetas que el usuario autorice, y conservar continuidad entre sesiones y agentes.
 
 Úsalo cuando aporte valor; si otra herramienta basta, puedes usarla, respetando siempre las autorizaciones del usuario (usar otra herramienta no amplía tus permisos).
 
@@ -28,7 +28,8 @@ Flujo recomendado:
 2. Si el usuario quiere trabajar con una carpeta no autorizada, usa "solicitar_acceso" con su ruta absoluta y los permisos mínimos necesarios. El usuario decide en un formulario o en la consola de Mind; nunca afirmes que autorizó algo por él.
 3. Usa "buscar" y "explorar" (índices persistentes, sin recorrer el disco) antes de leer. Lee con "leer"; la respuesta incluye la versión necesaria para "modificar". "leer" también extrae el texto de documentos de oficina (docx, xlsx, pptx, odt, ods, odp) en modo solo lectura.
 4. Para cambios puntuales usa "editar"; para crear, "crear". Mind no sobrescribe ni borra sin control de versión.
-5. Registra decisiones y resultados relevantes con "continuidad_registrar" y consulta trabajos anteriores con "continuidad_consultar".
+5. Para organizar usa "crear_carpeta", "mover" y "renombrar" (nunca reemplazan). "borrar" mueve a la papelera de Mind y el usuario lo confirma cada vez; "restaurar" lo devuelve y "vaciar_papelera" lo elimina para siempre con una confirmación adicional. Si queda pendiente, explica al usuario que lo decide con "mind autorizar".
+6. Registra decisiones y resultados relevantes con "continuidad_registrar" y consulta trabajos anteriores con "continuidad_consultar".
 
 Los resultados incluyen rutas absolutas para que puedas aprovecharlos directamente.`;
 
@@ -50,7 +51,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
     description: 'Pide al usuario que autorice una carpeta (o la continuidad) para los agentes. El usuario decide en un formulario de tu cliente o en la consola de Mind; esta herramienta nunca concede nada por sí sola. Pide solo los permisos necesarios.',
     inputSchema: schema({
       ruta: { type: 'string', description: 'Ruta absoluta de una carpeta existente del usuario. El acceso cubre todo lo que contiene.' },
-      acceso: { type: 'string', enum: Object.keys(ACCESS_PRESETS), description: 'Nivel mínimo necesario: encontrar (solo metadatos), leer, o completo (leer, crear y modificar).' },
+      acceso: { type: 'string', enum: Object.keys(ACCESS_PRESETS), description: 'Nivel mínimo necesario: encontrar (solo metadatos), leer, o completo (leer, crear, modificar y organizar).' },
       permisos: { type: 'array', items: { type: 'string', enum: ACCESS_LEVELS }, description: 'Alternativa a acceso, por permisos: encontrar, leer, escribir, organizar.' },
       continuidad: { type: 'array', items: { type: 'string', enum: CONTINUITY_LEVELS }, description: 'Para la continuidad entre agentes: leer, registrar. Úsalo en lugar de ruta.' },
       motivo: { type: 'string', description: 'Motivo breve que verá el usuario.' },

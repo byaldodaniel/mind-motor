@@ -424,6 +424,47 @@ export function createPropertyStore({
       });
     },
 
+    /**
+     * Retira y devuelve las propiedades de una entrada y sus descendientes (al
+     * moverla a la papelera de Mind): rutas relativas a la entrada.
+     * @returns {Promise<Array<{ path: string, properties: Record<string, PropertyValue> }>>}
+     */
+    async takeProperties(folderId, relativePath) {
+      const source = validatePropertyPath(relativePath);
+      const folder = await folderFor(folderId);
+      const result = await mutate(folderId, folder, (entries) => {
+        const taken = [];
+        for (const [entryPath, map] of [...entries]) {
+          if (!inside(entryPath, source)) continue;
+          entries.delete(entryPath);
+          taken.push({ path: entryPath === source ? '' : entryPath.slice(source.length + 1), properties: toObject(map) });
+        }
+        return { changed: taken.length > 0, value: { taken } };
+      });
+      return result.taken;
+    },
+
+    /**
+     * Repone propiedades retiradas con takeProperties en la ruta donde la entrada
+     * se restauró. No reemplaza propiedades que ya tenga una entrada del destino.
+     */
+    async putProperties(folderId, relativePath, items) {
+      const target = validatePropertyPath(relativePath);
+      if (!Array.isArray(items) || items.length === 0) return { restored: 0 };
+      const folder = await folderFor(folderId);
+      return mutate(folderId, folder, (entries, current) => {
+        let restored = 0;
+        for (const item of items) {
+          if (!item || typeof item.path !== 'string') continue;
+          const entryPath = item.path === '' ? target : `${target}/${validatePropertyPath(item.path)}`;
+          if (isExcluded(current.exclusions, entryPath) || entries.has(entryPath)) continue;
+          entries.set(entryPath, parsePropertyMap(item.properties));
+          restored += 1;
+        }
+        return { changed: restored > 0, value: { restored } };
+      });
+    },
+
     /** Elimina todas las propiedades de la carpeta, aunque ya no esté autorizada. */
     async removeFolderProperties(folderId) {
       const target = filename(folderId);

@@ -48,7 +48,9 @@ const clients = [];
 /** Herramientas del primer producto. Las del Hito B no deben ofrecerse todavía. */
 const HITO_A_TOOLS = ['estado', 'solicitar_acceso', 'retirar_acceso', 'buscar', 'explorar', 'eliminados', 'leer', 'crear',
   'modificar', 'editar', 'continuidad_registrar', 'continuidad_consultar', 'continuidad_actualizar',
-  'continuidad_exportar', 'continuidad_importar'];
+  'continuidad_exportar', 'continuidad_importar',
+  // Hito B: Función 03 (organizar y papelera).
+  'crear_carpeta', 'mover', 'renombrar', 'borrar', 'papelera', 'restaurar', 'vaciar_papelera'];
 
 function check(condition, message) {
   if (!condition) throw new Error(message);

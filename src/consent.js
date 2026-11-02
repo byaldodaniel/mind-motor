@@ -93,6 +93,14 @@ function validAutomation(value) {
     && typeof value.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(value.fingerprint);
 }
 
+/** Borrado: carpeta y ruta; vaciado: carpeta e id de la papelera. */
+function validOperation(kind, operation) {
+  return operation && typeof operation === 'object' && typeof operation.folderId === 'string' && /^[a-f0-9]{64}$/.test(operation.folderId)
+    && (kind === 'borrado'
+      ? typeof operation.relativePath === 'string' && operation.relativePath.length > 0 && operation.relativePath.length <= 4096
+      : typeof operation.trashId === 'string' && /^\d{8}T\d{6}Z-[a-f0-9]{12}$/.test(operation.trashId));
+}
+
 /** Solicitudes pendientes de aprobación en la consola de Mind (canal 2). */
 export function createConsentRequests(baseDirectory) {
   const filename = (id) => {
@@ -102,14 +110,15 @@ export function createConsentRequests(baseDirectory) {
 
   function valid(data) {
     return data && data.format === 'mind-consent-request' && data.version === 1
-      && ['carpeta', 'continuidad', 'automatizacion'].includes(data.kind) && typeof data.createdAt === 'string'
+      && ['carpeta', 'continuidad', 'automatizacion', 'borrado', 'vaciado'].includes(data.kind) && typeof data.createdAt === 'string'
       && typeof data.expiresAt === 'string' && Array.isArray(data.requested)
       && (data.kind !== 'carpeta' || (typeof data.path === 'string' && path.isAbsolute(data.path)))
-      && (data.kind !== 'automatizacion' || validAutomation(data.automation));
+      && (data.kind !== 'automatizacion' || validAutomation(data.automation))
+      && (!['borrado', 'vaciado'].includes(data.kind) || validOperation(data.kind, data.operation));
   }
 
   return Object.freeze({
-    async create({ kind, path: folderPath = null, requested, reason, client, automation = null }) {
+    async create({ kind, path: folderPath = null, requested, reason, client, automation = null, operation = null }) {
       const id = randomUUID();
       const now = Date.now();
       const record = {
@@ -121,7 +130,12 @@ export function createConsentRequests(baseDirectory) {
           functionId: automation?.functionId, generation: automation?.generation, fingerprint: automation?.fingerprint,
         } } : {}),
       };
-      if (kind === 'automatizacion' && !valid(record)) throw new MotorError('INVALID_REQUEST', 'La solicitud de activación no es válida.');
+      if (['borrado', 'vaciado'].includes(kind)) {
+        record.operation = { folderId: operation?.folderId, relativePath: operation?.relativePath ?? null, trashId: operation?.trashId ?? null };
+      }
+      if ((kind === 'automatizacion' || ['borrado', 'vaciado'].includes(kind)) && !valid(record)) {
+        throw new MotorError('INVALID_REQUEST', 'La solicitud no es válida.');
+      }
       await writeJson(filename(id), record);
       return record;
     },
@@ -286,6 +300,43 @@ export function createConsent({ connection, requests }) {
       if (response.action === 'decline') return { status: 'declined' };
       if (response.action !== 'accept') return pending(true);
       return response.content?.activar === true ? { status: 'approved', channel: 'formulario-del-cliente' } : { status: 'declined' };
+    },
+
+    /**
+     * Confirmación de una operación sobre originales que el usuario aprueba cada
+     * vez: borrado (a la papelera de Mind) o vaciado definitivo, que pide además
+     * escribir una palabra. Sin formulario, o si el usuario lo cierra, queda
+     * pendiente para la consola. lines los construye Mind con sus propios datos.
+     * @param {{ kind: 'borrado' | 'vaciado', lines: string[], operation: object, reason?: string, clientInfo?: object, typed?: string | null }} request
+     */
+    async askOperation({ kind, lines, operation, reason, clientInfo, typed = null }) {
+      const who = clientName(clientInfo);
+      const pending = async (cancelled) => {
+        const record = await requests.create({ kind, requested: [kind], reason, client: who, operation });
+        return { status: 'pending', request: record, ...(cancelled ? { cancelled: true } : {}) };
+      };
+      if (!form()) return pending(false);
+      const why = untrustedText(reason);
+      const message = [
+        `${who} solicita, mediante Mind:`, '', ...lines,
+        ...(why ? ['', `Motivo indicado por el agente (no verificado): «${why}»`] : []),
+        '', 'Confirma solo si reconoces esta solicitud.',
+      ].join('\n');
+      const first = await elicit(message, {
+        confirmar: { type: 'boolean', title: kind === 'vaciado' ? 'Eliminar definitivamente' : 'Mover a la papelera de Mind', default: false },
+      }, ['confirmar']);
+      if (first.action === 'decline') return { status: 'declined' };
+      if (first.action !== 'accept') return pending(true);
+      if (first.content?.confirmar !== true) return { status: 'declined' };
+      if (typed) {
+        const second = await elicit(`Confirmación adicional: esto no se puede deshacer. Escribe ${typed} para continuar.`, {
+          texto: { type: 'string', title: `Escribe ${typed}`, maxLength: 20 },
+        }, ['texto']);
+        if (second.action === 'decline') return { status: 'declined' };
+        if (second.action !== 'accept') return pending(true);
+        if (String(second.content?.texto ?? '').trim().toUpperCase() !== typed) return { status: 'declined' };
+      }
+      return { status: 'approved', channel: 'formulario-del-cliente' };
     },
 
     /** Confirmación puntual de una operación que el usuario debe aprobar expresamente. */

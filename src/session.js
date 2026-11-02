@@ -239,6 +239,18 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       return { status: 'reconciled', generation: indexed.generation };
     },
 
+    /**
+     * Reconcilia ahora una carpeta tras una operación de Mind que cambió su
+     * estructura (crear carpetas, mover, papelera), con o sin observación.
+     */
+    async reindex(folderId) {
+      const state = track(folderId);
+      state.entries ??= await indexedEntries(folderId);
+      const indexed = await motor.indexFolder(folderId);
+      await trackRemovals(folderId, indexed.changes?.removed ?? []);
+      return indexed;
+    },
+
     folderStatus(folderId) {
       const state = folders.get(folderId);
       const observed = observer?.status(folderId) ?? null;

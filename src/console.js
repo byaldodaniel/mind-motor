@@ -6,6 +6,7 @@ import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, PRESET_LABELS, minimu
 import { CONTINUITY_ACCESS_LABELS, validateCandidateFolder, untrustedText } from './consent.js';
 import { liveSessions } from './session.js';
 import { reviewAutomationRequest } from './automations/service.js';
+import { reviewOperationRequest } from './organize-service.js';
 
 /**
  * Consola de Mind para el usuario: aprobar solicitudes, autorizar carpetas,
@@ -121,6 +122,10 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
       } else {
         prompt.write('Rechazada.');
       }
+    } else if (request.kind === 'borrado' || request.kind === 'vaciado') {
+      // Borrado o vaciado pedido por un agente: Mind lo describe y lo ejecuta si el usuario confirma.
+      const outcome = await reviewOperationRequest({ session, prompt, request });
+      if (outcome.done) changes += 1;
     } else if (request.kind === 'automatizacion') {
       // Activación automática de una función: se revisa la versión exacta solicitada.
       const outcome = await reviewAutomationRequest({ session, prompt, request });
