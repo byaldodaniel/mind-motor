@@ -36,3 +36,13 @@ No construir un gestor adicional para aplicar esta decisión.
   para rechazar publicaciones tardías de una autorización anterior.
 - Continuidad y definiciones de funciones permanecen como módulos internos.
   Integrarlos no concede a agentes acceso a sus registros ni ejecución de funciones.
+
+## Adaptador de Codex
+
+- La aprobación se recoge en el terminal del anfitrión antes de arrancar Codex;
+  nunca mediante argumentos de una herramienta ni por una afirmación del modelo.
+- Publicar únicamente `mind_read_text` con objeto vacío y rechazar claves extra.
+- Conservar Motor, requester y permiso en el anfitrión; el relay solo transporta
+  mensajes MCP por stdio y no concede ni renueva permisos.
+- Usar llamadas directas del namespace Mind. No ampliar el piloto a descubrimiento
+  de herramientas, índices, búsqueda o ejecución de funciones.

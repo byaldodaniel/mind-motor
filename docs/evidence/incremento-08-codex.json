@@ -1,0 +1,78 @@
+{
+  "kind": "mind-codex-real-execution",
+  "version": 1,
+  "date": "2026-11-01",
+  "motorBaseCommit": "c9d06bf8cd24707e9efc5738dc787ed5f47e3359",
+  "codexCli": "0.156.1",
+  "mcpSdk": "1.32.2",
+  "approval": {
+    "source": "Instrucción expresa de Aldo para el piloto ficticio; AUTORIZO introducido por el asistente anfitrión al ejecutar esa instrucción",
+    "file": "prueba.txt",
+    "reads": 1
+  },
+  "transport": "MCP por stdio; relay a IPC local de una conexión; sin TCP/HTTP",
+  "invocation": {
+    "ephemeral": true,
+    "ignoreUserConfig": true,
+    "sandbox": "read-only",
+    "shellTool": false,
+    "directOnlyToolNamespaces": [
+      "mcp__mind"
+    ],
+    "promptContainsFileContent": false
+  },
+  "threadId": "01a1982c-5f81-7ee1-b404-d0f1e745afcc",
+  "calls": [
+    {
+      "server": "mind",
+      "tool": "mind_read_text",
+      "arguments": {},
+      "status": "completed",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"folderId\":\"b5f0bacf370a1ffd72caec1144466ecb8100d05dde38be288308ed10a35b101e\",\"relativePath\":\"prueba.txt\",\"content\":\"Archivo ficticio autorizado para el piloto de Mind.\\nMarcador: MIND-I08-936325fe-7fd7-456a-9c20-4e733e6c1e85\\n\"}"
+          }
+        ],
+        "structured_content": {
+          "folderId": "b5f0bacf370a1ffd72caec1144466ecb8100d05dde38be288308ed10a35b101e",
+          "relativePath": "prueba.txt",
+          "content": "Archivo ficticio autorizado para el piloto de Mind.\nMarcador: MIND-I08-936325fe-7fd7-456a-9c20-4e733e6c1e85\n"
+        }
+      }
+    },
+    {
+      "server": "mind",
+      "tool": "mind_read_text",
+      "arguments": {},
+      "status": "failed",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"code\":\"READ_NOT_AUTHORIZED\",\"message\":\"No existe un permiso vigente para este solicitante y esta lectura.\"}"
+          }
+        ],
+        "structured_content": {
+          "code": "READ_NOT_AUTHORIZED",
+          "message": "No existe un permiso vigente para este solicitante y esta lectura."
+        }
+      }
+    }
+  ],
+  "finalMessage": "Contenido de la primera llamada:\n\n```text\nArchivo ficticio autorizado para el piloto de Mind.\nMarcador: MIND-I08-936325fe-7fd7-456a-9c20-4e733e6c1e85\n```\n\nCódigo de error de la segunda: `READ_NOT_AUTHORIZED`.",
+  "assertions": {
+    "mcpCalls": 2,
+    "firstContentMatchesFixture": true,
+    "secondDenied": true,
+    "otherActionEvents": 0,
+    "turnCompleted": true,
+    "originalBytesUnchanged": true,
+    "originalMtimeUnchanged": true,
+    "hostPilotExitCode": 0
+  },
+  "contentSha256": "ec7972a2fd1e7a54111df2d1827d96f755f8dada25a04f418a6ae2658b8f0f7f",
+  "cliNotice": "La opción direct_only_tool_namespaces requiere code_mode en desarrollo en este CLI. Se conservó el aviso y no se cambió configuración global.",
+  "rawEventsSha256": "73564adc5b25b00e28cfa1044ccd8bc8860905e55fcef757988f911fa0037a52"
+}

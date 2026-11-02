@@ -2,7 +2,8 @@
 
 Núcleo local construido desde cero. Utiliza JavaScript con módulos ESM y Node.js
 24 LTS. La lectura segura de originales requiere además Python 3.12 o posterior;
-usa su biblioteca estándar, sin paquetes adicionales ni compilación.
+usa su biblioteca estándar. El adaptador MCP usa el SDK oficial fijado en
+package-lock.json; se instala con `npm ci --ignore-scripts`, sin compilación.
 
 ## Ejecutar
 
@@ -136,6 +137,30 @@ directamente a otras herramientas cuando sea suficiente, respetando siempre las
 autorizaciones aplicables. Esta decisión se recoge en las instrucciones de uso;
 no añade un gestor ni un paso obligatorio a todas las tareas.
 
+## Primer agente real — Incremento 08
+
+Instalar dependencias con `npm ci --ignore-scripts`. Codex CLI debe estar instalado
+y autenticado por el usuario. El anfitrión selecciona un solo archivo ya registrado
+y un directorio vacío para el agente:
+
+```powershell
+node scripts/codex-mind.mjs --base $base --folder-id '<id registrado>' --file 'prueba.txt' --workdir '<directorio vacío absoluto>'
+```
+
+El anfitrión muestra el archivo y destinatario y pide `AUTORIZO` antes de conceder
+el permiso. Codex ve una sola herramienta `mind_read_text({})`, sin rutas ni
+administración. El piloto le pide dos llamadas: entrega el texto en la primera y
+deniega la segunda. Su código de salida no se considera éxito si faltan esas dos
+respuestas comprobadas por el anfitrión. El archivo se entrega al modelo de Codex.
+
+El permiso y la identidad permanecen en el anfitrión; un relay lleva MCP por stdio
+a una IPC local de una conexión, sin servidor TCP/HTTP. No se escribe configuración
+global del cliente ni se renueva permiso al reiniciar el relay. La ejecución real
+Windows con Codex CLI 0.156.1 está en
+[docs/evidence/incremento-08-codex.json](docs/evidence/incremento-08-codex.json).
+Ese CLI necesita la opción experimental de namespace de llamadas directas; los
+límites y la reproducción están en [docs/INCREMENTO_08.md](docs/INCREMENTO_08.md).
+
 ## Módulos integrados
 
 El anfitrión administrativo puede crear/reconciliar y consultar el índice de
@@ -162,7 +187,7 @@ Detalles en [docs/INTEGRACION_MODULOS.md](docs/INTEGRACION_MODULOS.md).
 npm test
 ```
 
-No requiere `npm install`; sí Node.js 24 y Python 3.12+. Se puede ejecutar solo la
+Requiere `npm ci --ignore-scripts`, Node.js 24 y Python 3.12+. Se puede ejecutar solo la
 parte JavaScript con `node --test test/*.test.js`. La suite completa cubre arranque,
 lectura/escritura, reinicio entre procesos, independencia de Bases y código,
 validación de rutas y entradas, datos corruptos y limpieza ante fallos. Incluye
@@ -177,7 +202,8 @@ la misma suite en Windows, macOS y Linux con Node.js 24 y Python 3.12.
 La API programática y los límites para extender el núcleo están documentados en
 [docs/INTERFACES.md](docs/INTERFACES.md). Hay indexación administrativa y núcleos
 internos de continuidad y definiciones de funciones. Todavía no hay integración de
-agentes, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
+agentes salvo el piloto MCP local de lectura, ejecución de funciones, automatizaciones,
+servidores remotos ni interfaz gráfica. Los registros
 actuales son datos técnicos de prueba, no una estructura obligatoria para organizar
 la información del usuario.
 

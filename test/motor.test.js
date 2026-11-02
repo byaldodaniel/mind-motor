@@ -33,7 +33,7 @@ function cli(base, ...args) {
 async function snapshot(directory = motorDirectory, prefix = '') {
   const result = {};
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (entry.name === '.git') continue;
+    if (entry.name === '.git' || entry.name === 'node_modules') continue;
     const name = path.join(prefix, entry.name);
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) Object.assign(result, await snapshot(absolute, name));

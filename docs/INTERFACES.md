@@ -180,3 +180,35 @@ carpeta sigue retirada. Una publicación tardía puede dejar físicamente un ín
 viejo, pero el vínculo de generación impide ofrecerlo con una nueva autorización.
 No hay transacciones ni bloqueo entre procesos; se conserva el modelo local de
 confianza. Solo se descartan índices, nunca originales.
+
+## Adaptador MCP de lectura — Incremento 08
+
+El objeto Motor y sus permisos permanecen sin cambios. El anfitrión local usa
+`prepareCodexRead({ motor, folderId, relativePath, confirm })`; `confirm` es una
+función de confianza que recibe la selección y debe devolver exactamente true.
+El lanzador de terminal la implementa pidiendo `AUTORIZO` después de mostrar el
+archivo, su carpeta y que se enviará al modelo de Codex.
+
+El anfitrión crea la identidad y el permiso existentes y liga una función a ambos.
+`createReaderServer` recibe únicamente esa función. Publica herramientas MCP
+con el SDK oficial; su lista contiene exclusivamente:
+
+| Nombre | Entrada | Salida |
+|---|---|---|
+| `mind_read_text` | `{}`; sin propiedades adicionales | `{ folderId, relativePath, content }` o `{ code, message }` con isError |
+
+El resultado incluye texto JSON y structuredContent. Los errores de Motor
+conservan código y mensaje, sin bytes parciales; errores inesperados se reducen
+a READ_FAILED. Los nombres administrativos no existen en el catálogo MCP y se
+rechazan. No se serializa ni reconstruye la identidad o el permiso del Motor.
+
+`prepareCodexRead` devuelve una dirección IPC local y close; no una concesión de
+lectura serializable. Una conexión consume el punto de entrada y no admite otra.
+Cerrar o expirar (3 minutos) revoca el permiso no usado y destruye el transporte.
+El relay no contiene lógica de autorización ni acceso a archivos. El cliente CLI
+habla MCP por stdin/stdout; la aprobación usa el terminal separado del anfitrión.
+
+`runPilot` arranca el CLI de forma efímera, en modo read-only y con herramientas de
+comandos/apps/navegador desactivadas. Exige un directorio de trabajo vacío. No
+declara éxito por exit code cero: comprueba además dos resultados de lectura,
+OK y READ_NOT_AUTHORIZED. Véase INCREMENTO_08.md para los límites del CLI probado.
