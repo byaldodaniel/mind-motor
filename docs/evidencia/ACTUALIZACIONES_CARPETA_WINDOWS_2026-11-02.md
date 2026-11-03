@@ -40,3 +40,12 @@ sobre datos ficticios; los resultados de arriba corresponden a esas ejecuciones.
 - Las instalaciones antiguas necesitan recibir una vez un paquete puente.
 
 La instalación personal de My Mind no fue actualizada como parte de estas pruebas.
+
+## Entrega y CI
+
+- PR en borrador: https://github.com/byaldodaniel/mind-motor/pull/22
+- Canal público creado: https://github.com/byaldodaniel/mind-updates
+- Tras subir la rama, GitHub no inició los jobs: la anotación de Actions informa
+  de pagos fallidos recientes o de un límite de gasto que debe aumentarse.
+  Por tanto, los checks remotos fallidos no representan ejecuciones de pruebas;
+  las comprobaciones de esta entrega siguen siendo las locales en Windows.
