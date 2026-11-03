@@ -287,7 +287,8 @@ async function main(argv) {
   const output = path.resolve(values('--salida')[0] ?? path.join(ROOT, 'dist'));
   const cache = path.resolve(values('--cache')[0] ?? path.join(ROOT, '.cache', 'descargas'));
   const requested = values('--plataforma');
-  const targets = requested.length > 0 ? requested : Object.keys(TARGETS);
+  const publication = JSON.parse(await fsp.readFile(path.join(PACKAGING, 'publicacion.json'), 'utf8'));
+  const targets = requested.length > 0 ? requested : publication.plataformas;
   for (const id of targets) if (!TARGETS[id]) fail(`Plataforma desconocida: ${id}. Opciones: ${Object.keys(TARGETS).join(', ')}`);
 
   const components = JSON.parse(await fsp.readFile(path.join(PACKAGING, 'componentes.json'), 'utf8'));

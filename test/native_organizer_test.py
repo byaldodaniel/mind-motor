@@ -3,6 +3,9 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -79,6 +82,38 @@ class Organizer(unittest.TestCase):
     def test_case_only_rename(self):
         native.move_entry(str(self.data), 'a/x.txt', 'a/X.txt')
         self.assertEqual(sorted(os.listdir(self.data / 'a')), ['X.txt'])
+
+    @unittest.skipUnless(os.name == 'nt', 'exclusión de DELETE entre procesos de Windows')
+    def test_held_source_excludes_competing_move_and_external_rename(self):
+        for source, target in [('a/x.txt', 'b/y.txt'), ('a', 'b/a')]:
+            with self.subTest(source=source):
+                command = [sys.executable, '-I', '-B', str(MOTOR / 'src' / 'native_organizer.py')]
+                first = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True, encoding='utf-8')
+                try:
+                    request = {'op': 'move', 'root': str(self.data), 'from': source,
+                               'to': target, 'targetRoot': None}
+                    first.stdin.write(json.dumps(request) + '\n')
+                    first.stdin.flush()
+                    self.assertEqual(first.stderr.readline().strip(), 'READY')
+                    competitor = subprocess.run(command, input=json.dumps({**request, 'to': 'competidor-archivo' if '/' in source else 'competidor-carpeta'}) + '\nW',
+                                                capture_output=True, text=True, encoding='utf-8', timeout=10)
+                    self.assertNotEqual(competitor.returncode, 0)
+                    self.assertEqual(competitor.stderr.strip(), 'FILE_IN_USE')
+                    with self.assertRaises(OSError):
+                        os.rename(self.data / source, self.data / 'externo')
+                    first.stdin.write('W')
+                    first.stdin.close()
+                    self.assertEqual(first.wait(timeout=10), 0)
+                    self.assertEqual(json.loads(first.stdout.read())['type'], 'file' if '/' in source else 'directory')
+                    self.assertTrue((self.data / target).exists())
+                    self.assertFalse((self.data / source).exists())
+                finally:
+                    if first.poll() is None:
+                        first.kill()
+                        first.wait(timeout=10)
+                    first.stdout.close()
+                    first.stderr.close()
 
     def test_trash_restore_and_purge(self):
         result = native.trash_entry(str(self.data), 'a/x.txt', TRASH_ID)

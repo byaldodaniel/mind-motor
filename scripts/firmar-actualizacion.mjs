@@ -37,9 +37,11 @@ for (const name of (await fs.readdir(directory)).filter(name => name.endsWith('.
       bytes: (await fs.stat(file)).size, sha256: await hashFile(file) });
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 }
-for (const target of ['win32-x64', 'linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']) {
+const publication = JSON.parse(await fs.readFile(fileURLToPath(new URL('../packaging/publicacion.json', import.meta.url)), 'utf8'));
+for (const target of publication.plataformas) {
   if (!seen.has(target)) throw new Error(`Falta el paquete ${target}; no se publica un canal incompleto.`);
 }
+if (packages.length !== publication.plataformas.length) throw new Error('El canal contiene plataformas fuera del alcance publicado.');
 const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 1, mindVersion: version, packages }));
 await fs.writeFile(output, JSON.stringify({ payload: payload.toString('base64'), signature: sign(null, payload, key).toString('base64') }) + '\n', { flag: 'wx' });
 process.stdout.write(`Canal firmado para Mind ${version}, ${packages.length} plataformas.\n`);

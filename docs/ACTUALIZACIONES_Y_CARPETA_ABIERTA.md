@@ -1,5 +1,8 @@
 # Actualización al iniciar y carpeta abierta
 
+Alcance de primera publicación: Windows x64; Linux y macOS se publicarán después.
+Las plataformas exigidas están en `packaging/publicacion.json`.
+
 Decisión de Aldo del 2026-11-02: opción A y opción 1; distribución mediante GitHub.
 Implementación sobre `d9b4a40`, en una rama separada del candidato de la PR #21.
 
@@ -53,15 +56,15 @@ El código fuente permanece en el repositorio privado `mind-motor`. El repositor
 público `mind-updates` contiene únicamente información de distribución, paquetes
 portables y el canal firmado. Descargar y comprobar el canal no requiere cuenta.
 
-1. Construir y validar los cinco paquetes de la misma versión estable mediante
+1. Construir y validar los paquetes de las plataformas publicadas de la misma versión estable mediante
    `scripts/construir-paquetes.mjs --version-paquete <versión> --salida <carpeta>`.
    Los artefactos contienen solo archivos versionados: incluir el commit completo
    de esta implementación antes de construir.
 2. Firmar con:
    `node scripts/firmar-actualizacion.mjs <versión> <clave-privada.pem> <carpeta-paquetes> <stable.json>`.
-   El script verifica cada paquete, su versión, los cinco destinos y la clave.
+   El script verifica cada paquete, su versión, los destinos publicados y la clave.
 3. Crear una release en borrador con tag `v<versión>` en `byaldodaniel/mind-updates`;
-   subir los cinco paquetes y `stable.json`. Revisar y publicar como versión
+   subir los paquetes de las plataformas publicadas y `stable.json`. Revisar y publicar como versión
    estable más reciente. Las instalaciones la detectarán en su próximo inicio.
 
 Las versiones preliminares nunca se distribuyen automáticamente por este canal.

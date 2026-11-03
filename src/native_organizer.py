@@ -444,8 +444,12 @@ class Windows(writer.Windows):
         if attributes & 0x400:
             raise Refusal('UNSAFE_PATH')
         directory = bool(attributes & 0x10)
-        # Archivos sin compartir escritura: excluye escritores, también a los modificadores de Mind.
-        share = SHARE_ALL if directory else SHARE_READ | SHARE_DELETE
+        # El handle retenido posee DELETE. No compartir DELETE excluye otro
+        # movimiento/borrado mientras esperamos W y hasta cerrar este handle.
+        # Compartirlo permitía que dos procesos adquiriesen el mismo objeto y
+        # lo renombrasen sucesivamente, devolviendo ambos éxito. Las carpetas
+        # admiten operaciones sobre hijos, pero tampoco otro DELETE sobre sí.
+        share = (SHARE_ALL & ~SHARE_DELETE) if directory else SHARE_READ
         access = DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | (FILE_READ_DATA if read and not directory else 0)
         options = SYNC_IO | OPEN_REPARSE_POINT | (DIRECTORY_FILE if directory else NON_DIRECTORY_FILE)
         status, result, handle = self._create(parent, name, access, share, FILE_OPEN, options)

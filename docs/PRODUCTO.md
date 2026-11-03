@@ -1,5 +1,13 @@
 # Mind 1.0 como producto portable
 
+Publicación 1.0.0: Windows x64 exclusivamente. Las referencias a otros sistemas
+describen capacidades del desarrollo y no plataformas publicadas en esta entrega.
+La carpeta abierta por el cliente/iniciador permite trabajar sin otra autorización
+de acceso durante la sesión. El iniciador comprueba e instala actualizaciones
+estables firmadas cuando no hay sesiones activas. Véase WORKFLOW_PUBLICACION.md
+en el repositorio de desarrollo.
+
+
 **Mind es un motor que permite a los agentes de IA trabajar la información del
 usuario, a su manera.** El usuario dirige, los agentes interpretan y ejecutan,
 Mind aporta las capacidades técnicas, y los archivos del usuario conservan la

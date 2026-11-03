@@ -1,116 +1,79 @@
-# Mind
+# Mind 1.0 — Windows x64
 
-## Carpeta abierta y actualizaciones automáticas
+Mind permite a tu agente encontrar, leer, crear, modificar y organizar la
+información con la que trabajas. Tus archivos permanecen en su ubicación.
+La carpeta `Base` conserva los índices y la continuidad de tus trabajos.
 
-La carpeta de trabajo que comunica el cliente, el iniciador con `--carpeta`, o
-su directorio de inicio válido tiene acceso completo durante la sesión, sin otro
-formulario de Mind. Para trabajar con otra ubicación, ábrela en el agente.
-Las confirmaciones al borrar y vaciar la papelera se conservan.
-Si el cliente no comunica una carpeta válida, configura su iniciador con
-`mind mcp --carpeta <ruta-absoluta>`; el flujo manual sigue disponible.
-Mind consulta las nuevas versiones estables al iniciar y las instala cuando no
-haya sesiones activas. Sin conexión continúa con la versión instalada.
+## Empezar
 
+1. Extrae el ZIP. Conserva la carpeta `Mind` en una ubicación permanente.
+   No necesita permisos de administrador; incluye Node.js y Python.
+2. Conecta Mind a tu agente una vez (instrucciones abajo).
+3. Abre tu carpeta de trabajo en el agente y pídele que use Mind.
+   La carpeta abierta tiene acceso completo sin otro formulario de Mind.
 
-Mind es un motor que permite a los agentes de IA trabajar tu información, a tu
-manera. Tus archivos permanecen donde están: Mind no los copia. En su carpeta
-`Base` guarda índices, autorizaciones y la continuidad de tus trabajos.
+Si el agente no comunica la carpeta abierta, configura su servidor con
+`mcp --carpeta "C:\ruta\de\tu\proyecto"`. También se reconoce el directorio
+válido desde el que el cliente inicia Mind. La carpeta del programa y su Base
+están protegidas; abre como proyecto la carpeta que contiene tu información.
 
-Esta carpeta ya contiene todo lo que Mind necesita (incluidos Node.js y Python).
-No hay que instalar nada ni configurar nada. Solo necesitas un agente:
-[Claude Code](https://claude.com/claude-code) (en el terminal o en la app de
-Claude) lo reconoce solo; otros agentes con MCP se conectan con un paso (véase
-*Compatibilidad*).
+## Conectar el agente
 
-## Primer uso
+Para un cliente MCP con transporte stdio:
 
-1. **Extrae** el archivo descargado donde quieras, por ejemplo en `Documentos`.
-   Se crea la carpeta `Mind`. No hace falta ser administrador.
-2. **Abre un terminal en la carpeta `Mind`**:
-   - macOS: en el Finder, clic derecho sobre la carpeta → *Servicios* →
-     *Nuevo terminal en la carpeta* (o `cd` hasta ella en Terminal).
-   - Windows: abre la carpeta en el Explorador, escribe `cmd` en la barra de
-     direcciones y pulsa Intro.
-   - Linux: clic derecho → *Abrir en un terminal*.
-3. **Ejecuta `claude`** (o, en la app de Claude, abre una sesión de Code en la
-   carpeta `Mind`). La primera vez, Claude Code pregunta si quieres usar el
-   servidor MCP `mind` de este proyecto: responde que sí. Esa aprobación es
-   tuya; Mind no la concede por ti.
-4. **Pide lo que necesites**, por ejemplo: «Usa Mind para buscar mis notas sobre
-   el presupuesto en la carpeta Documentos/Proyectos».
-5. **Autoriza solo lo que quieras.** Cuando el agente necesite una carpeta, Mind
-   te muestra la ruta y eliges: **solo encontrar** (nombres y fechas),
-   **encontrar y leer**, o **acceso completo** (leer, crear y modificar). Puedes
-   excluir subcarpetas.
+- Programa: `<Mind>\Runtime\node\node.exe`
+- Argumentos: `<Mind>\Motor\bin\mind.js`, `mcp`
+- Variable de entorno: `NODE_OPTIONS` vacía.
 
-Si tu agente no puede mostrar la solicitud, queda pendiente. Apruébala en un
-terminal dentro de esta carpeta con `./mind autorizar` (macOS y Linux) o
-`mind autorizar` (Windows). En macOS y Windows también puedes abrir
-`Autorizar Mind` con doble clic.
+Sustituye `<Mind>` por la ruta absoluta donde extrajiste Mind.
+Si tu cliente pide confiar en el servidor, esa decisión te corresponde a ti.
 
-## Lo que hace Mind en esta versión
+Para Codex CLI, registra el servidor una vez desde PowerShell:
 
-- Indexa las carpetas que autorizas y mantiene los índices al día mientras el
-  agente trabaja; al volver a abrirlo, recupera lo que cambió entretanto.
-- Busca y explora sobre esos índices, lee texto y documentos de oficina
-  (.docx, .xlsx, .pptx, .odt, .ods, .odp; solo lectura), crea archivos nuevos y
-  modifica texto con control de versiones (nunca sobrescribe a ciegas).
-- Guarda la continuidad (decisiones, resultados, contexto) para retomarla en
-  otra sesión o con otro agente, y la exporta o importa.
-- Organiza: crea carpetas, mueve y renombra sin reemplazar nunca nada. Borrar
-  lleva a la papelera de Mind (`.papelera-mind` dentro de la carpeta), siempre
-  con tu confirmación; vaciarla te pide confirmar dos veces.
-- Etiqueta archivos con propiedades (sin modificarlos), busca por ellas y
-  mantiene índices personalizados en CSV.
-- Funciones reutilizables que el agente ejecuta con los permisos que diste; las
-  automáticas (por horario o evento) solo con tu autorización, también con Mind
-  cerrado mediante `mind programador instalar`.
-- Respaldos cifrados de la `Base` (`mind respaldo configurar`), recuperables con
-  un código físico o un archivo protegido.
+    codex mcp add mind --env NODE_OPTIONS= -- "C:\ruta\Mind\Runtime\node\node.exe" "C:\ruta\Mind\Motor\bin\mind.js" mcp
 
-## Lo que conviene saber
+Comprueba primero `codex mcp list`: si ya existe un servidor `mind`, revisa
+su ubicación antes de sustituirlo. Reinicia la sesión del agente después del registro.
 
-- Mind solo funciona mientras tu agente lo usa: no deja programas en segundo
-  plano.
-- Revisa o retira permisos con `./mind permisos` (`mind permisos` en Windows).
-- `Base` contiene datos sobre tus archivos (nombres, rutas, fechas y la
-  continuidad). Trátala como información personal y no la compartas.
-- Para actualizar Mind, con el agente cerrado: `mind actualizar <paquete nuevo>`
-  (`./mind` en macOS y Linux). Sustituye el Motor y los runtimes, conserva tu
-  `Base` y guarda la versión anterior en `.anterior-<versión>`.
-- Mind no es un aislamiento de seguridad del sistema. Un agente que ya puede
-  ejecutar programas con tu usuario tiene los permisos que tu equipo le dé. Mind
-  controla lo que se hace a través de Mind.
-- macOS: Mind comprueba la huella SHA-256 de sus propios runtimes y solo
-  entonces retira la marca de cuarentena dentro de su carpeta `Runtime`. Si
-  macOS bloquea `Autorizar Mind` con doble clic, ábrelo con clic derecho →
-  *Abrir*, o usa `./mind autorizar` en el terminal.
+Claude Code puede descubrir `.mcp.json` al abrir la carpeta de Mind. Para usar
+sin formularios otro proyecto, configura Mind como servidor de ese cliente y
+abre el proyecto, o añade `--carpeta` con la ruta del proyecto a sus argumentos.
+Otros clientes usan la configuración stdio indicada arriba.
 
-## Compatibilidad
+## Qué puedes hacer
 
-| Agente | Estado |
-|---|---|
-| Claude Code (CLI o app de escritorio) | Comprobado desde la carpeta extraída: descubrimiento, conexión y uso. |
-| Codex CLI, Gemini CLI y otros agentes con MCP | Se registran una vez (abajo). Conexión del servidor comprobada; uso con el modelo, sin comprobar en esta versión. |
-| Agentes con terminal, sin MCP | Operaciones individuales: `./mind herramienta <nombre> '<json>'` (`mind ayuda`). |
+- Buscar y explorar mediante índices, mantenidos al día durante la sesión.
+- Leer texto y extraer texto de documentos de oficina (solo lectura).
+- Crear y modificar texto con control de versión.
+- Crear carpetas, mover y renombrar sin reemplazar archivos existentes.
+- Borrar con confirmación y recuperar desde la papelera de Mind. Vaciarla
+  requiere una segunda confirmación.
+- Asignar propiedades, crear índices CSV y conservar continuidad entre sesiones.
+- Ejecutar funciones y configurar automatizaciones opcionales.
+- Crear respaldos cifrados de la Base mediante `mind respaldo`.
 
-### Conectar otros agentes con MCP
+## Actualizaciones
 
-Mind es un servidor MCP por stdio. Sustituye `<Mind>` por la ruta absoluta de
-esta carpeta (en macOS y Linux, el ejecutable es `<Mind>/Runtime/node/bin/node`):
+Mind comprueba las nuevas versiones estables al iniciar. Si hay una para Windows,
+la descarga, verifica su firma y la instala cuando no haya sesiones activas.
+Sin conexión continúa con la versión instalada. Los archivos personales y la Base
+se conservan; si la comprobación de arranque falla intenta recuperar la versión anterior.
 
-- **Codex CLI** (configuración de tu usuario):
-  `codex mcp add mind --env NODE_OPTIONS= -- "<Mind>\Runtime\node\node.exe" "<Mind>\Motor\bin\mind.js" mcp`
-- **Gemini CLI** (solo para esta carpeta): en un terminal dentro de ella,
-  `gemini mcp add mind "Runtime\node\node.exe" "Motor\bin\mind.js" mcp`. Abre
-  `gemini` aquí y acepta confiar en la carpeta; sin eso, Gemini deja el servidor
-  desactivado.
-- **Cualquier otro cliente MCP:** orden `<Mind>\Runtime\node\node.exe`,
-  argumentos `<Mind>\Motor\bin\mind.js mcp`, transporte stdio, variable
-  `NODE_OPTIONS` vacía.
+Una copia anterior al actualizador automático necesita recibir este ZIP una vez.
+Con todos los agentes cerrados, usa desde esa instalación:
 
-Mind siempre usa la `Base` de esta carpeta, se lance desde donde se lance.
-Las autorizaciones de carpetas siguen siendo tuyas en todos los agentes.
+    mind actualizar "C:\ruta\Mind-1.0.0-win32-x64.zip"
 
-Más detalles en `Motor/docs/PRODUCTO.md`. Licencia: `LICENCIA.txt`; componentes
-de terceros: `LICENCIAS/`.
+## Alcance y datos
+
+Esta publicación es para Windows x64. Linux y macOS quedan para entregas futuras.
+El acceso a la carpeta abierta dura la sesión; las exclusiones se respetan.
+Si el cliente no comunica un proyecto válido, sigue disponible el acceso manual
+con `mind autorizar`. Se puede revisar con `mind permisos`.
+
+Mind no proporciona aislamiento del sistema operativo. Las operaciones que un
+agente realice por otras herramientas tienen los permisos que le dé su equipo.
+La Base contiene rutas, metadatos y continuidad: consérvala como información personal.
+Los respaldos cifrados no tienen una auditoría criptográfica externa.
+
+Ayuda: `mind ayuda`. Licencia: `LICENCIA.txt`. Componentes: `LICENCIAS/`.
