@@ -498,6 +498,22 @@ try {
     check(exit.code === 0, `Código de salida ${exit.code}`);
     return { desde: before, hasta: after, anterior: path.basename(result.backup ?? '') };
   });
+  await step(24, 'Carpeta abierta: leer, crear y continuidad sin formularios', SIMULATED, async () => {
+    const project = path.join(temporary, 'Proyecto abierto ñ');
+    await fs.mkdir(project);
+    await fs.writeFile(path.join(project, 'nota.txt'), 'Información ficticia del proyecto');
+    const node = path.join(mind, 'Runtime', 'node', windows ? 'node.exe' : path.join('bin', 'node'));
+    const client = startMcp({ command: node, commandArgs: [path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project, baseEnv: isolatedEnv(), capabilities: {} });
+    clients.push(client);
+    await client.initialize();
+    check(!(await client.call('leer', { ruta: 'nota.txt' })).isError, 'Leer sin autorización adicional');
+    check(!(await client.call('crear', { ruta: 'resultado.txt', contenido: 'Resultado ficticio' })).isError, 'Crear sin autorización adicional');
+    check(!(await client.call('continuidad_registrar', { contenido: 'Prueba de carpeta abierta' })).isError, 'Continuidad sin autorización adicional');
+    check(client.elicitations.length === 0, 'No debe pedir formularios de acceso');
+    check((await client.call('estado')).data.carpetas.length === 1, 'El ámbito es solo el proyecto abierto');
+    check((await client.close()).code === 0, 'Cierre limpio');
+    return { formularios: 0 };
+  });
 } finally {
   for (const client of clients) {
     client.child.stdin.end();
