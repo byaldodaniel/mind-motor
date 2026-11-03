@@ -20,7 +20,7 @@ try {
   const before = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8'));
   const { resolveLayout } = await import(pathToFileURL(path.join(mind, 'Motor', 'src', 'layout.js')));
   const { openSession } = await import(pathToFileURL(path.join(mind, 'Motor', 'src', 'session.js')));
-  const session = await openSession({ layout: await resolveLayout(), motorVersion: before.mindVersion, observe: false });
+  const session = await openSession({ layout: await resolveLayout({ base: path.join(mind, 'Base'), env: { ...process.env, MIND_PYTHON: path.join(mind, 'Runtime', 'python', 'python.exe') } }), motorVersion: before.mindVersion, observe: false });
   const record = await session.motor.recordContinuity({ content: 'Decisión ficticia anterior a actualizar' });
   await session.close();
   const marker = JSON.parse(await fs.readFile(path.join(mind, 'Base', 'mind-base.json'), 'utf8'));
@@ -30,10 +30,10 @@ try {
   const mock = path.join(temporary, 'canal-local.mjs');
   await fs.writeFile(mock, ["import fs from 'node:fs/promises';", `globalThis.fetch = async url => new Response(await fs.readFile(String(url).endsWith('stable.json') ? ${JSON.stringify(feed)} : ${JSON.stringify(archive)}));`, ''].join('\n'));
   const node = path.join(mind, 'Runtime', 'node', 'node.exe');
-  client = startMcp({ command: node, commandArgs: ['--import', mock, path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project,
-    capabilities: {}, env: { NODE_OPTIONS: '', MIND_UPDATE_RESTART: '' } });
+  client = startMcp({ command: node, commandArgs: ['--import', pathToFileURL(mock).href, path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project,
+    capabilities: {}, env: { NODE_OPTIONS: '', MIND_UPDATE_RESTART: '', MIND_BASE: path.join(mind, 'Base'), MIND_PYTHON: path.join(mind, 'Runtime', 'python', 'python.exe') } });
   client.child.stderr.on('data', chunk => process.stderr.write(chunk));
-  const initialized = await client.initialize();
+  const initialized = await Promise.race([client.initialize(), client.exited.then(exit => { throw new Error(`El iniciador terminó antes de conectar (${exit.code}): ${client.stderr()}`); })]);
   assert.equal(initialized.result.serverInfo.name, 'mind');
   const after = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8'));
   assert.notEqual(after.mindVersion, before.mindVersion);
