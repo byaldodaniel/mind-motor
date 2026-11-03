@@ -28,7 +28,7 @@ try {
   await fs.mkdir(project);
   await fs.writeFile(path.join(project, 'nota.txt'), 'Texto ficticio');
   const mock = path.join(temporary, 'canal-local.mjs');
-  await fs.writeFile(mock, `import fs from 'node:fs/promises';\nglobalThis.fetch = async url => new Response(await fs.readFile(String(url).endsWith('stable.json') ? ${JSON.stringify(feed)} : ${JSON.stringify(archive)}));\n`);
+  await fs.writeFile(mock, ["import fs from 'node:fs/promises';", `globalThis.fetch = async url => new Response(await fs.readFile(String(url).endsWith('stable.json') ? ${JSON.stringify(feed)} : ${JSON.stringify(archive)}));`, ''].join('\n'));
   const node = path.join(mind, 'Runtime', 'node', 'node.exe');
   client = startMcp({ command: node, commandArgs: ['--import', mock, path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project,
     capabilities: {}, env: { NODE_OPTIONS: '', MIND_UPDATE_RESTART: '' } });
