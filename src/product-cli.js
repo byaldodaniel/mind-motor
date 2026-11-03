@@ -80,8 +80,9 @@ async function withSession(options, task, { observe = false } = {}) {
     if (options.autoWorkspace) {
       const { createWorkspaceAccess } = await import('./workspace-access.js');
       const workspace = createWorkspaceAccess(session, { paths: options.workspacePaths });
-      await workspace.initialize({ clientCapabilities: {} });
       await session.start();
+      await session.sync();
+      await workspace.initialize({ clientCapabilities: {} });
       return await task(workspace.session);
     }
     await session.start();

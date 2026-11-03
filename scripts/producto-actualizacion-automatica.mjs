@@ -15,7 +15,7 @@ const archive = await fs.realpath(archiveArgument);
 const feed = await fs.realpath(feedArgument);
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-auto-producto-'));
 let client;
-const timeout = setTimeout(() => { client?.child.kill(); process.stderr.write('Prueba automática excedida.\n'); process.exit(1); }, 120000);
+const timeout = setTimeout(() => { client?.child.kill(); process.stderr.write('Prueba automática excedida.\n' + (client?.stderr() ?? '')); process.exit(1); }, 120000);
 try {
   const before = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8'));
   const { resolveLayout } = await import(pathToFileURL(path.join(mind, 'Motor', 'src', 'layout.js')));
@@ -32,6 +32,7 @@ try {
   const node = path.join(mind, 'Runtime', 'node', 'node.exe');
   client = startMcp({ command: node, commandArgs: ['--import', mock, path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project,
     capabilities: {}, env: { NODE_OPTIONS: '', MIND_UPDATE_RESTART: '' } });
+  client.child.stderr.on('data', chunk => process.stderr.write(chunk));
   const initialized = await client.initialize();
   assert.equal(initialized.result.serverInfo.name, 'mind');
   const after = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8'));

@@ -45,7 +45,7 @@ export async function runMcpSession({ layout, input = process.stdin, output = pr
         return tools.call(name, args, context);
       } };
     },
-    onInitialized: async (connection) => { await workspace.initialize(connection); await session.start(); },
+    onInitialized: async (connection) => { await session.start(); await session.sync(); await workspace.initialize(connection); },
     onRootsChanged: (connection) => workspace.refresh(connection),
     onClose: close,
     log,

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const MAX_FEED = 128 * 1024;
 const MAX_PACKAGE = 512 * 1024 * 1024;
-const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
 export function githubDownload(value, repository) {
   const url = new URL(value);

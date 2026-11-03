@@ -74,6 +74,23 @@ test('sin raíces MCP, el directorio de inicio del cliente abre el proyecto sin 
   assert.equal(client.elicitations.length, 0);
 });
 
+test('la carpeta abierta queda observada desde la primera sesión', async t => {
+  const f = await fixture(t);
+  const client = f.start({ cwd: f.a });
+  await client.initialize();
+  assert.equal((await client.call('leer', { ruta: 'nota.txt' })).isError, false);
+  await fs.writeFile(path.join(f.a, 'externo.txt'), 'Cambio ficticio fuera de Mind');
+  let status;
+  const deadline = Date.now() + 10000;
+  do {
+    status = (await client.call('estado')).data.carpetas[0];
+    if (status.indice.archivos === 2) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  assert.equal(status.observacion, 'watching');
+  assert.equal(status.indice.archivos, 2, 'el observador publica el cambio sin una búsqueda que fuerce reconciliación');
+});
+
 test('el acceso automático conserva exclusiones, reducciones explícitas y la confirmación al borrar', async t => {
   const f = await fixture(t);
   const client = f.start({ cwd: f.a });

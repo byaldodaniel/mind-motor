@@ -145,6 +145,15 @@ async function copyFile(source, destination, { crlf = false, mode } = {}) {
   if (mode !== undefined && process.platform !== 'win32') await fsp.chmod(destination, mode);
 }
 
+/** El paquete sale de los blobs del commit, incluso si el editor escribió CRLF. */
+async function copyRepositoryFile(relative, destination, { crlf = false, mode = 0o644 } = {}) {
+  let data = execFileSync('git', ['show', `HEAD:${relative}`], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
+  if (crlf) data = Buffer.from(data.toString('utf8').replace(/\r?\n/gu, '\r\n'));
+  await fsp.mkdir(path.dirname(destination), { recursive: true });
+  await fsp.writeFile(destination, data, { flag: 'wx', mode });
+  if (process.platform !== 'win32') await fsp.chmod(destination, mode);
+}
+
 /** Configuración MCP de proyecto para Claude Code: rutas relativas a la carpeta de Mind. */
 function mcpConfig(target) {
   const windows = target.platform === 'win32';
@@ -210,7 +219,7 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
   const tracked = git(['ls-files', '-z', '--', ...MOTOR_PATHS]).split('\0').filter(Boolean);
   if (tracked.length === 0) fail('No hay archivos del Motor versionados.');
   for (const relative of tracked) {
-    await copyFile(path.join(ROOT, ...relative.split('/')), path.join(stage, 'Motor', ...relative.split('/')));
+    await copyRepositoryFile(relative, path.join(stage, 'Motor', ...relative.split('/')));
   }
 
   await extractNode(nodeArchive, stage, target);
@@ -218,22 +227,21 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
 
   // Documentación, instrucciones para agentes e iniciadores.
   for (const name of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'LEEME.md']) {
-    await copyFile(path.join(PACKAGING, 'plantilla', name), path.join(stage, name));
+    await copyRepositoryFile(`packaging/plantilla/${name}`, path.join(stage, name));
   }
-  const launchers = path.join(PACKAGING, 'iniciadores');
-  if (target.platform === 'win32') {
-    await copyFile(path.join(launchers, 'mind.cmd'), path.join(stage, 'mind.cmd'), { crlf: true });
-    await copyFile(path.join(launchers, 'Autorizar Mind.cmd'), path.join(stage, 'Autorizar Mind.cmd'), { crlf: true });
+    if (target.platform === 'win32') {
+    await copyRepositoryFile('packaging/iniciadores/mind.cmd', path.join(stage, 'mind.cmd'), { crlf: true });
+    await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.cmd', path.join(stage, 'Autorizar Mind.cmd'), { crlf: true });
   } else {
-    await copyFile(path.join(launchers, 'mind'), path.join(stage, 'mind'), { mode: 0o755 });
+    await copyRepositoryFile('packaging/iniciadores/mind', path.join(stage, 'mind'), { mode: 0o755 });
     if (target.platform === 'darwin') {
-      await copyFile(path.join(launchers, 'Autorizar Mind.command'), path.join(stage, 'Autorizar Mind.command'), { mode: 0o755 });
+      await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.command', path.join(stage, 'Autorizar Mind.command'), { mode: 0o755 });
     }
   }
   await fsp.writeFile(path.join(stage, '.mcp.json'), mcpConfig(target), { flag: 'wx' });
 
   // Licencias.
-  await copyFile(path.join(ROOT, 'LICENSE'), path.join(stage, 'LICENCIA.txt'));
+  await copyRepositoryFile('LICENSE', path.join(stage, 'LICENCIA.txt'));
   await copyFile(path.join(stage, 'Runtime', 'node', 'LICENSE'), path.join(stage, 'LICENCIAS', 'node.txt'));
   await copyFile(await findPythonLicense(stage, target), path.join(stage, 'LICENCIAS', 'python.txt'));
   await fsp.writeFile(path.join(stage, 'LICENCIAS', 'AVISOS.md'), noticesText(components, id), { flag: 'wx' });
@@ -297,8 +305,8 @@ async function main(argv) {
   // --version-paquete: solo para probar "mind actualizar" con un segundo paquete real (CI).
   const version = values('--version-paquete')[0] ?? declared;
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)) fail(`Versión no válida: ${version}`);
-  const dirty = git(['status', '--porcelain', '--', ...MOTOR_PATHS, 'packaging']).trim();
-  if (dirty) process.stdout.write(`Aviso: hay cambios sin commit en el Motor o en packaging; el paquete no será reproducible desde el commit:\n${dirty}\n`);
+  const dirty = git(['status', '--porcelain', '--', ...MOTOR_PATHS, 'packaging', 'scripts/construir-paquetes.mjs', '.gitattributes']).trim();
+  if (dirty) fail(`Hay cambios sin commit; registra el código antes de construir:\n${dirty}`);
   const mtime = Number(process.env.SOURCE_DATE_EPOCH ?? git(['log', '-1', '--format=%ct']).trim());
   if (!Number.isSafeInteger(mtime) || mtime <= 0) fail('SOURCE_DATE_EPOCH no es válido.');
 
