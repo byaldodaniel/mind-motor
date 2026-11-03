@@ -380,11 +380,12 @@ test('los índices corruptos o enlazados fallan de forma explícita y no se repa
   const valid = JSON.parse(await fs.readFile(filename, 'utf8'));
   const variants = [
     '{incompleto', 'null', '{}',
-    JSON.stringify({ ...valid, version: 3 }),
+    JSON.stringify({ ...valid, version: 4 }),
     JSON.stringify({ ...valid, scopeId: 'd'.repeat(64) }),
     JSON.stringify({ ...valid, entries: [...valid.entries].reverse() }),
     JSON.stringify({ ...valid, entries: [{ ...valid.entries[0], path: '../fuera' }] }),
     JSON.stringify({ ...valid, entries: [{ ...valid.entries[0], extra: true }] }),
+    JSON.stringify({ ...valid, entries: [{ ...valid.entries[0], identity: 'identidad inventada' }] }),
   ];
   for (const text of variants) {
     await fs.writeFile(filename, text);

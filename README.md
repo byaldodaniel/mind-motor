@@ -1,5 +1,17 @@
 # Mind 1.0 — Motor
 
+> **Producto portable (candidato 1.0.0-rc.1).** Mind se distribuye como una carpeta
+> que el usuario extrae y abre desde un agente de IA compatible: el agente inicia
+> `mind mcp`, el usuario autoriza carpetas en un formulario de su cliente o en la
+> consola de Mind, y la sesión mantiene los índices al día mientras dura. Véanse
+> [docs/PRODUCTO.md](docs/PRODUCTO.md) (estructura, experiencia, herramientas,
+> garantías y límites) y [docs/AVANCE.md](docs/AVANCE.md) (estado por componente,
+> decisiones vigentes y criterios de terminado). Prueba con un agente real:
+> [docs/evidencia/AGENTE_REAL_2026-11-01.md](docs/evidencia/AGENTE_REAL_2026-11-01.md).
+>
+> En desarrollo, el punto de entrada del producto es `node bin/mind.js <orden> --base <ruta>`
+> (`mind ayuda` lista las órdenes). La CLI del núcleo descrita abajo (`src/cli.js`) se conserva.
+
 Núcleo local construido desde cero. Utiliza JavaScript con módulos ESM y Node.js
 24 LTS. La lectura segura de originales requiere además Python 3.12 o posterior;
 usa su biblioteca estándar, sin paquetes adicionales ni compilación.
@@ -129,6 +141,31 @@ escrituras concurrentes, ni procedencia histórica del archivo, ni protección a
 cambios privilegiados de montajes. Si falta una primitiva segura, se deniega sin
 recurrir a una apertura más débil. Véase [docs/INCREMENTO_03.md](docs/INCREMENTO_03.md).
 
+## Funciones y ejecución manual — Función 04
+
+El anfitrión registra definiciones de funciones como datos y las ejecuta a mano
+con ejecutores de confianza que él mismo aporta al abrir el Motor:
+
+```js
+const motor = await openMotor({ baseDirectory, functionExecutors: {
+  'contar-palabras': {
+    validateInput: (input) => typeof input?.text === 'string',
+    run: ({ input }) => ({ count: input.text.split(/\s+/u).filter(Boolean).length }),
+  },
+} });
+await motor.createFunction('resumen', { descripcion: 'Contar palabras' });
+const binding = await motor.bindFunction({ functionId: 'resumen', executor: 'contar-palabras' });
+const { result } = await motor.runFunction({ binding, input: { text: 'Texto ficticio' } });
+```
+
+Una definición nunca elige su ejecutor, sus permisos ni código: es un dato. El
+vínculo se liga a la versión exacta aprobada (generación UUID y huella SHA-256).
+Actualizar o retirar la definición lo invalida para siempre. Las capacidades se
+entregan por invocación y solo si el ejecutor las declaró. Son operaciones del
+anfitrión; no hay horarios, eventos ni ejecutores externos. Detalles en
+[docs/EJECUCION_FUNCIONES.md](docs/EJECUCION_FUNCIONES.md) y
+[docs/INTERFACES.md](docs/INTERFACES.md).
+
 ## Creación segura de un archivo de texto — Función 03
 
 El anfitrión concede, tras la autorización explícita del usuario, un permiso de un
@@ -182,6 +219,35 @@ movimiento ni eliminación. Detalles en
 [docs/FUNCION_03_MODIFICAR.md](docs/FUNCION_03_MODIFICAR.md) y
 [docs/INTERFACES.md](docs/INTERFACES.md).
 
+## Continuidad entre agentes — Función 05
+
+El Motor conserva en la Base información útil de un trabajo (instrucciones,
+decisiones, resultados, referencias…) y permite que otro agente la recupere para
+continuarlo, solo con autorización del anfitrión:
+
+```js
+// Anfitrión: selecciona qué contexto recibe el agente y si puede registrar.
+const permiso = await motor.grantContinuityAccess({
+  requester: agente, ids: [idResultado], includeReferenced: true, allowRecord: true, source: 'Anfitrión B',
+});
+const vista = motor.bindContinuityAgent({ requester: agente, authorization: permiso });
+// Agente: solo recibe la vista { readContext, recordResult }.
+const contexto = await vista.readContext({ format: 'markdown' }); // json | markdown | object
+await vista.recordResult({ kind: 'resultado', content: '…', references: [{ entry: idResultado }] });
+motor.revokeContinuityAccess(permiso);
+```
+
+La administración (`recordContinuity`, `getContinuity`, `updateContinuity`,
+`relateContinuity`, `retireContinuity`, `listContinuityIds`, `exportContinuity`,
+`importContinuity`, conceder, describir y retirar accesos) es del anfitrión. El
+agente no lista la Base ni ve registros fuera de su selección. Los permisos se ligan
+a la identidad de objeto del agente y a esta instancia del Motor; los registros
+persisten entre procesos y el contenido es flexible, sin proyectos obligatorios.
+No se copian originales ni se accede a historiales de otras plataformas. Detalles
+en [docs/CONTINUIDAD.md](docs/CONTINUIDAD.md),
+[docs/CONTINUIDAD_AGENTES.md](docs/CONTINUIDAD_AGENTES.md) y
+[docs/INTERFACES.md](docs/INTERFACES.md).
+
 ## Uso selectivo
 
 Mind es opcional. Los agentes pueden usarlo cuando aporte valor y acudir
@@ -211,10 +277,20 @@ coincidencias parciales y filtros de metadatos, en los índices vigentes de las
 carpetas indicadas por el anfitrión. No vuelve a recorrer las carpetas ni abre
 contenido. Detalles en [docs/INCREMENTO_09.md](docs/INCREMENTO_09.md).
 
-La indexación, la consulta del índice y la búsqueda son administrativas; registrar una carpeta
+`motor.openIndexObserver({ onReport })` abre, solo si el anfitrión lo pide, la
+observación de cambios de su sesión: `observe(folderId)` reconcilia una vez y
+después reconcilia con `indexFolder` cuando el sistema avisa de cambios, para que
+`searchFiles` refleje lo que el usuario modifica fuera de Mind. No hay servicio
+residente: sin abrirla no existe nada, nada mantiene vivo el proceso y
+`close()` libera todo. Retirar la carpeta con `revokeFolder` detiene su
+observación antes de resolver; una retirada desde otro proceso se detecta en
+segundos. Detalles en [docs/FUNCION_01_OBSERVACION.md](docs/FUNCION_01_OBSERVACION.md).
+
+La indexación, la consulta del índice, la búsqueda y la observación son administrativas; registrar una carpeta
 no concede estas operaciones a un agente. No se añaden comandos CLI ni permisos
-paralelos. Continuidad y definiciones de funciones están integradas en el código
-como módulos internos, sin métodos públicos en Motor ni ejecución de funciones.
+paralelos. Las definiciones de funciones están integradas en el código como módulo
+interno, sin métodos públicos en Motor ni ejecución de funciones; la continuidad
+tiene su propia sección.
 Detalles en [docs/INTEGRACION_MODULOS.md](docs/INTEGRACION_MODULOS.md).
 
 ## Pruebas
@@ -237,9 +313,9 @@ la misma suite en Windows, macOS y Linux con Node.js 24 y Python 3.12.
 
 La API programática y los límites para extender el núcleo están documentados en
 [docs/INTERFACES.md](docs/INTERFACES.md). Hay lectura, creación y modificación de
-texto con permiso explícito, indexación y búsqueda administrativas, y núcleos
-internos de continuidad y definiciones de funciones. Todavía no hay integración de
-agentes, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
+texto con permiso explícito, indexación y búsqueda administrativas, continuidad
+entre agentes con acceso controlado y el núcleo interno de definiciones de
+funciones. Todavía no hay conexión con agentes externos, ejecución de funciones, automatizaciones, servidores ni interfaz gráfica. Los registros
 actuales son datos técnicos de prueba, no una estructura obligatoria para organizar
 la información del usuario.
 

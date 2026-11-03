@@ -36,3 +36,8 @@ folder-index-*.lock
 
 # Registros locales de continuidad
 continuity-*.json
+
+# Worktrees locales de agentes de desarrollo
+/.claude/worktrees/
+/dist/
+/.cache/

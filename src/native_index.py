@@ -233,8 +233,8 @@ class Windows:
         buffer = c.create_string_buffer(size)
         result = []
         while True:
-            # FileFullDirectoryInfo (14) continúa la enumeración del handle.
-            if not self.kernel.GetFileInformationByHandleEx(handle, 14, buffer, size):
+            # FileIdBothDirectoryInfo (10): metadatos e identidad del mismo recorrido.
+            if not self.kernel.GetFileInformationByHandleEx(handle, 10, buffer, size):
                 error = c.get_last_error()
                 if error == 18:  # ERROR_NO_MORE_FILES
                     return result
@@ -249,9 +249,12 @@ class Windows:
                 attributes = int.from_bytes(raw[offset + 56:offset + 60], 'little')
                 length = int.from_bytes(raw[offset + 60:offset + 64], 'little')
                 tag = int.from_bytes(raw[offset + 64:offset + 68], 'little')  # EaSize: etiqueta de reparse
-                name = raw[offset + 68:offset + 68 + length].decode('utf-16-le', 'surrogatepass')
+                file_id = int.from_bytes(raw[offset + 96:offset + 104], 'little')
+                name = raw[offset + 104:offset + 104 + length].decode('utf-16-le', 'surrogatepass')
                 if name not in ('.', '..'):
-                    result.append(self._child(name, attributes, tag, created, written, changed, end, volume))
+                    child = self._child(name, attributes, tag, created, written, changed, end, volume)
+                    child.identity = (volume, file_id) if file_id else None
+                    result.append(child)
                 if following == 0:
                     break
                 offset += following
@@ -272,9 +275,23 @@ class Windows:
         self.kernel.CloseHandle(handle)
 
 
-def scan(root, max_entries, backend=None, before_open=None):
-    """Devuelve registros e incidencias. before_open solo es una barrera de pruebas."""
+# Windows y macOS no distinguen mayúsculas por defecto: una exclusión debe cubrir
+# el mismo nombre escrito de otra forma.
+FOLD_CASE = os.name == 'nt' or sys.platform == 'darwin'
+
+
+def _key(relative):
+    return relative.lower() if FOLD_CASE else relative
+
+
+def scan(root, max_entries, backend=None, before_open=None, exclude=()):
+    """Devuelve registros e incidencias. before_open solo es una barrera de pruebas.
+
+    exclude: rutas relativas ("/") que el usuario excluyó. No se registran ni se
+    abren: tampoco se listan ni se recorren sus descendientes.
+    """
     backend = backend or (Windows() if os.name == 'nt' else Posix())
+    excluded = frozenset(_key(item) for item in exclude)
     try:
         handle, volume = backend.open_root(root)
     except Refusal as error:
@@ -307,6 +324,8 @@ def scan(root, max_entries, backend=None, before_open=None):
                 backend.close(parent)
                 continue
             relative = f'{base}/{child.name}' if base else child.name
+            if excluded and _key(relative) in excluded:
+                continue
             if child.error == 'NAME_NOT_UTF8':
                 issues.append({'path': base, 'code': child.error})
                 continue
@@ -315,7 +334,8 @@ def scan(root, max_entries, backend=None, before_open=None):
                 continue
             record = {'path': relative, 'type': child.type, 'size': child.size,
                       'modifiedMs': child.modified, 'changedMs': child.changed,
-                      'createdMs': child.created, 'listing': child.listing}
+                      'createdMs': child.created, 'listing': child.listing,
+                      'identity': f'{os.name}:' + ':'.join(str(part) for part in child.identity) if child.identity else None}
             add(record)
             if child.type != 'directory' or child.listing is not None:
                 continue
@@ -347,7 +367,10 @@ def scan(root, max_entries, backend=None, before_open=None):
 def run():
     try:
         request = json.loads(sys.stdin.buffer.readline(65536))
-        records, issues = scan(request['root'], int(request['maxEntries']))
+        exclude = request.get('exclude', [])
+        if not isinstance(exclude, list) or not all(isinstance(item, str) and item for item in exclude):
+            raise Refusal('SAFE_SCAN_FAILED')
+        records, issues = scan(request['root'], int(request['maxEntries']), exclude=exclude)
         sys.stdout.write(json.dumps({'records': records, 'issues': issues}))
         return 0
     except (Refusal, ScopeError) as error:

@@ -22,6 +22,7 @@ const messages = {
  * @property {string | null} modifiedAt
  * @property {string | null} changedAt Cambio de metadatos (ctime).
  * @property {string | null} createdAt null si el sistema no lo informa.
+ * @property {string | null} identity Identidad del objeto (volumen e inode/FileId), obtenida por el auxiliar seguro.
  * @property {EntryState} state
  * @property {string | null} reason Código que explica un estado distinto de "indexed".
  */
@@ -37,7 +38,7 @@ function iso(milliseconds) {
  * Ejecuta el auxiliar nativo. No hay alternativa por rutas: si el recorrido por
  * referencias no está disponible, la operación se deniega.
  */
-function runHelper({ root, maxEntries, pythonExecutable }) {
+function runHelper({ root, maxEntries, pythonExecutable, exclude = [] }) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonExecutable, ['-I', '-B', helper], {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -69,7 +70,7 @@ function runHelper({ root, maxEntries, pythonExecutable }) {
         reject(new MotorError('SAFE_SCAN_FAILED', messages.SAFE_SCAN_FAILED, { cause }));
       }
     });
-    child.stdin.end(`${JSON.stringify({ root, maxEntries })}\n`);
+    child.stdin.end(`${JSON.stringify({ root, maxEntries, ...(exclude.length > 0 ? { exclude } : {}) })}\n`);
   });
 }
 
@@ -104,7 +105,7 @@ export function mergeScan(scanned, { previous, maxEntries }) {
       const before = known.get(record.path);
       add(before ? { ...before, state: 'unverified', reason: record.error } : {
         path: record.path, type: 'unknown', size: null, modifiedAt: null,
-        changedAt: null, createdAt: null, state: 'unverified', reason: record.error,
+        changedAt: null, createdAt: null, identity: null, state: 'unverified', reason: record.error,
       });
       carryDescendants(record.path, record.error);
       continue;
@@ -116,6 +117,7 @@ export function mergeScan(scanned, { previous, maxEntries }) {
       modifiedAt: iso(record.modifiedMs),
       changedAt: iso(record.changedMs),
       createdAt: record.createdMs > 0 ? iso(record.createdMs) : null,
+      identity: record.identity ?? null,
       state: record.listing ? 'not-listed' : 'indexed',
       reason: record.listing ?? null,
     });
@@ -134,7 +136,7 @@ export function mergeScan(scanned, { previous, maxEntries }) {
  * @param {{ previous: IndexEntry[], maxEntries: number, pythonExecutable: string }} options
  * @returns {Promise<{ entries: IndexEntry[], issues: ScanIssue[] }>}
  */
-export async function scanFolder(root, { previous, maxEntries, pythonExecutable }) {
-  const scanned = await runHelper({ root, maxEntries, pythonExecutable });
+export async function scanFolder(root, { previous, maxEntries, pythonExecutable, exclude = [] }) {
+  const scanned = await runHelper({ root, maxEntries, pythonExecutable, exclude });
   return mergeScan(scanned, { previous, maxEntries });
 }

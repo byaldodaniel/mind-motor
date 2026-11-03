@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { readJson, writeJson, removeJson } from './storage.js';
-import { contains, samePath } from './paths.js';
+import { contains, samePath, normalizeExclusions } from './paths.js';
 
 const VALID_ID = /^[a-f0-9]{64}$/;
 const FILENAME = /^folder-authorization-([a-f0-9]{64})\.json$/;
@@ -38,8 +38,12 @@ function authorizationId(canonical) {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
-/** Registro local del usuario. No representa permisos concedidos a un agente. */
-export function createFolderRegistry(baseDirectory, motorDirectory) {
+/**
+ * Registro local del usuario. No representa permisos concedidos a un agente.
+ * protectedDirectories: ubicaciones adicionales que ninguna carpeta autorizada
+ * puede contener ni ocupar (en el producto, la carpeta completa de Mind).
+ */
+export function createFolderRegistry(baseDirectory, motorDirectory, protectedDirectories = []) {
   function filename(id) {
     if (typeof id !== 'string' || !VALID_ID.test(id)) {
       throw new MotorError('INVALID_AUTHORIZATION_ID', 'El identificador de autorización no es válido.');
@@ -48,7 +52,7 @@ export function createFolderRegistry(baseDirectory, motorDirectory) {
   }
 
   function rejectInternal(canonical) {
-    for (const internal of [baseDirectory, motorDirectory]) {
+    for (const internal of [baseDirectory, motorDirectory, ...protectedDirectories]) {
       if (contains(internal, canonical) || contains(canonical, internal)) {
         throw new MotorError('FOLDER_OVERLAPS_INTERNAL', 'La carpeta de información no puede contener ni estar dentro del Motor o de la Base.');
       }
@@ -59,18 +63,26 @@ export function createFolderRegistry(baseDirectory, motorDirectory) {
     const stored = await readJson(filename(id));
     if (stored === null) return null;
     const data = stored.data;
+    const generationOk = (value) => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
     if (!data || typeof data !== 'object' || Array.isArray(data)
         || data.format !== 'mind-folder-authorization'
         || !((data.version === 1 && Object.keys(data).length === 4)
-          || (data.version === 2 && Object.keys(data).length === 5
-            && typeof data.generation === 'string' && /^[a-f0-9-]{36}$/.test(data.generation)))
+          || (data.version === 2 && Object.keys(data).length === 5 && generationOk(data.generation))
+          // v3 añade las subcarpetas que el usuario excluyó del ámbito.
+          || (data.version === 3 && Object.keys(data).length === 6
+            && (data.generation === null || generationOk(data.generation))
+            && Array.isArray(data.exclusions)
+            && normalizeExclusions(data.exclusions)?.join('\0') === data.exclusions.join('\0')))
         || data.id !== id || typeof data.path !== 'string'
         || data.path.includes('\0') || !path.isAbsolute(data.path)
         || authorizationId(data.path) !== id) {
       throw new MotorError('AUTHORIZATION_CORRUPT', 'El registro de autorización no tiene el formato esperado.');
     }
     rejectInternal(data.path);
-    return { id: data.id, path: data.path, ...(includeGeneration ? { generation: data.generation ?? null } : {}) };
+    return {
+      id: data.id, path: data.path,
+      ...(includeGeneration ? { generation: data.generation ?? null, exclusions: data.exclusions ?? [] } : {}),
+    };
   }
 
   return {
@@ -101,6 +113,26 @@ export function createFolderRegistry(baseDirectory, motorDirectory) {
         }
       }
       return folders;
+    },
+
+    /**
+     * Sustituye las subcarpetas excluidas del ámbito, conservando la generación.
+     * El Motor lo llama bajo la coordinación del índice (véase setFolderExclusions).
+     * @returns {Promise<string[] | null>} null si la carpeta no está registrada.
+     */
+    async setExclusions(id, exclusions) {
+      const normalized = normalizeExclusions(exclusions);
+      if (normalized === null) {
+        throw new MotorError('INVALID_EXCLUSIONS', 'Las exclusiones deben ser hasta 64 rutas relativas dentro de la carpeta, con "/" entre componentes.');
+      }
+      const stored = await readJson(filename(id));
+      if (stored === null) return null;
+      const current = await load(id, true);
+      await writeJson(filename(id), {
+        format: 'mind-folder-authorization', version: 3, id, path: current.path,
+        generation: current.generation, exclusions: normalized,
+      });
+      return normalized;
     },
 
     /** Retira solo el registro de la Base, aunque la carpeta ya no exista. */

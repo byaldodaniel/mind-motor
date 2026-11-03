@@ -7,6 +7,14 @@ publica con una operación que nunca reemplaza un nombre existente:
 NtSetInformationFile(FileRenameInformation, ReplaceIfExists=FALSE) en Windows y
 linkat en POSIX. Si algo falla antes de publicar, el temporal se descarta y el
 nombre de destino no llega a existir.
+
+Windows informa algunas colisiones de nombre como denegaciones: un nombre
+abierto sin compartir por otro proceso (STATUS_SHARING_VIOLATION) o pendiente
+de eliminación (STATUS_DELETE_PENDING, que Win32 traduce a ERROR_ACCESS_DENIED).
+La existencia se consulta con una apertura solo de atributos, que no participa
+en los modos de uso compartido, y se clasifica por NTSTATUS antes de traducirlo.
+Una denegación real (STATUS_ACCESS_DENIED sin evidencia de que el nombre esté
+ocupado) se sigue informando como ACCESS_DENIED.
 """
 import base64
 import contextlib
@@ -26,7 +34,18 @@ _spec.loader.exec_module(reader)
 Refusal = reader.Refusal
 component = reader.component
 MAX_BYTES = 1024 * 1024
+# Máximo propio del auxiliar: el anfitrión puede pedir un límite menor o mayor
+# que el predeterminado (maxBytes), pero nunca por encima de este.
+ABSOLUTE_MAX_BYTES = 16 * 1024 * 1024
 WINDOWS_EPOCH = 116444736000000000
+STATUS_ACCESS_DENIED = 0xC0000022
+STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
+STATUS_OBJECT_NAME_COLLISION = 0xC0000035
+STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
+STATUS_SHARING_VIOLATION = 0xC0000043
+STATUS_DELETE_PENDING = 0xC0000056
+# Estados que prueban que el nombre existe aunque no se pueda abrir.
+NAME_OCCUPIED = frozenset({STATUS_OBJECT_NAME_COLLISION, STATUS_SHARING_VIOLATION, STATUS_DELETE_PENDING})
 
 
 def temporary_name():
@@ -92,7 +111,8 @@ class Posix(reader.Posix):
         birth = getattr(info, 'st_birthtime', None)
         return {'size': info.st_size, 'modifiedMs': info.st_mtime_ns // 1_000_000,
                 'changedMs': info.st_ctime_ns // 1_000_000,
-                'createdMs': int(birth * 1000) if birth else None}
+                'createdMs': int(birth * 1000) if birth else None,
+                'identity': f'posix:{info.st_dev}:{info.st_ino}'}
 
 
 class Windows(reader.Windows):
@@ -119,15 +139,39 @@ class Windows(reader.Windows):
         if result < 0:
             raise self.c.WinError(self.nt.RtlNtStatusToDosError(result))
 
+    def _probe(self, parent, name):
+        """NTSTATUS (sin signo) de abrir name solo para consultar sus atributos.
+
+        SYNCHRONIZE | FILE_READ_ATTRIBUTES no pide datos ni DELETE, así que no
+        entra en conflicto con un handle ajeno abierto sin compartir. No abre el
+        contenido ni sigue enlaces (FILE_OPEN_REPARSE_POINT).
+        """
+        c, w = self.c, self.w
+        buffer = c.create_unicode_buffer(name)
+        length = len(name.encode('utf-16-le'))
+        if length > 65532:
+            raise Refusal('UNSAFE_PATH')
+        text = self.Unicode(length, length + 2, c.cast(buffer, w.LPWSTR))
+        attrs = self.Attributes(c.sizeof(self.Attributes), parent, c.pointer(text), 0x40, None, None)
+        handle, status = w.HANDLE(), self.Status()
+        # FILE_OPEN (1); comparte todo (7); opciones: E/S síncrona y FILE_OPEN_REPARSE_POINT.
+        result = self.nt.NtCreateFile(c.byref(handle), 0x100080, c.byref(attrs), c.byref(status),
+                                      None, 0, 7, 1, 0x200020, None, 0)
+        if result >= 0:
+            self.close(handle.value)
+        return result & 0xFFFFFFFF, result
+
+    def occupied(self, parent, name):
+        """True si el nombre existe; False si no; OSError ante una denegación real."""
+        status, result = self._probe(parent, component(name))
+        if status < 0x80000000 or status in NAME_OCCUPIED:
+            return True
+        if status in (STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND):
+            return False
+        raise self.c.WinError(self.nt.RtlNtStatusToDosError(result))
+
     def exists(self, parent, name):
-        try:
-            handle = self._open(parent, component(name), False)
-        except OSError as error:
-            if getattr(error, 'winerror', None) in (2, 3):
-                return False
-            raise
-        self.close(handle)
-        return True
+        return self.occupied(parent, name)
 
     def create(self, parent, name):
         c, w = self.c, self.w
@@ -168,8 +212,24 @@ class Windows(reader.Windows):
         info = Rename(0, parent, len(encoded))
         c.memmove(c.addressof(info) + Rename.name.offset, encoded, len(encoded))
         # ReplaceIfExists=FALSE; el nombre se resuelve respecto al padre ya adquirido.
-        self._status(self.nt.NtSetInformationFile(handle, c.byref(self.Status()), c.byref(info),
-                                                  c.sizeof(info), 10))
+        result = self.nt.NtSetInformationFile(handle, c.byref(self.Status()), c.byref(info),
+                                              c.sizeof(info), 10)
+        if result >= 0:
+            return
+        status = result & 0xFFFFFFFF
+        if status in NAME_OCCUPIED:
+            raise Refusal('FILE_EXISTS')
+        # El temporal ya se creó en este mismo padre, con los mismos derechos que
+        # exige el renombrado. Un ACCESS_DENIED aquí solo se atribuye a una
+        # colisión si el nombre consta ocupado; si no, se informa la denegación.
+        if status == STATUS_ACCESS_DENIED:
+            try:
+                taken = self.occupied(parent, name)
+            except OSError:
+                taken = False
+            if taken:
+                raise Refusal('FILE_EXISTS')
+        self._status(result)
 
     def discard(self, handle, parent, temporary):
         flag = self.c.c_ubyte(1)  # FileDispositionInformation: DeleteFile=TRUE.
@@ -184,7 +244,8 @@ class Windows(reader.Windows):
             raise self.c.WinError(self.c.get_last_error())
         ms = lambda value: (value - WINDOWS_EPOCH) // 10_000 if value > 0 else None
         return {'size': (info.size_high << 32) | info.size_low, 'modifiedMs': ms(basic.written),
-                'changedMs': ms(basic.changed), 'createdMs': ms(basic.created)}
+                'changedMs': ms(basic.changed), 'createdMs': ms(basic.created),
+                'identity': f'nt:{info.volume}:{(info.index_high << 32) | info.index_low}'}
 
 
 def open_parent(backend, stack, root, parts, after_directory=None):
@@ -260,11 +321,23 @@ def error_code(error):
     return 'CREATE_FAILED' if code == 'READ_FAILED' else code
 
 
+def size_limit(request, failure):
+    """Límite pedido por el anfitrión (maxBytes), acotado por el máximo propio; 1 MiB si no se indica."""
+    if 'maxBytes' not in request:
+        return MAX_BYTES
+    value = request['maxBytes']
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise Refusal(failure)
+    return min(value, ABSOLUTE_MAX_BYTES)
+
+
 def decode(request):
-    if not isinstance(request, dict) or set(request) != {'root', 'relativePath', 'content'}:
+    required = {'root', 'relativePath', 'content'}
+    if not isinstance(request, dict) or not required <= set(request) <= required | {'maxBytes'}:
         raise Refusal('CREATE_FAILED')
+    limit = size_limit(request, 'CREATE_FAILED')
     data = base64.b64decode(request['content'], validate=True)
-    if len(data) > MAX_BYTES:
+    if len(data) > limit:
         raise Refusal('TEXT_TOO_LARGE')
     try:
         data.decode('utf-8', 'strict')
@@ -284,7 +357,7 @@ def run():
             raise Refusal('CREATE_FAILED')
 
     try:
-        root, relative, data = decode(json.loads(sys.stdin.buffer.readline(3 * MAX_BYTES)))
+        root, relative, data = decode(json.loads(sys.stdin.buffer.readline(3 * ABSOLUTE_MAX_BYTES)))
         result = create_file(root, relative, data, confirm)
         sys.stdout.write(json.dumps(result))
         return 0

@@ -172,7 +172,7 @@ test('removeFolderIndex espera la publicación y la retirada gana al finalizar',
   assert.equal(await f.motor.readFolderIndex(f.id), null);
 });
 
-test('bloqueo viejo vivo y después abandonado: espera acotada, sin robo ni publicación', { timeout: 30000 }, async (t) => {
+test('bloqueo viejo vivo se respeta; abandonado por un proceso terminado se recupera solo', { timeout: 30000 }, async (t) => {
   const f = await fixture(t);
   const original = await fs.readFile(f.filename, 'utf8');
   const owner = start(t, f, { operation: 'scan', pausePublish: true });
@@ -187,14 +187,16 @@ test('bloqueo viejo vivo y después abandonado: espera acotada, sin robo ni publ
   assert.equal((await f.motor.listAuthorizedFolders())[0].id, f.id, 'La retirada fallida aún no revocó');
   owner.child.kill();
   await owner.exit;
-  const abandonedWaiter = start(t, f, { operation: 'scan' });
-  await abandonedWaiter.wait('contended');
-  assert.equal((await abandonedWaiter.result()).code, 'INDEX_LOCK_TIMEOUT');
+  // El dueño terminó sin liberar: el bloqueo quedó abandonado y nada se publicó.
   assert.equal(await fs.readFile(f.lock, 'utf8'), lock);
   assert.equal(await fs.readFile(f.filename, 'utf8'), original);
-  // Recuperación EXPLÍCITA en la fixture: todos los procesos anteriores ya terminaron.
-  await fs.unlink(f.lock);
-  assert.equal((await f.motor.indexFolder(f.id)).generation, 2);
+  // Recuperación automática aprobada (opción B): mismo equipo y proceso dueño inexistente.
+  const abandonedWaiter = start(t, f, { operation: 'scan' });
+  await abandonedWaiter.wait('contended');
+  const recovered = await abandonedWaiter.result();
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(recovered.result.generation, 2);
+  assert.ok(!(await fs.readdir(f.base)).some((name) => name.endsWith('.lock') || name.includes('.abandonado-')));
 });
 
 test('dos carpetas distintas publican independientemente, aun con otra coordinación ocupada', { timeout: 30000 }, async (t) => {

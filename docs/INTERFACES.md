@@ -100,6 +100,47 @@ Integración de agentes externos, índices, planificación y formato de continui
 requieren incrementos aprobados por separado. El almacenamiento de
 texto de este núcleo no pretende resolver por adelantado sus necesidades.
 
+## Funciones y ejecución manual — Función 04 integrada
+
+`openMotor({ baseDirectory, pythonExecutable?, functionExecutors? })` crea el
+registro `src/functions.js` sobre su Base física y el ejecutor manual
+`src/function-runner.js` con el catálogo `functionExecutors`. Ese catálogo es
+explícito: lo entrega el anfitrión de confianza al abrir el Motor y se copia en
+ese momento. Sin catálogo, el Motor administra definiciones pero no puede
+vincular ninguna (`EXECUTOR_NOT_FOUND`). Un catálogo mal formado hace fallar
+`openMotor` con `INVALID_EXECUTOR`. Contratos y garantías en
+[FUNCIONES.md](FUNCIONES.md) y [EJECUCION_FUNCIONES.md](EJECUCION_FUNCIONES.md).
+
+| Operación de Motor | Resultado |
+|---|---|
+| `createFunction(id, definition)` | `{ id, definition }`; rechaza duplicados. |
+| `getFunction(id)` / `listFunctions()` | Definiciones como datos, sin generación. |
+| `updateFunction(id, definition)` | Sustituye y publica una nueva generación UUID. |
+| `retireFunction(id)` | `boolean`; retira solo el registro. |
+| `bindFunction({ functionId, executor })` | Vínculo opaco: definición actual exacta (generación + SHA-256) con un ejecutor del catálogo. |
+| `unbindFunction(binding)` | `boolean`. |
+| `runFunction({ binding, input?, capabilities? })` | `{ functionId, executor, result }`: una invocación manual. |
+
+Todas son operaciones del anfitrión; no se entregan a agentes. `getFunctionVersion`
+sigue siendo interno del ejecutor y no se expone.
+
+- **Definiciones como datos.** Se guardan como datos JSON en
+  `function-definition-<id>.json`. Nunca se interpretan como código. Un campo
+  `executor`, `code`, `permissions` o `capabilities` dentro de una definición no
+  elige ejecutor ni concede nada.
+- **Código de confianza.** Solo el catálogo del anfitrión aporta código ejecutable.
+  Añadir o sustituir ejecutores después de abrir el Motor no cambia lo autorizado.
+- **Autorización por invocación.** `bindFunction` es la aprobación explícita del
+  anfitrión. Cada `runFunction` vuelve a leer generación y huella. Si la definición
+  se retiró (`FUNCTION_NOT_FOUND`) o cambió (`FUNCTION_CHANGED`), el vínculo queda
+  retirado para siempre, aunque se restaure el mismo contenido o se recree el id.
+  Las capacidades se entregan en cada invocación y solo las que el ejecutor
+  declaró. Un vínculo vale solo en la instancia de Motor que lo creó y no persiste
+  entre procesos; las definiciones sí.
+- **Límites.** Ejecutar no escribe en la Base. Los ejecutores corren en el proceso
+  del anfitrión. Retirar no cancela una ejecución ya admitida. No hay horarios,
+  eventos, interfaz ni ejecutores externos.
+
 ## Lectura puntual y autorización — Incremento 03
 
 `openMotor({ baseDirectory, pythonExecutable? })` permite al anfitrión elegir un
@@ -156,6 +197,7 @@ El algoritmo, su evidencia y sus límites están en [INCREMENTO_03.md](INCREMENT
 | `readFolderIndex(folderId)` | Id registrado | `Promise<FolderIndex | null>`: último índice vigente o null |
 | `revokeFolder(folderId)` | Id del registro | Retira autorización y elimina índice; conserva el booleano previo |
 | `searchFiles(request)` | `SearchRequest`: ids que el anfitrión autoriza para la consulta, texto y filtros | `Promise<{ results, total, offset, limit, truncated, scopes }>` |
+| `openIndexObserver(options?)` | `{ onReport?, strategy?, debounceMs?, … }` | Observador de la sesión: `observe`, `reconcile`, `status`, `list`, `unobserve`, `close` |
 
 `searchFiles` (Incremento 09) consulta solo los índices vigentes de la Base, sin
 recorrer las carpetas ni abrir archivos. Cada resultado es `{ folderId,
@@ -169,8 +211,9 @@ crearlo; véase la sección de creación) o `unverified`. Detalle en
 Son operaciones del anfitrión administrativo, como registrar y retirar carpetas.
 No se exponen al agente por poseer un permiso de lectura puntual. El Motor inyecta
 su `loadAuthorizedFolder`, la Base física y `pythonExecutable`; no se crea un
-registro de permisos adicional. Continuidad y definiciones de funciones conservan
-sus interfaces internas y no se agregan al objeto Motor ni a la CLI.
+registro de permisos adicional. Las definiciones de funciones conservan su
+interfaz interna y no se agregan al objeto Motor ni a la CLI; la continuidad se
+integra en su propia sección.
 
 El índice v2 añade `authorizationGeneration`, distinto del contador numérico
 `generation` del índice. Debe coincidir con la generación de la autorización y
@@ -195,6 +238,45 @@ fuera del bloqueo y se rechazan con `INDEX_CONFLICT` si el índice base cambió
 antes de publicar. Recuperación y límites en
 [CONCURRENCIA_INDICES.md](CONCURRENCIA_INDICES.md). Solo se descartan índices,
 nunca originales.
+
+## Continuidad entre agentes — Función 05 integrada
+
+`openMotor` crea el núcleo `src/continuity.js` sobre su Base física y la capa de
+acceso `src/continuity-access.js` sobre ese núcleo. No hay otro almacenamiento:
+los registros siguen siendo `continuity-<id>.json`. Formatos y garantías en
+[CONTINUIDAD.md](CONTINUIDAD.md) y [CONTINUIDAD_AGENTES.md](CONTINUIDAD_AGENTES.md).
+
+| Operación de Motor | Quién | Resultado |
+|---|---|---|
+| `recordContinuity`, `getContinuity`, `updateContinuity`, `relateContinuity`, `retireContinuity`, `listContinuityIds`, `exportContinuity`, `importContinuity` | Anfitrión | Las del núcleo, sin cambios. |
+| `grantContinuityAccess({ requester, ids?, includeReferenced?, allowRecord?, source? })` | Anfitrión | Permiso opaco para ese solicitante. |
+| `describeContinuityAccess(permiso)` | Anfitrión | `{ ids, allowRecord, source, revoked }` o `null`. |
+| `revokeContinuityAccess(permiso)` | Anfitrión | `boolean`. |
+| `bindContinuityAgent({ requester, authorization })` | Anfitrión, para entregar | Vista congelada `{ readContext, recordResult }`. |
+| `parseContinuityExport`, `formatContinuityMarkdown` (exportadas) | Cualquiera | Validar o mostrar un paquete portable. |
+
+Separación: el agente recibe únicamente la vista. `readContinuityContext` y
+`recordContinuityResult` no son métodos del Motor; solo se alcanzan a través de
+la vista ligada a la identidad del agente.
+
+Garantías conservadas de la PR #11:
+- **Selección explícita.** Se conceden ids concretos, sin listado ni búsqueda para
+  el agente. `includeReferenced` se resuelve al conceder.
+- **Contexto restringido.** `readContext` devuelve el paquete `mind-continuity-export`
+  v1 limitado a la selección. Las referencias externas a ella quedan como ids sin
+  contenido.
+- **Resultados.** `recordResult` exige `allowRecord`. El `source` lo fija el
+  anfitrión, y las referencias `entry` solo pueden apuntar a la selección o a
+  resultados propios: lo ajeno o inexistente da `CONTINUITY_ACCESS_DENIED`, sin
+  revelar qué hay en la Base.
+- **Identidad.** `requester` se compara por identidad de objeto y el permiso es
+  clave de un `WeakMap` privado de esta instancia de Motor. Otra instancia, una
+  copia del permiso u otro agente con el mismo nombre no obtienen nada.
+
+Tras `revokeContinuityAccess`, la lectura y el registro se rechazan. Los permisos
+están en memoria y no persisten entre procesos; los registros sí. No hay
+servidor, transporte ni autenticación de agentes remotos: es una frontera de
+capacidades dentro del proceso confiable del anfitrión, como la lectura puntual.
 
 ## Creación de un archivo de texto nuevo — Función 03 integrada
 
@@ -331,3 +413,83 @@ Errores: los de [FUNCION_03_MODIFICAR.md](FUNCION_03_MODIFICAR.md)
 `METADATA_NOT_PRESERVABLE`, `MODIFY_UNCONFIRMED`, …). Si el resultado es
 `MODIFY_FAILED` por tiempo o `MODIFY_UNCONFIRMED`, el contenido nuevo puede estar
 publicado sin entrada actualizada: corresponde releer y reconciliar.
+
+## Observación de cambios — Función 01 integrada
+
+`openIndexObserver(options)` es una capacidad **opcional** de la sesión del
+anfitrión. `openMotor` no abre observaciones: solo existen después de llamarla.
+Devuelve el observador de [FUNCION_01_OBSERVACION.md](FUNCION_01_OBSERVACION.md)
+ligado a este Motor; la opción `motor` se ignora, de modo que siempre actúa con
+el `indexFolder`, `readFolderIndex` y `listAuthorizedFolders` de esta instancia y
+con su Base. No se entrega a agentes ni concede lectura o búsqueda.
+
+| Operación del observador | Resultado |
+|---|---|
+| `observe(folderId)` | Reconciliación inicial y observación; resuelve con el estado. |
+| `reconcile(folderId)` | Reconciliación inmediata pedida por el anfitrión. |
+| `status(folderId)` / `list()` | Estado de cada carpeta observada; `null` si no se observa. |
+| `unobserve(folderId)` | Deja de observar; el índice se conserva. |
+| `close()` | Detiene todo y libera observaciones y temporizadores. |
+
+Los avisos del sistema solo deciden cuándo reconciliar; cada actualización es una
+llamada a `indexFolder`, con el recorrido seguro y la vigencia de la autorización
+de siempre. Las búsquedas reflejan el cambio cuando termina esa reconciliación
+(agrupación por defecto: 300 ms de silencio, máximo 5 s, al menos 2 s entre
+recorridos), no en el instante del cambio.
+
+Sin servicio residente: las observaciones no son persistentes y los temporizadores
+no mantienen vivo el proceso. Si el proceso termina, la observación termina con
+él; el siguiente `observe` reconcilia lo ocurrido entretanto.
+
+Retirada: `revokeFolder(folderId)` en este Motor pide una reconciliación a sus
+observadores abiertos, que falla con `FOLDER_NOT_AUTHORIZED` y detiene esa
+carpeta (`stopped`, motivo `revoked`) antes de que `revokeFolder` resuelva; esto
+ocurre aunque falle la limpieza del índice. La detención se pide después de
+liberar el bloqueo coordinado del índice, y solo si la retirada llegó a
+ejecutarse: si el bloqueo no se obtiene (`INDEX_LOCK_TIMEOUT`), la carpeta sigue
+autorizada y observada. Una retirada desde otra instancia o
+proceso se detecta por la observación de la Base o por la comprobación periódica
+(`authorizationCheckMs`, 5 s). Una nueva autorización de la misma ruta no hereda
+la observación. Cerrar el observador no retira autorizaciones ni índices.
+
+
+## Capa de producto (Mind 1.0)
+
+Interfaces añadidas para el producto portable. La descripción de uso está en
+[PRODUCTO.md](PRODUCTO.md) y el estado, en [AVANCE.md](AVANCE.md).
+
+### Opciones y operaciones del Motor para el anfitrión
+
+- `openMotor({ ..., protectedDirectories })`: ubicaciones adicionales que ninguna
+  carpeta autorizada puede contener ni ocupar. En el producto es la carpeta
+  completa de Mind (iniciadores, runtimes y Base).
+- `motor.getAuthorizedFolder(id)` → `{ id, path, generation, exclusions } | null`.
+  Solo anfitrión: permite ligar decisiones del usuario a la autorización vigente.
+- `motor.setFolderExclusions(id, rutas)` → `{ exclusions, removedEntries }`. Solo
+  anfitrión. Cambia las exclusiones bajo la misma coordinación que las
+  publicaciones del índice y retira en el acto las entradas excluidas. El registro
+  pasa a la versión 3 (`exclusions`). Lectura, creación y modificación rechazan
+  `PATH_EXCLUDED` al conceder, al usar y al confirmar; el recorrido nativo no
+  entra en lo excluido.
+
+### Módulos de producto
+
+| Módulo | Responsabilidad |
+|---|---|
+| `src/layout.js` | Estructura de la carpeta portable; modo producto por `mind-producto.json`. |
+| `src/base-format.js` | `mind-base.json`: primer uso y rechazo de una Base más reciente (`BASE_TOO_NEW`). |
+| `src/session.js` | Sesión ligada al agente: reconciliación inicial, observación, rastro de eliminados, registro de sesión en `Base/sesiones/` y extensiones. |
+| `src/mcp-server.js` | JSON-RPC 2.0 por stdio; negociación de versión; elicitación. |
+| `src/mcp-session.js` | `mind mcp`: une servidor, sesión y herramientas; cierre ordenado. |
+| `src/access-policy.js` | Decisiones del usuario por carpeta (`folder-access-<id>.json`) y para la continuidad, ligadas a la generación. |
+| `src/consent.js` | Formulario del cliente o solicitud pendiente (`consent-request-<id>.json`); validación de carpetas candidatas. |
+| `src/console.js` | `mind autorizar`, `permisos`, `reparar` (terminal interactivo). |
+| `src/agent-tools.js` | Anfitrión de confianza: herramientas del agente sobre permisos de un solo intento. |
+| `src/removals.js` | Rastro de eliminados (`folder-removed-<id>.json`): solo metadatos, 30 días. |
+| `src/tools/`, `src/commands/`, `src/session-extensions.js` | Puntos de extensión por área. |
+
+### Archivos de la Base añadidos
+
+`mind-base.json`, `folder-access-<id>.json`, `agent-continuity-access.json`,
+`consent-request-<uuid>.json`, `folder-removed-<id>.json`, `auditoria.jsonl` y
+`sesiones/sesion-<uuid>.json`. Ninguno contiene contenido de los originales.

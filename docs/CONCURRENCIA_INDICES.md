@@ -38,24 +38,45 @@ Si no se consigue, se devuelve `INDEX_LOCK_TIMEOUT` sin escribir ni retirar el
 bloqueo ajeno. El límite acota la espera de adquisición, no la duración del
 recorrido ni de la E/S del sistema. No hay garantía de orden justo entre procesos.
 
-Ni la antigüedad del archivo ni su PID permiten eliminarlo automáticamente.
-Un proceso vivo puede tardar más de diez segundos; un PID puede reutilizarse.
-El UUID de propietario, el PID y la fecha guardados son solo diagnóstico.
+### Recuperación automática (decisión del usuario del 2026-11-01, opción B)
 
-Una terminación abrupta puede dejar el lockfile y un temporal `.mind-*.tmp`.
-La siguiente operación falla explícitamente tras la espera; no roba el bloqueo
-ni publica sobre un estado dudoso. Recuperación manual:
+En el producto, el usuario cierra el agente cuando quiere, y el sistema puede
+terminar el proceso de Mind en cualquier momento (Windows lo hace al cerrar la
+ventana). Si ocurre durante los milisegundos en que se publica un índice, el
+bloqueo queda abandonado. El diseño anterior exigía retirarlo a mano. El usuario
+aprobó la recuperación automática con estas condiciones:
 
-1. Detener **todos** los procesos y observadores que usen esa Base y mantenerlos
-   detenidos durante la recuperación, no solo el PID escrito en el lockfile.
-2. Retirar el lockfile del ámbito afectado. Si hay temporales abandonados en la
-   Base, retirarlos solo después de comprobar esa misma ausencia de procesos;
-   no promoverlos como índices ni tocar los originales.
-3. Reiniciar y ejecutar `indexFolder` para reconciliar antes de confiar en sus
-   metadatos. Repetir la retirada si esa era la operación pendiente.
+- El bloqueo guarda `pid` y `host` (el nombre del equipo).
+- Mientras espera, el proceso comprueba cada 100 ms si el dueño sigue vivo
+  (`process.kill(pid, 0)`; `EPERM` cuenta como vivo).
+- Solo se recupera si el bloqueo es de **este mismo equipo** y su proceso **ya no
+  existe**. Un bloqueo antiguo con dueño vivo nunca se recupera, y uno de otro
+  equipo tampoco (por ejemplo, una Base en una unidad de red).
+- Si el PID se reutilizó, el bloqueo parece vivo: se respeta y queda el error
+  explícito (fallo seguro).
+- Un bloqueo vacío (el dueño terminó entre crearlo y escribirlo) solo se recupera
+  cuando tiene más de 30 s.
+- La retirada no puede borrar un bloqueo vivo por error: lo aparta con `rename`,
+  comprueba que lo apartado es exactamente el archivo examinado (dispositivo e
+  inodo) y, si no lo es, lo repone solo si el nombre sigue libre.
+- Los bloqueos anteriores a este cambio no guardaban `host`. Como la Base es
+  local, se tratan como de este equipo.
 
-Si no se puede asegurar que todos los usuarios de la Base están detenidos, no
-se recupera el bloqueo: se conserva el error explícito.
+Lo que está en juego son índices, que son datos derivados y reconstruibles.
+Nunca se tocan originales ni autorizaciones. Si una publicación se pierde, la
+siguiente reconciliación la recompone.
+
+Una terminación abrupta también puede dejar temporales `.mind-*.tmp`. Nunca se
+interpretan como índices.
+
+### Recuperación guiada
+
+Si el bloqueo no puede demostrarse abandonado (PID reutilizado, otro equipo),
+`mind reparar` aplica el procedimiento manual con confirmación del usuario. Solo
+actúa si ninguna sesión de Mind registrada en `Base/sesiones/` sigue viva y el
+usuario confirma que cerró todos sus agentes. Entonces retira los bloqueos de
+índice, los temporales y los registros de sesiones terminadas. Los índices
+afectados se reconcilian en la siguiente sesión.
 
 Si la adquisición falla en `revokeFolder`, la autorización aún no fue retirada.
 Si falla la limpieza después de retirarla, sigue retirada. En creación o

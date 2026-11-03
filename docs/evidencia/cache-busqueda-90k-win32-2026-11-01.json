@@ -1,0 +1,81 @@
+{
+  "fecha": "2026-11-02T03:52:54.841Z",
+  "equipo": {
+    "cpu": "Intel(R) Core(TM) i7-7500U CPU @ 2.70GHz",
+    "nucleos": 4,
+    "sistema": "win32-x64",
+    "node": "v24.18.0"
+  },
+  "arbol": {
+    "entradas": 90000,
+    "escritura_s": 101.89,
+    "consulta": "informe",
+    "verdad": 2186
+  },
+  "mind": {
+    "antes (sin caché)": {
+      "indexacion_ms": 8568,
+      "reconciliacion_tras_cambio_ms": 10256,
+      "primera_busqueda_ms": 15477,
+      "repetida_ms": {
+        "n": 10,
+        "mediana": 2508.2,
+        "p95": 3369.5,
+        "min": 2350.3,
+        "max": 3369.5
+      },
+      "dos_agentes_simultaneos_ms": {
+        "n": 10,
+        "mediana": 4962.8,
+        "p95": 5956.8,
+        "min": 4847.2,
+        "max": 5956.8
+      },
+      "tras_modificacion_ms": 3720,
+      "encontrados": 2186,
+      "encontrados_tras_modificacion": 2187,
+      "tras_revocar": "ACCESS_NOT_GRANTED",
+      "memoria_heap_mb": 112.6,
+      "exhaustividad": 1
+    },
+    "después (con caché)": {
+      "indexacion_ms": 4414,
+      "reconciliacion_tras_cambio_ms": 6568,
+      "primera_busqueda_ms": 7158,
+      "repetida_ms": {
+        "n": 10,
+        "mediana": 150.3,
+        "p95": 161.1,
+        "min": 140.9,
+        "max": 161.1
+      },
+      "dos_agentes_simultaneos_ms": {
+        "n": 10,
+        "mediana": 292.8,
+        "p95": 425.9,
+        "min": 282.5,
+        "max": 425.9
+      },
+      "tras_modificacion_ms": 1383,
+      "encontrados": 2186,
+      "encontrados_tras_modificacion": 2187,
+      "tras_revocar": "ACCESS_NOT_GRANTED",
+      "memoria_heap_mb": 40,
+      "exhaustividad": 1
+    }
+  },
+  "directo": {
+    "find -iname": {
+      "ms": {
+        "n": 10,
+        "mediana": 1510.6,
+        "p95": 1923.3,
+        "min": 1465.8,
+        "max": 1923.3
+      },
+      "encontrados": 2186,
+      "exhaustividad": 1
+    },
+    "rg --files --iglob": null
+  }
+}

@@ -96,6 +96,18 @@ class ScanTest(unittest.TestCase):
         self.assertIsNone(records['Proyectos']['size'])
         self.assertEqual(self.counting.opened, [('Proyectos', 'directory'), ('Fotos', 'directory')])
 
+    def test_excluded_paths_are_neither_listed_nor_opened(self):
+        counting = CountingBackend(backend())
+        records, issues = native.scan(str(self.folder), 100, counting, exclude=['Proyectos/Fotos', 'notas.txt'])
+        self.assertEqual(counting.open, 0)
+        self.assertEqual(sorted(record['path'] for record in records), ['Proyectos', 'Proyectos/plan.md'])
+        self.assertEqual(issues, [])
+        # La carpeta excluida no se abre: ningún nombre de su interior llega a leerse.
+        self.assertEqual(counting.opened, [('Proyectos', 'directory')])
+        records, _ = native.scan(str(self.folder), 100, exclude=['PROYECTOS'])
+        expected = ['notas.txt'] if native.FOLD_CASE else self.expected
+        self.assertEqual(sorted(record['path'] for record in records), expected)
+
     def test_every_native_open_requests_a_directory_without_following_links(self):
         if os.name == 'nt':
             real = backend()

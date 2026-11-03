@@ -1,0 +1,45 @@
+name: Paquete Windows
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm test
+      - run: node scripts/construir-paquetes.mjs --salida dist
+      - name: Construir el segundo paquete para probar la actualización
+        shell: pwsh
+        run: |
+          $next = node --input-type=module -e "import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('package.json')).version.split('.').map(Number);v[2]++;process.stdout.write(v.join('.'));"
+          node scripts/construir-paquetes.mjs --version-paquete $next --salida dist-test-update
+      - name: Comprobar la reproducibilidad
+        shell: pwsh
+        run: |
+          node scripts/construir-paquetes.mjs --salida dist-2
+          if ((Get-Content dist/SHA256SUMS -Raw) -ne (Get-Content dist-2/SHA256SUMS -Raw)) { throw 'Paquetes distintos' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mind-Windows
+          path: dist/*
+          if-no-files-found: error
+      - name: Probar el paquete extraído
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'Mind Windows ñ'
+          Expand-Archive (Get-ChildItem dist/Mind-*.zip).FullName -DestinationPath $folder
+          $mind = Join-Path $folder Mind
+          $next = (Get-ChildItem dist-test-update/Mind-*.zip).FullName
+          & "$mind/Runtime/node/node.exe" scripts/producto-12-casos.mjs --mind $mind --actualizacion $next --informe informe-producto-windows.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Informe-Windows
+          path: informe-producto-windows.json

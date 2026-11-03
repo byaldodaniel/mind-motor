@@ -63,7 +63,7 @@ test('el agente lee, modifica sobre esa versión y obtiene la entrada del índic
   assert.equal(result.version, textVersion(updated));
   assert.equal(result.size, Buffer.byteLength(updated));
   assert.deepEqual(Object.keys(result.indexEntry).sort(),
-    ['changedAt', 'createdAt', 'modifiedAt', 'path', 'reason', 'size', 'state', 'type']);
+    ['changedAt', 'createdAt', 'identity', 'modifiedAt', 'path', 'reason', 'size', 'state', 'type']);
   assert.equal(result.indexEntry.path, 'sub/nota 🧠.txt');
   assert.equal(result.indexEntry.size, result.size);
   assert.deepEqual((await fs.readdir(path.join(folder, 'sub'))).sort(), ['nota 🧠.txt', 'vecino.txt']);
