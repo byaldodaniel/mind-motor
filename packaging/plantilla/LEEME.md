@@ -6,39 +6,27 @@ La carpeta `Base` conserva los índices y la continuidad de tus trabajos.
 
 ## Empezar
 
-1. Extrae el ZIP. Conserva la carpeta `Mind` en una ubicación permanente.
-   No necesita permisos de administrador; incluye Node.js y Python.
-2. Conecta Mind a tu agente una vez (instrucciones abajo).
-3. Abre tu carpeta de trabajo en el agente y pídele que use Mind.
-   La carpeta abierta tiene acceso completo sin otro formulario de Mind.
+1. **Extrae** el ZIP en la ubicación que prefieras. No necesita permisos de administrador ni instalaciones externas (ya incluye Node.js y Python portables).
+2. **Abre tu agente** (Claude Code, Codex, Cursor, Gemini CLI o cualquier otro) sobre la carpeta de Mind y empieza a hablarle. Tu agente leerá `AGENTS.md`, reconocerá las capacidades de Mind de inmediato y empezará a trabajar sin que tengas que configurar nada.
+3. **Pídele lo que necesites**: buscar archivos, leer documentos, organizar carpetas o continuar tareas anteriores.
 
-Si el agente no comunica la carpeta abierta, configura su servidor con
-`mcp --carpeta "C:\ruta\de\tu\proyecto"`. También se reconoce el directorio
-válido desde el que el cliente inicia Mind. La carpeta del programa y su Base
-están protegidas; abre como proyecto la carpeta que contiene tu información.
+Si abres tu agente directamente sobre otro proyecto, pídele al agente que use Mind indicando su ruta o utilizando `--carpeta "C:\ruta\de\tu\proyecto"`. La carpeta abierta tiene acceso completo para trabajar.
 
-## Conectar el agente
+## Conexión técnica (referencia opcional para clientes MCP)
 
-Para un cliente MCP con transporte stdio:
+La mayoría de agentes operan automáticamente a través de sus instrucciones. Si utilizas un cliente con configuración manual de MCP por stdio:
 
 - Programa: `<Mind>\Runtime\node\node.exe`
 - Argumentos: `<Mind>\Motor\bin\mind.js`, `mcp`
 - Variable de entorno: `NODE_OPTIONS` vacía.
 
 Sustituye `<Mind>` por la ruta absoluta donde extrajiste Mind.
-Si tu cliente pide confiar en el servidor, esa decisión te corresponde a ti.
 
-Para Codex CLI, registra el servidor una vez desde PowerShell:
+Para registrarlo manualmente en Codex CLI desde PowerShell:
 
     codex mcp add mind --env NODE_OPTIONS= -- "C:\ruta\Mind\Runtime\node\node.exe" "C:\ruta\Mind\Motor\bin\mind.js" mcp
 
-Comprueba primero `codex mcp list`: si ya existe un servidor `mind`, revisa
-su ubicación antes de sustituirlo. Reinicia la sesión del agente después del registro.
-
-Claude Code puede descubrir `.mcp.json` al abrir la carpeta de Mind. Para usar
-sin formularios otro proyecto, configura Mind como servidor de ese cliente y
-abre el proyecto, o añade `--carpeta` con la ruta del proyecto a sus argumentos.
-Otros clientes usan la configuración stdio indicada arriba.
+Claude Code descubre `.mcp.json` automáticamente al abrir la carpeta de Mind.
 
 ## Qué puedes hacer
 

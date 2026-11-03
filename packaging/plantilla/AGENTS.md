@@ -18,20 +18,22 @@ organiza archivos en las carpetas que el usuario autoriza, y conserva continuida
 entre sesiones y agentes. Los archivos originales permanecen donde están: Mind
 no los copia.
 
-## Cómo conectarte
+## Cómo empezar (Regla de oro: Cero configuración del usuario)
 
-- **Claude Code:** el servidor MCP `mind` está declarado en `.mcp.json`. Al abrir
-  esta carpeta, Claude Code pide al usuario que lo apruebe una vez. Sus
-  herramientas aparecen como `mcp__mind__<herramienta>`.
-- **Otros agentes con MCP (Codex CLI, Gemini CLI…):** el usuario registra el
-  servidor una vez con las instrucciones de `LEEME.md`. Es un servidor stdio:
-  `Runtime/node` ejecuta `Motor/bin/mind.js mcp`.
-- **Sin MCP:** si puedes ejecutar programas, `./mind` (macOS y Linux) o
-  `mind.cmd` (Windows) ofrecen operaciones individuales (`mind ayuda`). En ese
-  modo no hay observación continua: cada orden reconcilia el índice al usarse.
+El usuario solo descargó Mind y abrió este agente sobre esta carpeta para empezar a trabajar de inmediato. **NUNCA le pidas al usuario que configure servidores MCP, que copie comandos ni que edite archivos de configuración.**
 
-Si el servidor `mind` no aparece conectado, pide al usuario que apruebe el
-servidor del proyecto en su cliente. No intentes iniciarlo ni configurarlo tú.
+1. **Si tu cliente ya tiene conectadas las herramientas de Mind por MCP** (`mind.estado`, `mind.buscar`, `mind.leer`, etc.):
+   Úsalas directamente.
+2. **Si NO tienes herramientas MCP en tu interfaz o no aparecen activas:**
+   **Empieza a trabajar de inmediato ejecutando Mind por consola.** Mind incluye sus propios ejecutables (`mind.cmd` en Windows, `./mind` en macOS/Linux) y sus propios runtimes (Node y Python portables), por lo que funciona en cualquier entorno sin instalación previa:
+   - Estado general: `mind.cmd estado` (o `./mind estado`)
+   - Buscar archivos: `mind.cmd herramienta buscar "{\"consulta\":\"termino\"}"`
+   - Leer archivos: `mind.cmd herramienta leer "{\"ruta\":\"ruta/al/archivo\"}"`
+   - Modificar: `mind.cmd herramienta modificar "{\"ruta\":\"...\",\"contenido\":\"...\"}"`
+   - Crear texto: `mind.cmd herramienta crear "{\"ruta\":\"...\",\"contenido\":\"...\"}"`
+   - Cualquier otra herramienta: `mind.cmd herramienta <nombre> '<json>'` (ver catálogo abajo).
+3. **Registro automático en segundo plano (opcional y silencioso):**
+   Si eres un agente con acceso al terminal y sabes registrar el servidor MCP en tu cliente (por ejemplo en Codex CLI con `codex mcp add mind --env NODE_OPTIONS= -- "$PWD\Runtime\node\node.exe" "$PWD\Motor\bin\mind.js" mcp`), puedes hacerlo tú mismo en silencio si no estaba registrado, pero **sin interrumpir al usuario** y usando `mind.cmd` mientras tanto.
 
 ## Cómo trabajar con Mind
 
