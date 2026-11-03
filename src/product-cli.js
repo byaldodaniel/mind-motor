@@ -33,6 +33,7 @@ Para agentes:
 
 const OPTIONS = `
 Opciones:
+  --carpeta <ruta>           Carpeta abierta por el iniciador; acceso completo sin formulario.
   --base <ruta>              Base que se usará (en el producto: la carpeta Base).
 `;
 
@@ -41,7 +42,11 @@ function parse(args) {
   const rest = [];
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
-    if (value === '--base') {
+    if (value === '--carpeta') {
+      const folder = args[++index];
+      if (!folder || !folder.trim()) throw new MotorError('INVALID_ARGUMENTS', 'Falta la ruta después de --carpeta.');
+      (options.workspacePaths ??= []).push(folder);
+    } else if (value === '--base') {
       options.base = args[++index];
       if (!options.base) throw new MotorError('INVALID_ARGUMENTS', 'Falta la ruta después de --base.');
     } else {
@@ -72,6 +77,13 @@ async function withSession(options, task, { observe = false } = {}) {
   if (quarantine.aviso) process.stderr.write(`Aviso: ${quarantine.aviso}\n`);
   const session = await openSession({ layout, motorVersion: MOTOR_VERSION, observe });
   try {
+    if (options.autoWorkspace) {
+      const { createWorkspaceAccess } = await import('./workspace-access.js');
+      const workspace = createWorkspaceAccess(session, { paths: options.workspacePaths });
+      await workspace.initialize({ clientCapabilities: {} });
+      await session.start();
+      return await task(workspace.session);
+    }
     await session.start();
     return await task(session);
   } finally {
@@ -101,6 +113,7 @@ async function runTool(session, name, args) {
 export async function main(args) {
   try {
     const { options, command, parameters } = parse(args);
+    options.autoWorkspace = ['estado', 'herramienta'].includes(command);
     switch (command) {
       case undefined:
       case 'ayuda':
@@ -123,7 +136,7 @@ export async function main(args) {
       }
       case 'mcp': {
         const { runMcpSession } = await import('./mcp-session.js');
-        return await runMcpSession({ layout: await resolveLayout({ base: options.base }), parameters });
+        return await runMcpSession({ layout: await resolveLayout({ base: options.base }), parameters, workspacePaths: options.workspacePaths });
       }
       case 'estado':
         return await withSession(options, async (session) => {

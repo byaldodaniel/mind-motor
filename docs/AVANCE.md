@@ -1,5 +1,16 @@
 # Mind 1.0 — avance, decisiones y criterios
 
+## Frente nuevo: actualizaciones y carpeta abierta — 2026-11-02
+
+Aldo eligió actualización automática al iniciar y acceso completo a la carpeta
+abierta en el agente, con GitHub como distribución. Implementación separada
+en `feat/automatic-updates-open-workspace`; véase
+[ACTUALIZACIONES_Y_CARPETA_ABIERTA.md](ACTUALIZACIONES_Y_CARPETA_ABIERTA.md).
+La selección de la carpeta por el cliente/iniciador sustituye la autorización
+adicional de acceso para esa sesión. El borrado conserva su confirmación.
+Este frente no declara terminado Mind 1.0 ni publica una versión estable.
+
+
 Documento de continuidad del desarrollo. Permite retomar el trabajo sin depender de
 la memoria de ninguna conversación. Se actualiza en cada hito.
 

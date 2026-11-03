@@ -1,3 +1,4 @@
+import { lockInstallation } from './installation-lock.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,6 +40,8 @@ function createAudit(baseDirectory) {
  * @param {{ layout: object, motorVersion: string, log?: Function, observe?: boolean, functionExecutors?: object }} options
  */
 export async function openSession({ layout, motorVersion, log = () => {}, observe = true, functionExecutors = {} }) {
+  const releaseStartup = layout.product ? await lockInstallation(layout.root) : async () => {};
+  try {
   const base = await ensureBase(layout.baseDirectory, { motorVersion, protectedFrom: layout.motorDirectory });
   const motor = await openMotor({
     baseDirectory: base.baseDirectory,
@@ -66,6 +69,12 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     format: 'mind-session', version: 1, id: sessionId, pid: process.pid, host: os.hostname(),
     startedAt: new Date().toISOString(), observe,
   })}\n`, { encoding: 'utf8', mode: 0o600 });
+  const installationSession = layout.product ? path.join(layout.root, '.mind-producto', SESSIONS_DIRECTORY, `sesion-${sessionId}.json`) : null;
+  if (installationSession) {
+    await fs.mkdir(path.dirname(installationSession), { recursive: true, mode: 0o700 });
+    await fs.copyFile(sessionFile, installationSession);
+  }
+  await releaseStartup();
 
   function track(folderId) {
     let state = folders.get(folderId);
@@ -293,10 +302,12 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
         await observer?.close();
       } finally {
         await fs.rm(sessionFile, { force: true }).catch(() => {});
+        if (installationSession) await fs.rm(installationSession, { force: true }).catch(() => {});
       }
     },
   });
   return api;
+  } catch (error) { await releaseStartup().catch(() => {}); throw error; }
 }
 
 /** Sesiones registradas en la Base cuyo proceso sigue vivo en este equipo. */

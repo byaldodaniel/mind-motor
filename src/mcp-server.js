@@ -63,13 +63,14 @@ export function toolError(error) {
  * @param {() => void | Promise<void>} [options.onClose]
  * @param {(level: string, message: string, data?: object) => void} [options.log]
  */
-export function serveMcp({ input, output, serverInfo, instructions, tools, onInitialized, onClose, log = () => {} }) {
+export function serveMcp({ input, output, serverInfo, instructions, tools, onInitialized, onRootsChanged, onClose, log = () => {} }) {
   const pending = new Map();
   const running = new Map();
   let nextId = 1;
   let buffer = '';
   let closed = false;
   let toolset = null;
+  let initialization = Promise.resolve();
 
   const connection = {
     protocolVersion: null,
@@ -153,6 +154,7 @@ export function serveMcp({ input, output, serverInfo, instructions, tools, onIni
         if (!toolset) throw rpcError(INVALID_REQUEST, 'La sesión no se inicializó.');
         return { tools: toolset.definitions };
       case 'tools/call': {
+        await initialization;
         if (!toolset) throw rpcError(INVALID_REQUEST, 'La sesión no se inicializó.');
         const { name, arguments: args = {} } = params;
         if (typeof name !== 'string' || !toolset.definitions.some((tool) => tool.name === name)) {
@@ -180,7 +182,11 @@ export function serveMcp({ input, output, serverInfo, instructions, tools, onIni
       case 'notifications/initialized':
         if (connection.initialized) return;
         connection.initialized = true;
-        await onInitialized?.(connection);
+        initialization = Promise.resolve(onInitialized?.(connection));
+        await initialization;
+        return;
+      case 'notifications/roots/list_changed':
+        if (connection.initialized) await onRootsChanged?.(connection);
         return;
       case 'notifications/cancelled': {
         const target = message.params?.requestId;

@@ -1,3 +1,4 @@
+import { createWorkspaceAccess } from './workspace-access.js';
 import { serveMcp } from './mcp-server.js';
 import { MotorError } from './errors.js';
 import { openSession } from './session.js';
@@ -10,7 +11,7 @@ import { releaseQuarantine } from './quarantine.js';
  * termina cuando cierra stdin. No queda ningún proceso residente.
  * @param {{ layout: Awaited<ReturnType<import('./layout.js').resolveLayout>>, input?: NodeJS.ReadableStream, output?: NodeJS.WritableStream }} options
  */
-export async function runMcpSession({ layout, input = process.stdin, output = process.stdout }) {
+export async function runMcpSession({ layout, input = process.stdin, output = process.stdout, workspacePaths = [] }) {
   const log = (level, message, data) => {
     process.stderr.write(`${JSON.stringify({ nivel: level, mensaje: message, ...(data ? { datos: data } : {}), fecha: new Date().toISOString() })}\n`);
   };
@@ -31,13 +32,21 @@ export async function runMcpSession({ layout, input = process.stdin, output = pr
     return closing;
   };
 
+  const workspace = createWorkspaceAccess(session, { paths: workspacePaths, log });
   const server = serveMcp({
     input,
     output,
     serverInfo: { name: 'mind', title: 'Mind', version: MOTOR_VERSION },
     instructions: quarantine.aviso ? `${AGENT_INSTRUCTIONS}\n\nAviso para el usuario: ${quarantine.aviso}` : AGENT_INSTRUCTIONS,
-    tools: (connection) => createAgentTools({ session, connection, log }),
-    onInitialized: () => session.start(),
+    tools: (connection) => {
+      const tools = createAgentTools({ session: workspace.session, connection, log });
+      return { definitions: tools.definitions, async call(name, args, context) {
+        await workspace.beforeCall(name, args);
+        return tools.call(name, args, context);
+      } };
+    },
+    onInitialized: async (connection) => { await workspace.initialize(connection); await session.start(); },
+    onRootsChanged: (connection) => workspace.refresh(connection),
     onClose: close,
     log,
   });

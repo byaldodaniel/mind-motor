@@ -1,3 +1,4 @@
+import { lockInstallation } from '../installation-lock.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -228,8 +229,11 @@ async function baseFormat(baseDirectory) {
   return data.version;
 }
 
-async function requireNoSessions(baseDirectory) {
-  const { live, stale } = await liveSessions(baseDirectory);
+async function requireNoSessions(baseDirectory, root) {
+  const baseSessions = await liveSessions(baseDirectory);
+  const installationSessions = await liveSessions(path.join(root, '.mind-producto'));
+  const live = [...new Map([...baseSessions.live, ...installationSessions.live].map(entry => [entry.id, entry])).values()];
+  const stale = [...baseSessions.stale, ...installationSessions.stale];
   if (live.length > 0) {
     throw fail('MIND_IN_USE', `Hay ${live.length} sesión(es) de Mind abiertas (agentes u órdenes en otra ventana). Ciérralas y vuelve a intentarlo.${stale.length > 0 ? ' Si un agente se cerró de forma abrupta, "mind reparar" limpia las sesiones abandonadas.' : ''}`);
   }
@@ -329,7 +333,7 @@ export function smokeTest(root, manifest) {
  * @param {(root: string, manifest: object) => Promise<unknown>} [options.verifyInstalled]
  * @param {{ rename?: Function, platform?: string, afterMove?: Function }} [options.testing] Solo para pruebas.
  */
-export async function updateMind({
+async function updateMindUnlocked({
   root, source, baseDirectory, confirm, force = false, report = () => {}, verifyInstalled = smokeTest, testing = {},
 }) {
   const current = await readManifestFile(root);
@@ -341,7 +345,7 @@ export async function updateMind({
   // --base admite ubicaciones personalizadas: ninguna puede quedar entre los
   // elementos que se apartan o sustituyen, tampoco a través de un enlace.
   await protectBase(root, baseDirectory, [...managedItems(current), MANIFEST_NAME]);
-  await requireNoSessions(baseDirectory);
+  await requireNoSessions(baseDirectory, root);
   const unlock = await lock(root);
   const staging = await fsp.mkdtemp(path.join(root, STAGING_PREFIX));
   const moves = { aside: [], placed: [] };
@@ -370,7 +374,7 @@ export async function updateMind({
       base: stored === null ? 'sin crear' : `formato ${stored}`, supportedBase: supported, backup: backupName,
     };
     if (!(await confirm(summary))) return { status: 'cancelada', ...summary };
-    await requireNoSessions(baseDirectory);
+    await requireNoSessions(baseDirectory, root);
 
     // Sustitución: un Ctrl+C a mitad dejaría la carpeta incompleta, así que se pospone.
     const deferred = () => {};
@@ -475,3 +479,9 @@ export async function run({ parameters, layout, print }) {
   return 0;
 }
 
+
+export async function updateMind(options) {
+  const release = await lockInstallation(options.root);
+  try { return await updateMindUnlocked(options); }
+  finally { await release(); }
+}

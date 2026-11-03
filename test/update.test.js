@@ -9,8 +9,38 @@ import { hashFile, scanTree, readManifestFile } from '../src/product-files.js';
 import { agentFixture } from './helpers/agent-fixture.js';
 import { openMotor } from '../src/motor.js';
 import { BASE_FORMAT_VERSION } from '../src/base-format.js';
+import { checkForUpdate } from '../src/auto-update.js';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { writeZip, writeTarGz } from '../src/archive.js';
+import { openSession } from '../src/session.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
+
+test('canal firmado: descarga, instalador en proceso separado, arranque nuevo y Base intacta', async t => {
+  const f = await agentFixture(t, { prefix: '.mind-auto-product-' });
+  await packageAt(f.mind, '1.0.0', { real: true });
+  const source = path.join(f.root, 'Nuevo');
+  await packageAt(source, '1.1.0', { real: true });
+  const session = await f.open();
+  await session.motor.recordContinuity({ content: 'Dato ficticio que se conserva' });
+  await session.close();
+  const before = await snapshot(f.layout.baseDirectory);
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  await fs.writeFile(path.join(f.mind, 'Motor', 'src', 'update-channel.json'), JSON.stringify({ repository: 'owner/mind', url: 'https://github.com/owner/mind/releases/latest/download/stable.json', publicKey: publicKey.export({ type: 'spki', format: 'pem' }) }));
+  const archive = path.join(f.root, process.platform === 'win32' ? 'Mind.zip' : 'Mind.tar.gz');
+  const entries = (await scanTree(source)).map(e => ({ ...e, source: { file: path.join(source, e.path) } }));
+  await (process.platform === 'win32' ? writeZip : writeTarGz)(archive, entries, { root: 'Mind', mtime: 1700000000 });
+  const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 1, mindVersion: '1.1.0', packages: [{ platform: process.platform, arch: process.arch,
+    url: 'https://github.com/owner/mind/releases/download/v1.1.0/Mind.zip', sha256: await hashFile(archive), bytes: (await fs.stat(archive)).size }] }));
+  let first = true;
+  const result = await checkForUpdate({ root: f.mind, fetcher: async () => {
+    if (first) { first = false; return new Response(JSON.stringify({ payload: payload.toString('base64'), signature: sign(null, payload, privateKey).toString('base64') })); }
+    return new Response(await fs.readFile(archive));
+  } });
+  assert.equal(result.status, 'actualizada', result.reason);
+  assert.equal((await readManifestFile(f.mind)).mindVersion, '1.1.0');
+  assert.deepEqual(await snapshot(f.layout.baseDirectory), before);
+});
 
 async function snapshot(root) {
   const result = {};
@@ -116,6 +146,30 @@ test('sesiones activas y formato de Base incompatible impiden la sustitución', 
   const before = await snapshot(f.mind);
   await assert.rejects(updateMind(f.options), { code: 'UPDATE_BASE_INCOMPATIBLE' });
   assert.deepEqual(await snapshot(f.mind), before);
+});
+
+test('una sesión con otra Base de la misma instalación impide la actualización automática', async t => {
+  const f = await fixture(t);
+  const other = await openSession({ layout: { ...f.layout, baseDirectory: path.join(f.root, 'Otra Base') }, motorVersion: '1.0.0', observe: false });
+  try { await assert.rejects(updateMind(f.options), { code: 'MIND_IN_USE' }); }
+  finally { await other.close(); }
+});
+
+test('la sesión nueva espera a que termine la sustitución del producto', async t => {
+  const f = await fixture(t);
+  let enter;
+  const entered = new Promise(resolve => { enter = resolve; });
+  let finish;
+  const mayFinish = new Promise(resolve => { finish = resolve; });
+  const updating = updateMind({ ...f.options, verifyInstalled: async () => { enter(); await mayFinish; } });
+  await entered;
+  const starting = f.open();
+  try {
+    await new Promise(resolve => setTimeout(resolve, 75));
+    assert.deepEqual(await fs.readdir(path.join(f.mind, '.mind-producto', 'sesiones')), []);
+  } finally { finish(); }
+  assert.equal((await updating).status, 'actualizada');
+  await (await starting).close();
 });
 
 test('un Motor anterior que solo admite formato 1 no puede sustituir el Motor de una Base 2', async (t) => {

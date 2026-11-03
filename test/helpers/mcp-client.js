@@ -10,7 +10,7 @@ const launcher = fileURLToPath(new URL('../../bin/mind.js', import.meta.url));
  */
 export function startMcp({ args = [], env = {}, command = process.execPath, commandArgs = [launcher, 'mcp'],
   capabilities = { elicitation: { form: {} } }, clientInfo = { name: 'cliente-de-prueba', version: '1.0' },
-  protocolVersion = '2025-11-25', onElicit = null, cwd, baseEnv = process.env } = {}) {
+  protocolVersion = '2025-11-25', onElicit = null, roots = [], cwd, baseEnv = process.env } = {}) {
   const child = spawn(command, [...commandArgs, ...args], {
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd,
     env: { ...baseEnv, ...env },
@@ -33,7 +33,11 @@ export function startMcp({ args = [], env = {}, command = process.execPath, comm
       const message = JSON.parse(line);
       if (message.method && Object.hasOwn(message, 'id')) {
         // Petición del servidor al cliente.
-        if (message.method === 'elicitation/create') {
+        if (message.method === 'roots/list') {
+          Promise.resolve(typeof roots === 'function' ? roots() : roots).then(value => {
+            child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { roots: value } })}\n`);
+          });
+        } else if (message.method === 'elicitation/create') {
           elicitations.push(message.params);
           Promise.resolve(onElicit ? onElicit(message.params) : { action: 'decline' }).then((result) => {
             child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`);

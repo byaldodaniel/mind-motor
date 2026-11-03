@@ -25,7 +25,7 @@ export const AGENT_INSTRUCTIONS = `Mind es un motor local que te permite trabaja
 
 Flujo recomendado:
 1. Llama a "estado" para ver las carpetas autorizadas, sus permisos y el estado de sus índices.
-2. Si el usuario quiere trabajar con una carpeta no autorizada, usa "solicitar_acceso" con su ruta absoluta y los permisos mínimos necesarios. El usuario decide en un formulario o en la consola de Mind; nunca afirmes que autorizó algo por él.
+2. La carpeta abierta que comunica el cliente o el iniciador tiene acceso completo durante la sesión, sin otro formulario. Para otras carpetas, ábrelas en el agente. Si el cliente no comunica carpetas, usa "solicitar_acceso" con su ruta absoluta y los permisos mínimos necesarios. El usuario decide en un formulario o en la consola de Mind; nunca afirmes que autorizó algo por él.
 3. Usa "buscar" y "explorar" (índices persistentes, sin recorrer el disco) antes de leer. Lee con "leer"; la respuesta incluye la versión necesaria para "modificar". "leer" también extrae el texto de documentos de oficina (docx, xlsx, pptx, odt, ods, odp) en modo solo lectura.
 4. Para cambios puntuales usa "editar"; para crear, "crear". Mind no sobrescribe ni borra sin control de versión.
 5. Para organizar usa "crear_carpeta", "mover" y "renombrar" (nunca reemplazan). "borrar" mueve a la papelera de Mind y el usuario lo confirma cada vez; "restaurar" lo devuelve y "vaciar_papelera" lo elimina para siempre con una confirmación adicional. Si queda pendiente, explica al usuario que lo decide con "mind autorizar".
