@@ -41,6 +41,7 @@ const node = packageRoot ? path.join(packageRoot, 'Runtime', 'node', process.pla
 const clients = [];
 const ownedPids = new Set();
 const ownedLifetimes = [];
+const supervisedLifetimes = new Map();
 const results = [];
 const measurements = [];
 const begun = Date.now();
@@ -92,6 +93,26 @@ async function stableGeneration() {
 async function status(client) {
   const response = await bounded(client.call('estado'), 'estado');
   assert.equal(response.isError, false, JSON.stringify(response));
+  const diagnostics = response.data?.procesos;
+  assert.equal(diagnostics?.ownerPid, client.child.pid, 'El diagnóstico debe pertenecer al cliente propio');
+  for (const record of [...diagnostics.active, ...diagnostics.recent]) {
+    if (!Number.isSafeInteger(record.pid) || record.pid < 1) continue;
+    assert.equal(record.parentPid, client.child.pid, 'El auxiliar debe pertenecer al Node propio');
+    const startedAt = Date.parse(record.startedAt);
+    assert.ok(Number.isFinite(startedAt), 'Falta fecha de creación del auxiliar');
+    let lifetime = supervisedLifetimes.get(record.id);
+    if (!lifetime) {
+      // The supervisor records startedAt just after spawn returns. This small
+      // allowance also covers a console created during that same spawn.
+      lifetime = { pid: record.pid, parentPid: record.parentPid, startedAt, endedAt: Infinity, toleranceMs: 250 };
+      supervisedLifetimes.set(record.id, lifetime);
+      ownedLifetimes.push(lifetime);
+    }
+    if (record.endedAt) {
+      lifetime.endedAt = Date.parse(record.endedAt);
+      assert.ok(Number.isFinite(lifetime.endedAt), 'Fecha de cierre del auxiliar no válida');
+    }
+  }
   return response.data;
 }
 async function open(label) {
@@ -105,7 +126,14 @@ async function open(label) {
   if (client.child.pid) ownedPids.add(client.child.pid);
   const lifetime = { pid: client.child.pid, startedAt, endedAt: Infinity };
   ownedLifetimes.push(lifetime);
-  client.child.once('exit', () => { lifetime.endedAt = Date.now(); });
+  client.child.once('exit', () => {
+    lifetime.endedAt = Date.now();
+    for (const helper of supervisedLifetimes.values()) {
+      // A last active snapshot cannot remain an unlimited PID attribution
+      // window after its owner dies. Indexers have no accepted-write grace.
+      if (helper.parentPid === client.child.pid && !Number.isFinite(helper.endedAt)) helper.endedAt = lifetime.endedAt + 1_000;
+    }
+  });
   client.child.on('error', () => {});
   client.child.stdin.on('error', () => {});
   const initialized = await bounded(client.initialize(), `initialize ${label}`);
@@ -115,6 +143,7 @@ async function open(label) {
   return client;
 }
 async function close(client) {
+  await status(client);
   const exit = await bounded(client.close(), `cierre ${client.label}`, 15_000);
   assert.equal(exit.code, 0, `${client.label}: ${JSON.stringify(exit)} ${client.stderr().slice(-1500)}`);
   return exit;
@@ -133,8 +162,9 @@ async function processRows() {
   assert.equal(exit, 0, stderr);
   const all = JSON.parse(stdout);
   // A PID can be reused immediately by Windows. Attribute a root or a direct
-  // child only when it was created during one of our recorded root lifetimes.
-  const during = (pid, createdAt) => Number.isFinite(createdAt) && ownedLifetimes.some(item => item.pid === pid && createdAt >= item.startedAt - 2 && createdAt <= item.endedAt);
+  // child only when it was created during a recorded MCP or indexer lifetime.
+  // Keeping ended indexers lets us still identify their orphaned consoles.
+  const during = (pid, createdAt) => Number.isFinite(createdAt) && ownedLifetimes.some(item => item.pid === pid && createdAt >= item.startedAt - (item.toleranceMs ?? 2) && createdAt <= item.endedAt);
   const selected = new Map(all.filter(item => during(item.ProcessId, item.CreatedAtMs)
     || during(item.ParentProcessId, item.CreatedAtMs)).map(item => [item.ProcessId, item.CreatedAtMs]));
   for (let repeat = 0; repeat < 20; repeat += 1) {
@@ -261,6 +291,7 @@ try {
     const previous = await owner();
     const leader = group.find(client => client.child.pid === previous?.pid);
     assert.ok(leader, 'El propietario debe pertenecer a esta prueba');
+    await status(leader);
     leader.child.kill('SIGKILL');
     await bounded(leader.exited, 'terminación forzada del propietario');
     const next = await eventually(async () => { const value = await owner(); return value?.pid !== previous.pid && group.some(client => client.child.pid === value?.pid) && value; }, 'nuevo propietario', 20_000);
@@ -317,7 +348,7 @@ finally {
     node: process.version, motor: clients[0]?.serverInfo ?? null, fuente: packageRoot ?? repo, root, ms: Date.now() - begun,
     superados: results.filter(item => item.resultado === 'superado').length,
     fallidos: results.filter(item => item.resultado === 'fallido').length,
-    casos: results, mediciones: measurements,
+    casos: results, mediciones: measurements, auxiliares_observados: [...supervisedLifetimes.values()],
     nota: 'Clientes MCP reales por stdio con agente/consentimiento simulados. Datos ficticios conservados para archivado. Solo procesos creados por esta prueba se terminan.' };
   await fs.writeFile(path.join(root, 'informe.json'), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`Informe: ${path.join(root, 'informe.json')}\n`);
