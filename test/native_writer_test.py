@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -220,14 +221,36 @@ class WriterTest(unittest.TestCase):
             self.assert_code('FILE_EXISTS', 'carrera.txt')
         target.unlink()
 
+        temporary_created = None
         with contextlib.ExitStack() as winner:
             def publish_first(temporary):
+                nonlocal temporary_created
+                temporary_created = temporary
                 target.write_bytes(b'ganador')
                 winner.enter_context(held(target, share=0))
 
             self.assert_code('FILE_EXISTS', 'carrera.txt', before_publish=publish_first)
         self.assertEqual(target.read_bytes(), b'ganador')
-        self.assertEqual(self.names(), ['carrera.txt'])
+        # Windows classic disposition deletes when the final reference closes.
+        # Do not mistake a briefly DELETE_PENDING name for a leaked temporary;
+        # only this exact temporary may be deferred, for at most two seconds.
+        backend = native.Windows()
+        observed = []
+        with contextlib.ExitStack() as stack:
+            parent, _ = native.open_parent(backend, stack, str(self.folder), ['carrera.txt'])
+            deadline = time.monotonic() + 2
+            while True:
+                names = self.names()
+                if names == ['carrera.txt']:
+                    break
+                self.assertEqual(names, sorted([temporary_created, 'carrera.txt']))
+                status, _ = backend._probe(parent, temporary_created)
+                self.assertIn(status, (native.STATUS_DELETE_PENDING, native.STATUS_OBJECT_NAME_NOT_FOUND))
+                observed.append(hex(status))
+                self.assertLess(time.monotonic(), deadline, f'Temporal persists: {temporary_created}; {observed}')
+                time.sleep(0.01)
+        if observed:
+            print(f'Windows temporary cleanup completed; observed NTSTATUS: {observed}', file=sys.stderr)
 
     @unittest.skipUnless(os.name == 'nt', 'eliminación pendiente de Windows')
     def test_name_pending_deletion_is_an_existing_name_not_a_denial(self):
