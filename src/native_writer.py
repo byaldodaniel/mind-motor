@@ -355,8 +355,10 @@ def run():
         sys.stderr.flush()
         if sys.stdin.buffer.read(1) != b'W':
             raise Refusal('CREATE_FAILED')
+        parent_guard.begin_commit(10)
 
     try:
+        parent_guard = reader.guard_parent()
         root, relative, data = decode(json.loads(sys.stdin.buffer.readline(3 * ABSOLUTE_MAX_BYTES)))
         result = create_file(root, relative, data, confirm)
         sys.stdout.write(json.dumps(result))

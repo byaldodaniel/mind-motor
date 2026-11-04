@@ -28,7 +28,9 @@ async function fixture(t) {
   await fs.mkdir(path.join(folder, 'Proyectos'), { recursive: true });
   await fs.writeFile(path.join(folder, 'Proyectos', 'plan.txt'), 'Plan ficticio v1');
   await fs.writeFile(path.join(folder, 'notas.txt'), 'Notas ficticias');
-  const motor = await openMotor({ baseDirectory: base });
+  // Verify watcher delivery independently of the host's changing CPU/RAM load;
+  // admission under pressure has dedicated governor coverage.
+  const motor = await openMotor({ baseDirectory: base, resourceSample: () => ({ pressured: false }) });
   const scope = await motor.authorizeFolder(folder);
   const reports = [];
   const open = (options = {}) => {

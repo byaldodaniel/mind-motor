@@ -58,26 +58,46 @@ async function abandoned(filename) {
 }
 
 /**
- * Retira un bloqueo abandonado sin poder borrar uno vivo por error: lo aparta
- * con un rename y comprueba que lo apartado es exactamente el archivo
- * examinado. Si no lo es, lo repone solo si el nombre sigue libre.
+ * Serializa la recuperación con una barrera que también respetan quienes
+ * adquieren el bloqueo. Se vuelve a examinar el dueño dentro de esa barrera:
+ * una observación anterior podría pertenecer a un bloqueo ya reemplazado.
+ * La barrera no se recupera automáticamente; si su dueño termina aquí se
+ * necesita revisión manual con todas las sesiones cerradas.
  */
-async function recover(filename, examined) {
-  const aside = `${filename}.abandonado-${randomUUID()}`;
+async function recover(filename) {
+  const barrier = `${filename}.recovery`;
   try {
-    await fs.rename(filename, aside);
+    await fs.mkdir(barrier, { mode: 0o700 });
   } catch (error) {
-    if (error.code === 'ENOENT') return false;
+    if (error.code === 'EEXIST') return false;
     throw error;
   }
-  const moved = await fs.lstat(aside, { bigint: true });
-  if (moved.dev !== examined.dev || moved.ino !== examined.ino) {
-    await fs.link(aside, filename).catch(() => {});
+  const owned = await fs.lstat(barrier, { bigint: true });
+  try {
+    const examined = await abandoned(filename);
+    if (!examined) return false;
+    const aside = `${filename}.abandonado-${randomUUID()}`;
+    try {
+      await fs.rename(filename, aside);
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+    const moved = await fs.lstat(aside, { bigint: true });
+    if (moved.dev !== examined.dev || moved.ino !== examined.ino) {
+      await fs.link(aside, filename).catch(() => {});
+      await fs.rm(aside, { force: true });
+      return false;
+    }
     await fs.rm(aside, { force: true });
-    return false;
+    return true;
+  } finally {
+    const current = await fs.lstat(barrier, { bigint: true });
+    if (!current.isDirectory() || current.dev !== owned.dev || current.ino !== owned.ino) {
+      throw new MotorError('INDEX_LOCK_LOST', 'La barrera de recuperación cambió; no se elimina una barrera ajena.');
+    }
+    await fs.rmdir(barrier);
   }
-  await fs.rm(aside, { force: true });
-  return true;
 }
 
 /** Nombre de bloqueo por defecto: el de los índices de carpeta. */
@@ -98,17 +118,30 @@ const LOCK_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * índices personalizados) usen su propio archivo `<lockName>-<id>.lock` con la
  * misma espera y la misma política de recuperación.
  */
-export async function withIndexLock(baseDirectory, scopeId, task, lockName = INDEX_LOCK_NAME) {
+export async function withIndexLock(baseDirectory, scopeId, task, lockName = INDEX_LOCK_NAME, { timeoutMs = WAIT_MS, signal } = {}) {
   if (typeof lockName !== 'string' || !LOCK_NAME.test(lockName)
       || (lockName !== INDEX_LOCK_NAME && (typeof scopeId !== 'string' || !LOCK_ID.test(scopeId)))) {
     throw new MotorError('INVALID_LOCK_NAME', 'El nombre del bloqueo no es válido.');
   }
   const filename = path.join(baseDirectory, `${lockName}-${scopeId}.lock`);
   const started = performance.now();
-  const deadline = started + WAIT_MS;
+  const deadline = started + timeoutMs;
   let handle;
   let inspectedAt = started;
+  async function waitForRecovery() {
+    for (;;) {
+      signal?.throwIfAborted();
+      try { await fs.lstat(`${filename}.recovery`); }
+      catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      if (performance.now() >= deadline) {
+        throw new MotorError('INDEX_LOCK_TIMEOUT', 'La recuperación de la coordinación sigue ocupada. Si persiste tras cerrar todos los agentes, revisa la barrera .recovery antes de retirarla manualmente.');
+      }
+      await delay(Math.min(RETRY_MS, Math.max(1, deadline - performance.now())), undefined, { signal });
+    }
+  }
   for (;;) {
+    signal?.throwIfAborted();
+    await waitForRecovery();
     try {
       handle = await fs.open(filename, 'wx', 0o600);
       break;
@@ -118,30 +151,42 @@ export async function withIndexLock(baseDirectory, scopeId, task, lockName = IND
       if (now - inspectedAt >= INSPECT_EVERY_MS) {
         inspectedAt = now;
         const examined = await abandoned(filename);
-        if (examined && await recover(filename, examined)) continue;
+        if (examined && await recover(filename)) continue;
       }
       if (now >= deadline) {
         throw new MotorError('INDEX_LOCK_TIMEOUT', lockName === INDEX_LOCK_NAME
           ? 'El índice está bloqueado por otro proceso de Mind. Si cerraste todos los agentes y persiste, ejecuta "mind reparar".'
-          : 'Otro proceso de Mind está actualizando estos datos. Si cerraste todos los agentes y persiste, ejecuta "mind reparar".');
+          : 'Otro proceso de Mind está actualizando estos datos. Si persiste con los agentes cerrados, revisa el diagnóstico de coordinación.');
       }
-      await delay(Math.min(RETRY_MS, Math.max(1, deadline - performance.now())));
+      await delay(Math.min(RETRY_MS, Math.max(1, deadline - performance.now())), undefined, { signal });
     }
   }
   let owned;
+  async function requireOwnedLock() {
+    const current = await fs.lstat(filename, { bigint: true }).catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!owned || !current?.isFile() || current.dev !== owned.dev || current.ino !== owned.ino) {
+      throw new MotorError('INDEX_LOCK_LOST', 'El archivo de coordinación cambió; no se usa ni se elimina un bloqueo ajeno.');
+    }
+  }
   try {
     owned = await handle.stat({ bigint: true });
     await handle.writeFile(JSON.stringify({
       version: 1, owner: randomUUID(), pid: process.pid, host: os.hostname(), createdAt: new Date().toISOString(),
     }) + '\n');
+    // The barrier may have appeared between the first check and open('wx').
+    // Publish our live owner before waiting, but never enter the task through
+    // the temporary filename gap left by a recovery in progress.
+    await waitForRecovery();
+    await requireOwnedLock();
+    signal?.throwIfAborted();
     return await task();
   } finally {
     try {
       // Nunca borrar un archivo distinto del creado por este propietario.
-      const current = await fs.lstat(filename, { bigint: true });
-      if (!owned || !current.isFile() || current.dev !== owned.dev || current.ino !== owned.ino) {
-        throw new MotorError('INDEX_LOCK_LOST', 'El archivo de coordinación cambió; no se elimina un bloqueo ajeno.');
-      }
+      await requireOwnedLock();
       await handle.close();
       handle = null;
       await fs.unlink(filename);

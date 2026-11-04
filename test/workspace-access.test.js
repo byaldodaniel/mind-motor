@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startMcp } from './helpers/mcp-client.js';
 
 async function fixture(t) {
@@ -76,7 +76,10 @@ test('sin raíces MCP, el directorio de inicio del cliente abre el proyecto sin 
 
 test('la carpeta abierta queda observada desde la primera sesión', async t => {
   const f = await fixture(t);
-  const client = f.start({ cwd: f.a });
+  const client = f.start({ cwd: f.a, commandArgs: [
+    '--import', new URL('./fixtures/idle-resources.mjs', import.meta.url).href,
+    fileURLToPath(new URL('../bin/mind.js', import.meta.url)), 'mcp',
+  ] });
   await client.initialize();
   assert.equal((await client.call('leer', { ruta: 'nota.txt' })).isError, false);
   await fs.writeFile(path.join(f.a, 'externo.txt'), 'Cambio ficticio fuera de Mind');

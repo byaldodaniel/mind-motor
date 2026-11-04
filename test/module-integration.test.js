@@ -51,8 +51,9 @@ test('Motor indexa y reconcilia solo ids del registro; continuidad y funciones s
   const requester = {};
   await assert.rejects(motor.readTextFile({ requester, authorization: scope.id }), { code: 'READ_NOT_AUTHORIZED' });
   assert.deepEqual((await fs.readdir(base)).sort(), [
-    `folder-authorization-${scope.id}.json`, `folder-index-${scope.id}.json`, 'mind-base.json',
+    `folder-authorization-${scope.id}.json`, `folder-index-${scope.id}.json`, 'mind-base.json', 'resource-queue',
   ].sort());
+  assert.deepEqual(await fs.readdir(path.join(base, 'resource-queue')), [], 'La cola queda vacía al terminar');
 });
 
 test('el índice y su vínculo de autorización sobreviven a un proceso nuevo', async (t) => {

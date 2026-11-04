@@ -218,6 +218,7 @@ def error_code(error):
 def run():
     """Protocolo como native_reader: petición, READY, espera R, resultado JSON."""
     try:
+        reader.guard_parent()
         request = json.loads(sys.stdin.buffer.readline(32768))
         if not isinstance(request, dict) or set(request) != {'root', 'relativePath', 'format'}:
             raise Refusal('READ_FAILED')

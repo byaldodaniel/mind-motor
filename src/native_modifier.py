@@ -511,8 +511,10 @@ def run():
         sys.stderr.flush()
         if sys.stdin.buffer.read(1) != b'W':
             raise Refusal('MODIFY_FAILED')
+        parent_guard.begin_commit(10)
 
     try:
+        parent_guard = reader.guard_parent()
         request = json.loads(sys.stdin.buffer.readline(3 * ABSOLUTE_MAX_BYTES))
         root, relative, expected, data = decode(request)
         result = modify_file(root, relative, expected, data, confirm, max_bytes=size_limit(request))

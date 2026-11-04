@@ -1,5 +1,6 @@
 import { lockInstallation } from './installation-lock.js';
 import fs from 'node:fs/promises';
+import { watch as fsWatch } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -10,8 +11,13 @@ import { createAccessPolicy } from './access-policy.js';
 import { createConsentRequests } from './consent.js';
 import { createRemovalLog } from './removals.js';
 import { SESSION_EXTENSIONS } from './session-extensions.js';
+import { createBackgroundLease } from './background-coordinator.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { withRequestContext, requestSignal, waitForRequest } from './request-context.js';
 
 const SYNC_INTERVAL_MS = 30_000;
+const OWNER_CHECK_MS = 2_000;
+const CLOSE_TIMEOUT_MS = 5_000;
 /** Recorridos iniciales simultáneos: con muchas carpetas, el inicio no satura el equipo. */
 const INITIAL_SCANS = 2;
 const SESSIONS_DIRECTORY = 'sesiones';
@@ -39,21 +45,25 @@ function createAudit(baseDirectory) {
  *
  * @param {{ layout: object, motorVersion: string, log?: Function, observe?: boolean, functionExecutors?: object }} options
  */
-export async function openSession({ layout, motorVersion, log = () => {}, observe = true, functionExecutors = {} }) {
+export async function openSession({ layout, motorVersion, log = () => {}, observe = true, functionExecutors = {},
+  motorFactory = openMotor }) {
   const releaseStartup = layout.product ? await lockInstallation(layout.root) : async () => {};
   try {
   const base = await ensureBase(layout.baseDirectory, { motorVersion, protectedFrom: layout.motorDirectory });
-  const motor = await openMotor({
+  const lifecycle = new AbortController();
+  const motor = await motorFactory({
     baseDirectory: base.baseDirectory,
     pythonExecutable: layout.pythonExecutable,
     protectedDirectories: layout.protectedDirectories,
     functionExecutors,
+    signal: lifecycle.signal,
   });
   const policy = createAccessPolicy({ baseDirectory: motor.baseDirectory, getAuthorizedFolder: motor.getAuthorizedFolder });
   const requests = createConsentRequests(motor.baseDirectory);
   const removals = createRemovalLog({ baseDirectory: motor.baseDirectory, getAuthorizedFolder: motor.getAuthorizedFolder });
   const audit = createAudit(motor.baseDirectory);
   const sessionId = randomUUID();
+  const lease = observe ? createBackgroundLease(motor.baseDirectory, sessionId) : null;
   const sessionsDirectory = path.join(motor.baseDirectory, SESSIONS_DIRECTORY);
   const sessionFile = path.join(sessionsDirectory, `sesion-${sessionId}.json`);
   const folders = new Map();
@@ -63,6 +73,30 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   let started = false;
   let closed = false;
   let syncing = null;
+  let lastSyncAt = 0;
+  let closing = null;
+  let registryWatcher = null;
+  let registryWake = null;
+
+  function watchRegistry() {
+    try {
+      registryWatcher = fsWatch(motor.baseDirectory, { persistent: false }, (_type, filename) => {
+        // A follower can authorize a new scope. Ignore index/queue/audit writes
+        // so normal background activity cannot trigger a synchronization loop.
+        if (closed || (filename != null && !/^folder-authorization-[a-f0-9]{64}\.json$/.test(String(filename)))) return;
+        clearTimeout(registryWake);
+        registryWake = setTimeout(() => {
+          registryWake = null;
+          sync().catch((error) => log('aviso', 'No se pudo actualizar el registro compartido', { error: String(error) }));
+        }, 80);
+        registryWake.unref?.();
+      });
+      registryWatcher.on('error', () => {
+        registryWatcher?.close();
+        registryWatcher = null; // The periodic registry check remains available.
+      });
+    } catch { registryWatcher = null; }
+  }
 
   await fs.mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
   await fs.writeFile(sessionFile, `${JSON.stringify({
@@ -79,7 +113,8 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   function track(folderId) {
     let state = folders.get(folderId);
     if (!state) {
-      state = { ready: null, lastReport: null, lastError: null, lastChanges: null, entries: null, chain: Promise.resolve() };
+      state = { ready: null, lastReport: null, lastError: null, lastChanges: null, entries: null,
+        halted: null, configuration: null, chain: Promise.resolve() };
       folders.set(folderId, state);
     }
     return state;
@@ -123,6 +158,10 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     }
     if (report.type === 'stopped') {
       state.ready = null;
+      if (report.code && report.reason !== 'revoked') {
+        state.halted = report.code;
+        state.lastError = report.code;
+      }
       log('info', 'Observación detenida', { carpeta: report.folderId, motivo: report.reason });
     }
   }
@@ -134,6 +173,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     if (activeScans >= INITIAL_SCANS) await new Promise((resolve) => waitingScans.push(resolve));
     activeScans += 1;
     try {
+      lifecycle.signal.throwIfAborted();
       return await task();
     } finally {
       activeScans -= 1;
@@ -143,18 +183,20 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
 
   function begin(folderId) {
     const state = track(folderId);
+    if (closed || state.halted) return Promise.resolve({ mode: 'stopped', code: state.halted });
     if (state.ready) return state.ready;
     if (!observer) {
       // Sin observación: la reconciliación se hace bajo demanda (ensureIndex).
-      state.ready = Promise.resolve(null);
-      return state.ready;
+      return Promise.resolve(null);
     }
     // El índice anterior permite describir lo que desapareció mientras Mind estuvo cerrado.
     state.ready = scanSlot(async () => {
+      state.configuration = JSON.stringify(await motor.getAuthorizedFolder(folderId));
       state.entries ??= await indexedEntries(folderId);
+      lifecycle.signal.throwIfAborted();
       return observer.observe(folderId);
     }).then((status) => {
-      state.lastError = null;
+      if (!state.halted) state.lastError = null;
       return status;
     }, (error) => {
       state.lastError = error?.code ?? 'OBSERVE_FAILED';
@@ -168,11 +210,36 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   /** Alinea las carpetas observadas con el registro (otra sesión o la consola pueden cambiarlo). */
   async function sync() {
     if (closed) return;
-    syncing ??= (async () => {
+    syncing ??= withRequestContext({}, async () => {
       try {
+        if (observe && !observer) {
+          if (!await lease.acquire()) return;
+          if (closed) { await lease.release(); return; }
+          observer = motor.openIndexObserver({ onReport, signal: lifecycle.signal, initialPriority: 'background' });
+          watchRegistry();
+          for (const factory of SESSION_EXTENSIONS) {
+            try {
+              const extension = factory(api);
+              extensions.push(extension);
+              await extension.start?.();
+            } catch (error) {
+              log('error', 'No se pudo iniciar una extensión de la sesión', { error: String(error?.stack ?? error) });
+            }
+          }
+        }
+        if (closed || !observer) return;
         const registered = await motor.listAuthorizedFolders();
         const ids = new Set(registered.map((folder) => folder.id));
-        for (const id of ids) if (!folders.get(id)?.ready) begin(id);
+        for (const id of ids) {
+          const state = folders.get(id);
+          if (state?.halted) {
+            const configuration = JSON.stringify(await motor.getAuthorizedFolder(id));
+            if (configuration === state.configuration) continue;
+            state.halted = null;
+            state.ready = null;
+          }
+          if (!state?.ready) begin(id);
+        }
         for (const id of [...folders.keys()]) {
           if (!ids.has(id)) {
             folders.delete(id);
@@ -180,9 +247,10 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
           }
         }
       } finally {
+        lastSyncAt = Date.now();
         syncing = null;
       }
-    })();
+    });
     return syncing;
   }
 
@@ -198,27 +266,23 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     requests,
     audit,
     log,
-    observing: () => observer !== null,
+    observing: () => observe && started && !closed,
+    ownsBackground: () => observer !== null && !closed,
+    backgroundStatus: () => observe ? lease.status() : { role: 'disabled', ownerPid: null },
 
     /** Empieza la reconciliación inicial y la observación, sin bloquear al agente. */
     async start() {
       if (started || closed) return;
       started = true;
-      if (observe) observer = motor.openIndexObserver({ onReport });
       await policy.prune().catch((error) => log('aviso', 'No se pudieron limpiar decisiones antiguas', { error: String(error) }));
-      sync().catch((error) => log('error', 'No se pudo leer el registro de carpetas', { error: String(error) }));
-      syncTimer = setInterval(() => {
-        sync().catch((error) => log('aviso', 'Sincronización del registro fallida', { error: String(error) }));
-      }, SYNC_INTERVAL_MS);
-      syncTimer.unref?.();
-      for (const factory of SESSION_EXTENSIONS) {
-        try {
-          const extension = factory(api);
-          extensions.push(extension);
-          await extension.start?.();
-        } catch (error) {
-          log('error', 'No se pudo iniciar una extensión de la sesión', { error: String(error?.stack ?? error) });
-        }
+      await sync();
+      if (observe && !closed) {
+        syncTimer = setInterval(() => {
+          if (!observer || Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) {
+            sync().catch((error) => log('aviso', 'Sincronización del registro fallida', { error: String(error) }));
+          }
+        }, OWNER_CHECK_MS);
+        syncTimer.unref?.();
       }
     },
 
@@ -230,17 +294,37 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
      * la reconciliación inicial; sin ella reconcilia ahora (operación individual).
      */
     async ensureIndex(folderId, { timeoutMs = 60_000 } = {}) {
-      if (!started) await this.start();
+      const request = requestSignal();
+      const signal = request ? AbortSignal.any([lifecycle.signal, request]) : lifecycle.signal;
+      signal.throwIfAborted();
+      if (!started) await waitForRequest(withRequestContext({}, () => this.start()), signal);
+      lifecycle.signal.throwIfAborted();
+      if (observe) await motor.prioritizeIndex(folderId, timeoutMs);
+      if (observe && !observer) {
+        const until = Date.now() + timeoutMs;
+        for (;;) {
+          // The Motor revalidates the folder's authorization on each read.
+          if (await motor.readFolderIndex(folderId)) return { status: 'current' };
+          await waitForRequest(sync(), signal);
+          if (observer) break;
+          if (Date.now() >= until) return { status: 'reconciling' };
+          await delay(Math.min(200, until - Date.now()), undefined, { signal });
+        }
+      }
       if (observer) {
-        const ready = begin(folderId);
+        const ready = withRequestContext({}, () => begin(folderId));
         let timer;
         const timeout = new Promise((resolve) => {
           timer = setTimeout(() => resolve('timeout'), timeoutMs);
           timer.unref?.();
         });
-        const result = await Promise.race([ready, timeout]);
-        clearTimeout(timer);
+        let result;
+        try { result = await waitForRequest(Promise.race([ready, timeout]), signal); }
+        finally { clearTimeout(timer); }
         if (result === 'timeout') return { status: 'reconciling' };
+        if (folders.get(folderId)?.halted) {
+          throw new MotorError(folders.get(folderId).halted, 'La indexación está detenida; cambia la configuración o solicita una reindexación explícita.');
+        }
         if (await motor.readFolderIndex(folderId)) return { status: 'current' };
       }
       const state = track(folderId);
@@ -256,6 +340,8 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
      */
     async reindex(folderId) {
       const state = track(folderId);
+      state.halted = null;
+      state.ready = null;
       state.entries ??= await indexedEntries(folderId);
       const indexed = await motor.indexFolder(folderId);
       await trackRemovals(folderId, indexed.changes?.removed ?? []);
@@ -266,7 +352,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       const state = folders.get(folderId);
       const observed = observer?.status(folderId) ?? null;
       return {
-        observacion: observed ? observed.mode : observer ? 'inactiva' : 'bajo-demanda',
+        observacion: observed ? observed.mode : state?.halted ? 'detenida' : observer ? 'inactiva' : observe ? 'compartida' : 'bajo-demanda',
         ultimaReconciliacion: observed?.lastReconciledAt ? new Date(observed.lastReconciledAt).toISOString() : null,
         pendiente: observed?.pending ?? false,
         incidencia: state?.lastError ?? null,
@@ -291,19 +377,41 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     },
 
     async close() {
-      if (closed) return;
+      if (closing) return closing;
       closed = true;
+      lifecycle.abort(new MotorError('SESSION_CLOSED', 'La sesión se cerró.'));
       clearInterval(syncTimer);
-      for (const extension of extensions.reverse()) {
-        await Promise.resolve().then(() => extension.close?.()).catch((error) => log('error', 'Fallo al cerrar una extensión', { error: String(error) }));
-      }
+      clearTimeout(registryWake);
+      registryWatcher?.close();
+      registryWatcher = null;
       listeners.clear();
-      try {
-        await observer?.close();
-      } finally {
+      const cleanup = (async () => {
+        await syncing?.catch(() => {});
+        await Promise.allSettled([
+          observer?.close(),
+          ...extensions.reverse().map((extension) => Promise.resolve().then(() => extension.close?.())),
+          ...[...folders.values()].map((state) => state.ready),
+        ]);
+        await Promise.allSettled([...folders.values()].map((state) => state.chain));
+        // Release ownership only after work stops: a delayed extension must
+        // never overlap the replacement owner.
+        await lease?.release();
         await fs.rm(sessionFile, { force: true }).catch(() => {});
         if (installationSession) await fs.rm(installationSession, { force: true }).catch(() => {});
-      }
+      })();
+      closing = (async () => {
+        let timer;
+        try {
+          await Promise.race([cleanup, new Promise((resolve) => {
+            timer = setTimeout(() => {
+              log('aviso', 'El cierre continúa; el coordinador conserva su dueño hasta terminar.');
+              resolve();
+            }, CLOSE_TIMEOUT_MS);
+          })]);
+        } finally { clearTimeout(timer); }
+      })();
+      cleanup.catch((error) => log('error', 'Fallo al liberar la sesión', { error: String(error) }));
+      return closing;
     },
   });
   return api;

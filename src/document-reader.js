@@ -36,11 +36,13 @@ export function documentFormat(relativePath) {
 
 function extractNative({ root, relativePath, format, pythonExecutable, confirm }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let output = '';
     let diagnostic = '';
     let confirmation;
     let failure;
+    let closed = false;
+    let sent = false;
     const fail = (error) => { failure ??= error; child.kill(); };
     const timer = setTimeout(() => fail(new MotorError('READ_FAILED', 'La extracción excedió el tiempo permitido.')), 30_000);
     child.on('error', (cause) => fail(new MotorError('SAFE_OPEN_UNAVAILABLE', messages.SAFE_OPEN_UNAVAILABLE, { cause })));
@@ -53,14 +55,18 @@ function extractNative({ root, relativePath, format, pythonExecutable, confirm }
       diagnostic = (diagnostic + chunk.toString('utf8')).replace(/\r\n/g, '\n');
       if (diagnostic.length > 256) return fail(new MotorError('READ_FAILED', messages.READ_FAILED));
       if (diagnostic.startsWith('READY\n') && !confirmation) {
-        confirmation = Promise.resolve().then(confirm).then(() => child.stdin.end('R')).catch(fail);
+        confirmation = Promise.resolve().then(confirm).then(() => {
+          if (failure || closed) return;
+          sent = true;
+          child.stdin.end('R');
+        }).catch(fail);
       }
     });
-    child.on('close', async (code) => {
+    child.on('close', (code) => {
+      closed = true;
       clearTimeout(timer);
-      await confirmation;
       if (failure) return reject(failure);
-      if (code !== 0 || !confirmation) {
+      if (code !== 0 || !sent) {
         const nativeCode = diagnostic.replace('READY\n', '').trim();
         const errorCode = Object.hasOwn(messages, nativeCode) ? nativeCode : 'READ_FAILED';
         return reject(new MotorError(errorCode, messages[errorCode]));

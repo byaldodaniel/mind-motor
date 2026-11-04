@@ -3,6 +3,8 @@ import { MotorError } from './errors.js';
 import { contains, samePath, isExcluded, TRASH_DIRECTORY } from './paths.js';
 import { scanFolder } from './index-scan.js';
 import { createIndexStore, validateScopeId } from './index-store.js';
+import { createResourceGovernor } from './resource-governor.js';
+import { requestSignal as currentRequestSignal } from './request-context.js';
 
 const DEFAULT_MAX_ENTRIES = 100_000;
 
@@ -88,6 +90,13 @@ function requireSameAuthorization(before, after) {
   }
 }
 
+function requireSameScanScope(before, after) {
+  requireSameAuthorization(before, after);
+  if ((before.exclusions ?? []).join('\0') !== (after.exclusions ?? []).join('\0')) {
+    throw new MotorError('INDEX_CONFLICT', 'Las exclusiones cambiaron durante el recorrido; se descarta la instantánea.');
+  }
+}
+
 /**
  * Núcleo interno de indexación de metadatos. El Motor lo crea con su Base y
  * resolutor del registro, y expone las operaciones solo al anfitrión administrativo.
@@ -101,6 +110,7 @@ function requireSameAuthorization(before, after) {
 export function createFolderIndexer({
   baseDirectory, resolveScope, maxEntries = DEFAULT_MAX_ENTRIES,
   pythonExecutable = process.platform === 'win32' ? 'python' : 'python3',
+  signal: lifecycleSignal, resourceSample,
 } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica la ruta absoluta de la Base del Motor.');
@@ -112,6 +122,7 @@ export function createFolderIndexer({
     throw new MotorError('INVALID_INDEX_LIMIT', 'El límite de entradas debe ser un entero positivo.');
   }
   const store = createIndexStore(baseDirectory);
+  const governor = createResourceGovernor(baseDirectory, { sample: resourceSample });
   const pending = new Map();
 
   async function authorized(scopeId) {
@@ -199,29 +210,44 @@ export function createFolderIndexer({
   }
 
   return Object.freeze({
+    resourceStatus: governor.status,
+    async prioritizeIndex(scopeId, timeoutMs) {
+      await authorized(scopeId);
+      return governor.promote(scopeId, timeoutMs);
+    },
     /**
      * Crea el índice inicial o lo reconcilia con el estado actual de la carpeta.
      * Si falla, el índice anterior permanece intacto.
      * @param {string} scopeId
      * @returns {Promise<IndexResult>}
      */
-    async indexFolder(scopeId) {
+    async indexFolder(scopeId, { signal: requestSignal = currentRequestSignal(), priority = 'interactive', timeoutMs } = {}) {
       validateScopeId(scopeId);
-      return exclusive(scopeId, async () => {
-        const scope = await authorized(scopeId);
+      const signals = [lifecycleSignal, requestSignal].filter(Boolean);
+      const signal = signals.length ? AbortSignal.any(signals) : undefined;
+      signal?.throwIfAborted();
+      const requestedScope = await authorized(scopeId);
+      return governor.run(() => exclusive(scopeId, async () => {
+        signal?.throwIfAborted();
+        let scope;
         const previous = await store.exclusive(scopeId, async () => {
-          requireSameAuthorization(scope, await authorized(scopeId));
+          // A queued request keeps its authorization identity, but must use
+          // the current exclusions when it is finally admitted.
+          scope = await authorized(scopeId);
+          requireSameAuthorization(requestedScope, scope);
           return boundIndex(await store.load(scopeId), scope);
         });
         // La papelera de Mind es una exclusión implícita: nunca se recorre ni se indexa.
         const { entries, issues } = await scanFolder(scope.path, {
           previous: previous?.entries ?? [], maxEntries, pythonExecutable,
           exclude: [...(scope.exclusions ?? []), TRASH_DIRECTORY],
+          signal, timeoutMs,
         });
         // El recorrido no retiene el bloqueo. Se descarta si cambió su base.
-        requireSameAuthorization(scope, await authorized(scopeId));
+        requireSameScanScope(scope, await authorized(scopeId));
+        signal?.throwIfAborted();
         return store.exclusive(scopeId, async () => {
-          requireSameAuthorization(scope, await authorized(scopeId));
+          requireSameScanScope(scope, await authorized(scopeId));
           const latest = boundIndex(await store.load(scopeId), scope);
           if (JSON.stringify(latest) !== JSON.stringify(previous)) {
             throw new MotorError('INDEX_CONFLICT', 'Otro proceso actualizó este índice durante el recorrido.');
@@ -242,7 +268,7 @@ export function createFolderIndexer({
             changes: previous ? compare(previous.entries, entries) : null,
           };
         });
-      });
+      }), { signal, priority, scopeId });
     },
 
     /**

@@ -1001,8 +1001,10 @@ def run():
         sys.stderr.flush()
         if sys.stdin.buffer.read(1) != b'W':
             raise Refusal('FAILED')
+        parent_guard.begin_commit({'trash': 30, 'purge': 120}.get(request['op'], 10))
 
     try:
+        parent_guard = writer.reader.guard_parent()
         request = decode(json.loads(sys.stdin.buffer.readline(65536)))
         sys.stdout.write(json.dumps(dispatch(request, confirm)))
         return 0
