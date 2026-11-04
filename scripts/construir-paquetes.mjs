@@ -44,7 +44,7 @@ export const TARGETS = Object.freeze({
 });
 
 /** Archivos del Motor que viajan en el paquete (solo los versionados en git). */
-const MOTOR_PATHS = ['bin', 'src', 'package.json', 'LICENSE', 'docs/PRODUCTO.md'];
+const MOTOR_PATHS = ['bin', 'src', 'package.json', 'LICENSE', 'docs/PRODUCTO.md', 'docs/CONTROL_RECURSOS.md'];
 
 function fail(message) {
   throw new Error(message);

@@ -7,11 +7,25 @@ no puede hacer que se listen nombres de fuera de la raíz autorizada.
 No abre archivos regulares ni lee su contenido.
 """
 import errno
+import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import stat
 import sys
+
+_parent_spec = importlib.util.spec_from_file_location('native_parent', Path(__file__).with_name('native_parent.py'))
+_parent = importlib.util.module_from_spec(_parent_spec)
+_parent_spec.loader.exec_module(_parent)
+
+
+def guard_parent(expected_pid=None):
+    """Keep the public guard used by fixtures, with the scanner's error code."""
+    try:
+        return _parent.guard_parent(expected_pid)
+    except _parent.ParentGone:
+        raise Refusal('SAFE_SCAN_PARENT_GONE') from None
 
 WINDOWS_EPOCH = 116444736000000000  # 1970-01-01 en intervalos de 100 ns desde 1601.
 LINK_TAGS = (0xA000000C, 0xA0000003)  # IO_REPARSE_TAG_SYMLINK y MOUNT_POINT (junction).
@@ -366,6 +380,12 @@ def scan(root, max_entries, backend=None, before_open=None, exclude=()):
 
 def run():
     try:
+        expected_pid = None
+        if len(sys.argv) != 1:
+            if len(sys.argv) != 3 or sys.argv[1] != '--parent-pid':
+                raise Refusal('SAFE_SCAN_PARENT_GONE')
+            expected_pid = int(sys.argv[2])
+        guard_parent(expected_pid)
         request = json.loads(sys.stdin.buffer.readline(65536))
         exclude = request.get('exclude', [])
         if not isinstance(exclude, list) or not all(isinstance(item, str) and item for item in exclude):

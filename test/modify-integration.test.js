@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { openMotor, textVersion } from '../src/motor.js';
 import { createFolderRegistry } from '../src/folders.js';
 import { createFolderIndexer } from '../src/indexer.js';
+import { readBaseContents } from './helpers/base-content.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const development = path.dirname(motorDirectory);
@@ -81,7 +82,7 @@ test('lectura → versión → modificación autorizada → búsqueda → nueva 
   assert.equal(await fs.readFile(path.join(folder, 'vecino.txt'), 'utf8'), 'Nota ficticia que no se toca');
   assert.equal((await fs.stat(path.join(folder, 'vecino.txt'))).mtimeMs, neighbour.mtimeMs);
   assert.deepEqual((await fs.readdir(path.join(folder, 'Proyectos'))), ['Acta.txt']);
-  const stored = (await Promise.all((await fs.readdir(base)).map((name) => fs.readFile(path.join(base, name), 'utf8')))).join('');
+  const stored = await readBaseContents(base);
   assert.ok(!stored.includes('MARCADOR-MODIFICACION'), 'El contenido no se guarda en la Base');
 });
 

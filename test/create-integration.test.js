@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openMotor } from '../src/motor.js';
+import { readBaseContents } from './helpers/base-content.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const development = path.dirname(motorDirectory);
@@ -65,7 +66,7 @@ test('registro → creación autorizada → búsqueda → lectura del archivo nu
   // La entrada publicada coincide con el disco: reconciliar no informa cambios.
   assert.deepEqual((await motor.indexFolder(scope.id)).changes, { added: [], modified: [], removed: [] });
   assert.equal(await fs.readFile(path.join(folder, 'existente.txt'), 'utf8'), 'Nota ficticia previa');
-  const stored = (await Promise.all((await fs.readdir(base)).map((name) => fs.readFile(path.join(base, name), 'utf8')))).join('');
+  const stored = await readBaseContents(base);
   assert.ok(!stored.includes('MARCADOR-CREACION'), 'El contenido no se guarda en la Base');
 });
 

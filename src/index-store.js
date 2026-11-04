@@ -1,5 +1,6 @@
 import { lstat } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { MotorError } from './errors.js';
 import { readJson, writeJson, removeJson } from './storage.js';
 import { withIndexLock } from './index-lock.js';
@@ -89,6 +90,7 @@ function validRecord(data, scopeId) {
 
 /** Entradas totales que se conservan en memoria por instancia (LRU por carpeta). */
 export const INDEX_CACHE_MAX_ENTRIES = 600_000;
+export const INDEX_CACHE_MAX_BYTES = 32 * 1024 ** 2;
 // Solo para medir el comportamiento sin caché en las comparativas.
 const CACHE_ENABLED = process.env.MIND_SIN_CACHE_INDICE !== '1';
 
@@ -112,16 +114,22 @@ function deepFreeze(index) {
 }
 
 /** Persistencia de índices en la Base; un archivo versionado por ámbito. */
-export function createIndexStore(baseDirectory) {
+export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYTES } = {}) {
   const cache = new Map();
   function remember(scopeId, key, index) {
     cache.delete(scopeId);
-    cache.set(scopeId, { identity: key, index, size: index.entries.length });
+    // Account for strings and object overhead, not only the number of entries.
+    const bytes = index.entries.reduce((sum, entry) => sum + 256 + entry.path.length * 2, 512)
+      + index.issues.reduce((sum, issue) => sum + 128 + issue.path.length * 2 + issue.code.length * 2, 0);
+    if (!CACHE_ENABLED || bytes > maxBytes || os.freemem() < os.totalmem() * 0.08) { cache.clear(); return; }
+    cache.set(scopeId, { identity: key, index, size: index.entries.length, bytes });
     let total = [...cache.values()].reduce((sum, item) => sum + item.size, 0);
+    let totalBytes = [...cache.values()].reduce((sum, item) => sum + item.bytes, 0);
     for (const [id, item] of cache) {
-      if (total <= INDEX_CACHE_MAX_ENTRIES || cache.size === 1) break;
+      if (total <= INDEX_CACHE_MAX_ENTRIES && totalBytes <= maxBytes) break;
       cache.delete(id);
       total -= item.size;
+      totalBytes -= item.bytes;
     }
   }
   function filename(scopeId) {
@@ -143,6 +151,7 @@ export function createIndexStore(baseDirectory) {
      * @returns {Promise<FolderIndex | null>}
      */
     async load(scopeId) {
+      if (os.freemem() < os.totalmem() * 0.08) cache.clear();
       const file = filename(scopeId);
       const before = await identity(file);
       if (before === null) {

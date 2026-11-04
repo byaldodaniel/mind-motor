@@ -56,9 +56,11 @@ aprobó la recuperación automática con estas condiciones:
   explícito (fallo seguro).
 - Un bloqueo vacío (el dueño terminó entre crearlo y escribirlo) solo se recupera
   cuando tiene más de 30 s.
-- La retirada no puede borrar un bloqueo vivo por error: lo aparta con `rename`,
-  comprueba que lo apartado es exactamente el archivo examinado (dispositivo e
-  inodo) y, si no lo es, lo repone solo si el nombre sigue libre.
+- La recuperación crea una barrera exclusiva `<bloqueo>.recovery` y vuelve a
+  comprobar al dueño dentro de ella. Todos los adquirentes respetan la barrera
+  antes de abrir el bloqueo y antes de ejecutar la tarea. Así dos recuperadores
+  no pueden usar una observación antigua para apartar un bloqueo nuevo y vivo.
+  Además, la retirada comprueba la identidad física del archivo apartado.
 - Los bloqueos anteriores a este cambio no guardaban `host`. Como la Base es
   local, se tratan como de este equipo.
 
@@ -77,6 +79,13 @@ actúa si ninguna sesión de Mind registrada en `Base/sesiones/` sigue viva y el
 usuario confirma que cerró todos sus agentes. Entonces retira los bloqueos de
 índice, los temporales y los registros de sesiones terminadas. Los índices
 afectados se reconcilian en la siguiente sesión.
+
+Si el proceso termina mientras mantiene una barrera `.recovery`, la barrera se
+conserva y las adquisiciones fallan cerrado. No se elimina por antigüedad ni se
+recupera automáticamente, pues eso recrearía la misma carrera. `mind reparar`
+todavía no reconoce estas barreras: requieren revisión y retirada manual de la
+barrera exacta después de cerrar todas las sesiones de Mind. Una barrera de otro
+proceso activo nunca debe retirarse.
 
 Si la adquisición falla en `revokeFolder`, la autorización aún no fue retirada.
 Si falla la limpieza después de retirarla, sigue retirada. En creación o

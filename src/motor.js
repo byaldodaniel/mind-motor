@@ -114,7 +114,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [] } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -157,6 +157,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   const indexer = createFolderIndexer({
     baseDirectory: base,
     pythonExecutable,
+    signal,
+    resourceSample,
     resolveScope: async (id) => {
       const folder = await loadAuthorizedFolder(id);
       if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'La carpeta no está autorizada o fue retirada.');
@@ -218,6 +220,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     unbindFunction: runner.unbindFunction,
     runFunction: runner.runFunction,
     indexFolder: indexer.indexFolder,
+    resourceStatus: indexer.resourceStatus,
+    prioritizeIndex: indexer.prioritizeIndex,
     readFolderIndex: indexer.readFolderIndex,
     ...createIndexSearch({
       readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder, readFolderProperties: properties.readFolderProperties,

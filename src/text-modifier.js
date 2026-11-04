@@ -86,38 +86,47 @@ function iso(milliseconds) {
  */
 export function modifyNative({ root, relativePath, expected, bytes, pythonExecutable, confirm, maxBytes = DEFAULT_TEXT_BYTES }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper], {
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+    const child = spawn(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], {
+      // Keep the native guard's bounded commit grace; do not unref this child.
+      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform === 'win32',
     });
     let output = '';
     let diagnostic = '';
     let confirmation;
     let failure;
+    let closed = false;
+    let sent = false;
     const fail = (error) => { failure ??= error; child.kill(); };
-    const timer = setTimeout(() => fail(new MotorError('MODIFY_FAILED', 'La modificación excedió el tiempo permitido.')), 10_000);
+    const timer = setTimeout(() => fail(sent
+      ? new MotorError('MODIFY_UNCONFIRMED', messages.MODIFY_UNCONFIRMED)
+      : new MotorError('MODIFY_FAILED', 'La modificación excedió el tiempo permitido.')), 10_000);
     child.on('error', (cause) => fail(new MotorError('SAFE_OPEN_UNAVAILABLE', messages.SAFE_OPEN_UNAVAILABLE, { cause })));
     child.stdin.on('error', () => {}); // Un rechazo nativo puede cerrar antes de recibir W.
     child.stdout.on('data', (chunk) => {
       output += chunk.toString('utf8');
-      if (output.length > 4096) fail(new MotorError('MODIFY_FAILED', messages.MODIFY_FAILED));
+      if (output.length > 4096) fail(new MotorError(sent ? 'MODIFY_UNCONFIRMED' : 'MODIFY_FAILED',
+        sent ? messages.MODIFY_UNCONFIRMED : messages.MODIFY_FAILED));
     });
     child.stderr.on('data', (chunk) => {
       diagnostic += chunk.toString('utf8');
       diagnostic = diagnostic.replace(/\r\n/g, '\n');
-      if (diagnostic.length > 256) return fail(new MotorError('MODIFY_FAILED', messages.MODIFY_FAILED));
+      if (diagnostic.length > 256) return fail(new MotorError(sent ? 'MODIFY_UNCONFIRMED' : 'MODIFY_FAILED',
+        sent ? messages.MODIFY_UNCONFIRMED : messages.MODIFY_FAILED));
       if (diagnostic.startsWith('READY\n') && !confirmation) {
         confirmation = Promise.resolve().then(confirm).then(() => {
+          if (failure || closed) return;
+          sent = true;
           child.stdin.end('W');
         }).catch(fail);
       }
     });
-    child.on('close', async (code) => {
+    child.on('close', (code) => {
+      closed = true;
       clearTimeout(timer);
-      await confirmation;
       if (failure) return reject(failure);
-      if (code !== 0 || !confirmation) {
+      if (code !== 0 || !sent) {
         const nativeCode = diagnostic.replace('READY\n', '').trim();
-        const errorCode = Object.hasOwn(messages, nativeCode) ? nativeCode : 'MODIFY_FAILED';
+        const errorCode = Object.hasOwn(messages, nativeCode) ? nativeCode : sent ? 'MODIFY_UNCONFIRMED' : 'MODIFY_FAILED';
         return reject(errorCode === 'TEXT_TOO_LARGE' || errorCode === 'FILE_TOO_LARGE'
           ? sizeError(errorCode, maxBytes) : new MotorError(errorCode, messages[errorCode]));
       }

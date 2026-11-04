@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
+import { spawnSupervised, DEFAULT_PROCESS_TIMEOUT_MS } from './process-supervisor.js';
 
 const helper = fileURLToPath(new URL('./native_index.py', import.meta.url));
 const SEPARATOR = '/';
@@ -9,6 +9,7 @@ const messages = {
   SCOPE_CHANGED: 'La ruta autorizada ya no corresponde a la carpeta registrada.',
   SAFE_SCAN_UNAVAILABLE: 'El recorrido seguro no está disponible en este entorno.',
   SAFE_SCAN_FAILED: 'El recorrido seguro falló.',
+  SAFE_SCAN_PARENT_GONE: 'Terminó el proceso propietario del recorrido.',
 };
 
 /** @typedef {'file' | 'directory' | 'link' | 'other' | 'unknown'} EntryType */
@@ -38,40 +39,54 @@ function iso(milliseconds) {
  * Ejecuta el auxiliar nativo. No hay alternativa por rutas: si el recorrido por
  * referencias no está disponible, la operación se deniega.
  */
-function runHelper({ root, maxEntries, pythonExecutable, exclude = [] }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper], {
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+async function runHelper({ root, maxEntries, pythonExecutable, exclude = [], signal, timeoutMs }) {
+  let supervised;
+  try {
+    supervised = spawnSupervised(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], {
+      signal, timeoutMs, kind: 'index',
     });
-    const output = [];
-    let diagnostic = '';
-    let failure;
-    child.on('error', (cause) => {
-      failure ??= new MotorError('SAFE_SCAN_UNAVAILABLE', messages.SAFE_SCAN_UNAVAILABLE, { cause });
-    });
-    child.stdin.on('error', () => {});
-    child.stdout.on('data', (chunk) => output.push(chunk));
-    child.stderr.on('data', (chunk) => {
-      if (diagnostic.length < 256) diagnostic += chunk.toString('utf8');
-    });
-    child.on('close', (code) => {
-      if (failure) return reject(failure);
-      if (code !== 0) {
-        const nativeCode = diagnostic.trim();
-        if (nativeCode === 'INDEX_LIMIT_EXCEEDED') {
-          return reject(new MotorError(nativeCode, `La carpeta supera el límite de ${maxEntries} entradas indexables.`));
-        }
-        const errorCode = Object.hasOwn(messages, nativeCode) ? nativeCode : 'SAFE_SCAN_FAILED';
-        return reject(new MotorError(errorCode, messages[errorCode]));
-      }
-      try {
-        resolve(JSON.parse(Buffer.concat(output).toString('utf8')));
-      } catch (cause) {
-        reject(new MotorError('SAFE_SCAN_FAILED', messages.SAFE_SCAN_FAILED, { cause }));
-      }
-    });
-    child.stdin.end(`${JSON.stringify({ root, maxEntries, ...(exclude.length > 0 ? { exclude } : {}) })}\n`);
+  } catch (error) {
+    if (error.code === 'PROCESS_CANCELLED') throw new MotorError('SCAN_CANCELLED', 'El recorrido se canceló.');
+    throw error;
+  }
+  const { child } = supervised;
+  const output = [];
+  // Protect Node from unbounded buffering even if the native helper misbehaves.
+  const maxOutputBytes = Math.min(128 * 1024 * 1024, Math.max(1024 * 1024, maxEntries * 4096));
+  let outputBytes = 0;
+  let diagnostic = '';
+  child.stdin.on('error', () => {});
+  child.stdout.on('data', (chunk) => {
+    outputBytes += chunk.length;
+    if (outputBytes > maxOutputBytes) {
+      output.length = 0;
+      supervised.stop(new MotorError('SCAN_OUTPUT_LIMIT', 'El resultado del recorrido supera el límite de memoria.'));
+    } else output.push(chunk);
   });
+  child.stderr.on('data', (chunk) => {
+    if (diagnostic.length < 256) diagnostic = (diagnostic + chunk.toString('utf8')).slice(0, 256);
+  });
+  child.stdin.end(`${JSON.stringify({ root, maxEntries, ...(exclude.length > 0 ? { exclude } : {}) })}\n`);
+  const { code, error } = await supervised.completed;
+  if (error) {
+    if (error.code === 'PROCESS_CANCELLED') throw new MotorError('SCAN_CANCELLED', 'El recorrido se canceló.');
+    if (error.code === 'PROCESS_TIMEOUT') throw new MotorError('SCAN_TIMEOUT', 'El recorrido excedió el tiempo permitido.');
+    if (error.code === 'SCAN_OUTPUT_LIMIT') throw error;
+    throw new MotorError('SAFE_SCAN_UNAVAILABLE', messages.SAFE_SCAN_UNAVAILABLE, { cause: error });
+  }
+  if (code !== 0) {
+    const nativeCode = diagnostic.trim();
+    if (nativeCode === 'INDEX_LIMIT_EXCEEDED') {
+      throw new MotorError(nativeCode, `La carpeta supera el límite de ${maxEntries} entradas indexables.`);
+    }
+    const errorCode = Object.hasOwn(messages, nativeCode) ? nativeCode : 'SAFE_SCAN_FAILED';
+    throw new MotorError(errorCode, messages[errorCode]);
+  }
+  try {
+    return JSON.parse(Buffer.concat(output).toString('utf8'));
+  } catch (cause) {
+    throw new MotorError('SAFE_SCAN_FAILED', messages.SAFE_SCAN_FAILED, { cause });
+  }
 }
 
 /**
@@ -133,10 +148,10 @@ export function mergeScan(scanned, { previous, maxEntries }) {
 /**
  * Recorre una raíz autorizada por referencias, sin seguir enlaces ni cambiar de volumen.
  * @param {string} root
- * @param {{ previous: IndexEntry[], maxEntries: number, pythonExecutable: string }} options
+ * @param {{ previous: IndexEntry[], maxEntries: number, pythonExecutable: string, signal?: AbortSignal, timeoutMs?: number }} options
  * @returns {Promise<{ entries: IndexEntry[], issues: ScanIssue[] }>}
  */
-export async function scanFolder(root, { previous, maxEntries, pythonExecutable, exclude = [] }) {
-  const scanned = await runHelper({ root, maxEntries, pythonExecutable, exclude });
+export async function scanFolder(root, { previous, maxEntries, pythonExecutable, exclude = [], signal, timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS }) {
+  const scanned = await runHelper({ root, maxEntries, pythonExecutable, exclude, signal, timeoutMs });
   return mergeScan(scanned, { previous, maxEntries });
 }

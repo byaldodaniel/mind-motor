@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { processDiagnostics } from './process-supervisor.js';
+import { withRequestContext } from './request-context.js';
 import { MotorError } from './errors.js';
 import { textVersion } from './text-modifier.js';
 import { documentFormat } from './document-reader.js';
@@ -384,7 +386,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
           motor: session.motorVersion, base: motor.baseDirectory, producto: session.layout.product,
           runtime: { node: process.execPath, python: session.layout.pythonExecutable },
         },
-        sesion: { observacion: session.observing() ? 'activa' : 'bajo-demanda', cliente: source },
+        sesion: { observacion: session.observing() ? 'activa' : 'bajo-demanda', cliente: source,
+          coordinacion: session.backgroundStatus?.() ?? null },
+        recursos: await motor.resourceStatus(),
+        procesos: processDiagnostics(),
         consentimiento: consent.channel() === 'formulario-del-cliente'
           ? 'Tu cliente muestra formularios de autorización al usuario.'
           : 'Tu cliente no admite formularios: las solicitudes quedan pendientes y el usuario las aprueba con "mind autorizar" en la carpeta de Mind.',
@@ -820,7 +825,17 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
     async call(name, args, context) {
       const handler = handlers[name];
       if (!handler) throw new MotorError('UNKNOWN_TOOL', 'Herramienta desconocida.');
-      return handler(args, { ...context, requester, consent, resolveFolder, requireAccess, requireContinuity, source, readFile });
+      return withRequestContext(context, async () => {
+        try {
+          context?.signal?.throwIfAborted();
+          return await handler(args, { ...context, requester, consent, resolveFolder, requireAccess, requireContinuity, source, readFile });
+        } catch (error) {
+          if (context?.signal?.aborted && (error?.name === 'AbortError' || error?.code === 'SCAN_CANCELLED')) {
+            throw new MotorError('REQUEST_CANCELLED', 'La solicitud se canceló.');
+          }
+          throw error;
+        }
+      });
     },
   });
 }

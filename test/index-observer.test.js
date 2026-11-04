@@ -33,7 +33,9 @@ async function fixture(t) {
   await fs.mkdir(path.join(folder, 'Proyectos', 'Fotos'), { recursive: true });
   await fs.writeFile(path.join(folder, 'notas.txt'), 'Notas ficticias');
   await fs.writeFile(path.join(folder, 'Proyectos', 'plan.md'), '# Plan ficticio');
-  const motor = await openMotor({ baseDirectory: base });
+  // These assertions exercise event delivery and debounce deadlines. Admission
+  // under CPU/RAM pressure is covered independently by the governor tests.
+  const motor = await openMotor({ baseDirectory: base, resourceSample: () => ({ pressured: false }) });
   const scope = await motor.authorizeFolder(folder);
   return { root, base, folder: scope.path, motor, scope };
 }

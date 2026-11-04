@@ -187,7 +187,8 @@ export function pairRenames(changes, before, after) {
  * @param {typeof fsWatch} [options.watch] Solo para pruebas de fallos de observación.
  */
 export function createIndexObserver({
-  motor, onReport = () => {}, strategy, watch = fsWatch, ...settings
+  motor, onReport = () => {}, strategy, watch = fsWatch, signal,
+  initialPriority = 'interactive', ...settings
 } = {}) {
   if (!motor || typeof motor.indexFolder !== 'function' || typeof motor.readFolderIndex !== 'function'
       || typeof motor.listAuthorizedFolders !== 'function' || typeof motor.baseDirectory !== 'string') {
@@ -196,6 +197,13 @@ export function createIndexObserver({
   if (typeof onReport !== 'function' || typeof watch !== 'function') {
     throw new MotorError('INVALID_OBSERVER_OPTION', 'onReport y watch deben ser funciones.');
   }
+  if (!['interactive', 'background'].includes(initialPriority)) {
+    throw new MotorError('INVALID_OBSERVER_OPTION', 'La prioridad inicial no es válida.');
+  }
+  // A standalone observer also owns its pending scans. close() must be able to
+  // cancel them even when the caller did not provide a session signal.
+  const lifetime = new AbortController();
+  signal = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
   const mode = strategy ?? defaultStrategy(process.platform);
   if (mode !== 'recursive' && mode !== 'directories') {
     throw new MotorError('INVALID_OBSERVER_OPTION', 'La estrategia debe ser recursive o directories.');
@@ -216,10 +224,18 @@ export function createIndexObserver({
   /** @type {Map<string, object>} */
   const folders = new Map();
   const starting = new Map();
+  const inFlight = new Set();
   let closed = false;
   let baseWatcher = null;
   let authorizationTimer = null;
   let authorizationCheck = null;
+  function abort() {
+    closed = true;
+    for (const state of [...folders.values()]) stop(state, 'closed');
+    releaseAuthorizationWatch();
+  }
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
 
   function report(value) {
     try {
@@ -416,7 +432,7 @@ export function createIndexObserver({
     mark(state, 'retry');
   }
 
-  function run(state) {
+  function run(state, priority = 'background') {
     clearTimeout(state.timer);
     state.timer = null;
     const reasons = [...state.reasons].sort();
@@ -424,7 +440,7 @@ export function createIndexObserver({
     state.dirty = false;
     state.running = (async () => {
       try {
-        const result = await motor.indexFolder(state.id);
+        const result = await motor.indexFolder(state.id, { priority, signal });
         if (state.stopped) return;
         const index = await motor.readFolderIndex(state.id);
         if (state.stopped) return;
@@ -461,6 +477,9 @@ export function createIndexObserver({
         }
       }
     })();
+    const running = state.running;
+    inFlight.add(running);
+    running.finally(() => inFlight.delete(running)).catch(() => {});
     return state.running;
   }
 
@@ -586,7 +605,7 @@ export function createIndexObserver({
       throw new MotorError('FOLDER_NOT_AUTHORIZED', 'La carpeta no está autorizada o fue retirada.');
     }
     const baseline = await motor.readFolderIndex(folderId);
-    if (closed) throw new MotorError('OBSERVER_CLOSED', 'El observador está cerrado.');
+    if (closed || signal?.aborted) throw new MotorError('OBSERVER_CLOSED', 'El observador está cerrado.');
     const state = {
       id: folderId, root: folder.path, strategy: mode, mode: 'starting',
       watchers: new Map(), timer: null, periodic: null, running: null,
@@ -598,6 +617,7 @@ export function createIndexObserver({
       lastReconciledAt: baseline?.updatedAt ?? null,
     };
     state.rootIdentity = await rootIdentity(state);
+    if (closed || signal?.aborted) throw new MotorError('OBSERVER_CLOSED', 'El observador está cerrado.');
     folders.set(folderId, state);
     ensureAuthorizationWatch();
     // La observación empieza antes del recorrido inicial: lo que cambie durante él
@@ -606,7 +626,7 @@ export function createIndexObserver({
     state.reasons = new Set(['start']);
     state.dirty = true;
     state.firstEventAt = state.lastEventAt = Date.now();
-    await run(state);
+    await run(state, initialPriority);
     return status(state);
   }
 
@@ -632,12 +652,13 @@ export function createIndexObserver({
       validateScopeId(folderId);
       const state = folders.get(folderId);
       if (!state) throw new MotorError('NOT_OBSERVED', 'La carpeta no está en observación.');
+      await motor.prioritizeIndex?.(folderId);
       await state.running;
       if (state.stopped) return status(state);
       mark(state, 'manual', undefined, true);
       clearTimeout(state.timer);
       state.timer = null;
-      if (!state.running) await run(state);
+      if (!state.running) await run(state, 'interactive');
       else await state.running;
       return status(state);
     },
@@ -666,14 +687,15 @@ export function createIndexObserver({
     /** Detiene todo al cerrar la sesión. Espera a la reconciliación en curso. */
     async close() {
       closed = true;
-      await Promise.allSettled(starting.values());
+      lifetime.abort(new MotorError('OBSERVER_CLOSED', 'El observador está cerrado.'));
       const running = [];
       for (const state of [...folders.values()]) {
         stop(state, 'closed');
         if (state.running) running.push(state.running);
       }
       releaseAuthorizationWatch();
-      await Promise.allSettled(running);
+      signal?.removeEventListener('abort', abort);
+      await Promise.allSettled([...starting.values(), ...inFlight, ...running]);
     },
   });
 }

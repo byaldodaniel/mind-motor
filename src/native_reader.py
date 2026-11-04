@@ -6,17 +6,39 @@ El proceso, intérprete, código, Base y espacio de montajes deben ser de confia
 """
 import contextlib
 import errno
+import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import stat
 import sys
 
 MAX_BYTES = 1024 * 1024
 
+_parent_spec = importlib.util.spec_from_file_location('native_parent', Path(__file__).with_name('native_parent.py'))
+_parent = importlib.util.module_from_spec(_parent_spec)
+_parent_spec.loader.exec_module(_parent)
+
 
 class Refusal(Exception):
     pass
+
+
+def guard_parent(expected_pid=None):
+    try:
+        # The launcher supplies the original parent even if POSIX already
+        # reparented us to a subreaper before Python finished starting.
+        if expected_pid is None and len(sys.argv) > 1 and sys.argv[1] == '--parent-pid':
+            if len(sys.argv) != 3:
+                raise _parent.ParentGone()
+            try:
+                expected_pid = int(sys.argv[2])
+            except ValueError:
+                raise _parent.ParentGone() from None
+        return _parent.guard_parent(expected_pid)
+    except _parent.ParentGone:
+        raise Refusal('SAFE_OPEN_UNAVAILABLE') from None
 
 
 def component(name):
@@ -190,6 +212,8 @@ def safe_open(root, relative, after_directory=None):
 
 
 def error_code(error):
+    if isinstance(error, _parent.ParentGone):
+        return 'SAFE_OPEN_UNAVAILABLE'
     if isinstance(error, Refusal):
         return str(error)
     win = getattr(error, 'winerror', None)
@@ -204,6 +228,7 @@ def error_code(error):
 
 def run():
     try:
+        guard_parent()
         request = json.loads(sys.stdin.buffer.readline(32768))
         fd = safe_open(request['root'], request['relativePath'])
         with os.fdopen(fd, 'rb', buffering=0) as source:

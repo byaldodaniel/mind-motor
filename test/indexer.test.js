@@ -403,22 +403,21 @@ test('los índices corruptos o enlazados fallan de forma explícita y no se repa
   assert.equal(result.generation, 1);
 });
 
-test('serializa indexaciones del mismo ámbito y detecta escrituras de otra instancia', async (t) => {
+test('serializa indexaciones del mismo ámbito incluso entre instancias sin recorridos simultáneos', async (t) => {
   const { base, motor, scope, indexer } = await fixture(t);
   const results = await Promise.all([indexer.indexFolder(scope.id), indexer.indexFolder(scope.id)]);
-  assert.deepEqual(results.map((result) => result.mode), ['initial', 'reconciliation']);
-  assert.deepEqual(results.map((result) => result.generation), [1, 2]);
+  // Admission is shared across processes: equally ranked requests may arrive
+  // in either order, but their publications must remain sequential.
+  assert.deepEqual(results.toSorted((a, b) => a.generation - b.generation)
+    .map(({ mode, generation }) => ({ mode, generation })), [
+    { mode: 'initial', generation: 1 }, { mode: 'reconciliation', generation: 2 },
+  ]);
 
   const resolve = registryResolver(motor);
   const other = createFolderIndexer({ baseDirectory: base, resolveScope: resolve });
-  let calls = 0;
-  const racing = createFolderIndexer({ baseDirectory: base, resolveScope: async (id) => {
-    calls += 1;
-    if (calls === 3) await other.indexFolder(id);
-    return resolve(id);
-  } });
-  await assert.rejects(racing.indexFolder(scope.id), { code: 'INDEX_CONFLICT' });
-  assert.equal((await indexer.readFolderIndex(scope.id)).generation, 3);
+  const concurrent = await Promise.all([indexer.indexFolder(scope.id), other.indexFolder(scope.id)]);
+  assert.deepEqual(concurrent.map(item => item.generation).sort(), [3, 4]);
+  assert.equal((await indexer.readFolderIndex(scope.id)).generation, 4);
 });
 
 test('ámbitos distintos mantienen índices independientes', async (t) => {
