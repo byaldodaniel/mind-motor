@@ -6,36 +6,34 @@ La carpeta `Base` conserva los índices y la continuidad de tus trabajos.
 
 ## Empezar
 
-1. **Extrae** el archivo que corresponde a tu equipo en una carpeta tuya. Mind
-   incluye Node.js y Python. Windows x64 usa ZIP. Mac Intel y Apple Silicon
-   y Linux x64 y ARM64 con glibc usan TAR.GZ.
-2. **Abre la carpeta Mind en tu agente** y pídele que use Mind. Claude Code
-   descubre el servidor incluido. Un agente con terminal puede seguir las
-   instrucciones de `AGENTS.md` y usar el iniciador incluido.
+1. **Extrae el ZIP de Mind** en una carpeta tuya. El mismo ZIP sirve para
+   Windows x64, Mac Intel y Apple Silicon y Linux x64 y ARM64 con glibc.
+   Mind trae los ejecutores de Node.js y Python y elige el de tu equipo.
+2. **Abre la carpeta Mind en tu agente** y pídele que use Mind. El iniciador
+   prepara automáticamente la conexión. Si lo abres desde la terminal,
+   puedes usar la orden de preparación de la tabla. En Claude Code, vuelve a
+   abrir la carpeta si ya estaba abierta antes de preparar la conexión.
 3. **Pídele lo que necesites**: buscar archivos, leer documentos, organizar carpetas o continuar tareas anteriores.
 
 Si abres el agente sobre otro proyecto, pídele que use Mind en esa carpeta.
 El iniciador acepta `--carpeta` con la ruta absoluta del proyecto. El acceso
 completo de la carpeta abierta dura la sesión.
 
-| Sistema | Iniciador desde la carpeta Mind | Ayuda |
+| Sistema | Preparación desde la carpeta Mind | Ayuda |
 |---|---|---|
-| Windows (PowerShell) | `.\mind.cmd` | `.\mind.cmd ayuda` |
-| macOS y Linux | `./mind` | `./mind ayuda` |
+| Windows (PowerShell) | `.\mind.cmd preparar` | `.\mind.cmd ayuda` |
+| macOS y Linux | `./mind preparar` | `./mind ayuda` |
 
 En Mac, macOS puede mostrar un aviso al abrir archivos descargados. Consulta
 el mensaje del sistema y confirma el origen de tu descarga antes de abrirlos.
 
 ## Conexión técnica (referencia opcional para clientes MCP)
 
-El archivo `.mcp.json` describe la conexión por stdio. En clientes que la
-configuran manualmente, usa las rutas absolutas de tu carpeta Mind y deja
-`NODE_OPTIONS` vacía.
-
-| Sistema | Programa incluido | Argumentos |
-|---|---|---|
-| Windows | `Runtime\node\node.exe` | `Motor\bin\mind.js`, `mcp` |
-| macOS y Linux | `Runtime/node/bin/node` | `Motor/bin/mind.js`, `mcp` |
+Mind genera `.mcp.json` con el programa incluido de tu equipo y la conexión
+por stdio. Si tu agente permite configurar MCP manualmente, puedes
+consultar ese archivo y resolver sus rutas desde la carpeta Mind. Los
+agentes con acceso a terminal también pueden usar el iniciador y las
+instrucciones de `AGENTS.md`.
 
 ## Qué puedes hacer
 
@@ -57,7 +55,7 @@ Sin conexión continúa con la versión instalada. Los archivos personales y la 
 se conservan; si la comprobación de arranque falla intenta recuperar la versión anterior.
 
 Para actualizar manualmente, cierra los agentes y usa el iniciador de la
-instalación con `actualizar` y la ruta del paquete de tu equipo.
+instalación con `actualizar` y la ruta del ZIP de Mind.
 
 ## Alcance y datos
 

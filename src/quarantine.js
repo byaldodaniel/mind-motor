@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { validateManifest, verifyTree, describeProblems } from './product-files.js';
+import { productRuntime } from './layout.js';
 
 /**
  * Cuarentena de macOS (decisión del usuario, opción B).
@@ -11,11 +12,11 @@ import { validateManifest, verifyTree, describeProblems } from './product-files.
  * primera vez que el usuario acepta ejecutar Mind en su agente (o abre una
  * orden de consola), y antes del primer uso de Python, Mind:
  *
- * 1. comprueba si algún archivo de Runtime/ conserva el atributo;
- * 2. verifica el SHA-256 de todos los archivos de Runtime/ (y sus enlaces)
+ * 1. comprueba si algún archivo del runtime activo conserva el atributo;
+ * 2. verifica el SHA-256 de los archivos del runtime activo (y sus enlaces)
  *    contra mind-producto.json, sin admitir archivos que no figuren en él;
  * 3. solo si todo coincide, ejecuta /usr/bin/xattr -dr com.apple.quarantine
- *    <Mind>/Runtime, únicamente dentro de su propia carpeta.
+ *    en la subcarpeta del destino activo dentro de su propia carpeta Runtime.
  *
  * Si algo no coincide no retira nada e informa. Fuera de macOS o en
  * desarrollo (sin manifiesto) no hace nada.
@@ -66,15 +67,16 @@ export async function releaseQuarantine(layout, {
 } = {}) {
   if (platform !== 'darwin' || !layout?.product || !layout.root || !layout.manifest) return { status: 'no-aplica' };
   const root = layout.root;
-  const runtime = path.join(root, 'Runtime');
-  const options = { root, platformFiles: ['Runtime/node/bin/node', 'Runtime/python/bin/python3'], find, xattr, run };
   try {
+    const { directory: runtime, nodeExecutable, pythonExecutable } = productRuntime(root, layout.manifest, platform);
+    const relative = (file) => path.relative(root, file).split(path.sep).join('/');
+    const options = { root, platformFiles: [nodeExecutable, pythonExecutable].map(relative), find, xattr, run };
     if (!(await quarantined(runtime, options))) return { status: 'sin-cuarentena' };
     let manifest;
     let result;
     try {
       manifest = validateManifest(layout.manifest);
-      result = await verifyTree(root, manifest, { prefix: 'Runtime' });
+      result = await verifyTree(root, manifest, { prefix: relative(runtime) });
     } catch (error) {
       result = { ok: false, files: 0, problems: [{ path: 'mind-producto.json', problem: String(error?.message ?? error) }] };
     }
@@ -85,7 +87,7 @@ export async function releaseQuarantine(layout, {
     }
     const removal = await run(xattr, ['-dr', QUARANTINE_ATTRIBUTE, runtime]);
     if (await quarantined(runtime, options)) {
-      const aviso = `Mind verificó Runtime pero no pudo retirar la cuarentena de macOS (${(removal.stderr || `código ${removal.code}`).trim().slice(0, 200)}).`;
+      const aviso = `Mind verificó el runtime activo pero no pudo retirar la cuarentena de macOS (${(removal.stderr || `código ${removal.code}`).trim().slice(0, 200)}).`;
       log('error', aviso);
       return { status: 'error', aviso };
     }

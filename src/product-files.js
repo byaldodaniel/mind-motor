@@ -13,6 +13,7 @@ import { safeRelativePath, resolveLinkTarget, compareBytes } from './archive.js'
  * {
  *   "format": "mind-product", "version": 1, "mindVersion": "1.0.0",
  *   "platform": "darwin", "arch": "arm64", "baseFormatVersion": 2,
+ *   "targets": ["win32-x64", "darwin-arm64", ...],  solo en la edición universal
  *   "components": [...],
  *   "files": { "<ruta>": "<sha256>" },   archivos normales, con "/"
  *   "links": { "<ruta>": "<destino>" }   enlaces simbólicos internos (POSIX)
@@ -24,6 +25,7 @@ import { safeRelativePath, resolveLinkTarget, compareBytes } from './archive.js'
 export const MANIFEST_NAME = 'mind-producto.json';
 export const PLATFORMS = Object.freeze(['win32', 'darwin', 'linux']);
 export const ARCHITECTURES = Object.freeze(['x64', 'arm64']);
+export const UNIVERSAL_TARGETS = Object.freeze(['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64']);
 const SHA256 = /^[a-f0-9]{64}$/u;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u;
 
@@ -63,6 +65,20 @@ export function compareVersions(a, b) {
 
 export const isVersion = (value) => typeof value === 'string' && VERSION.test(value);
 
+// La edición universal conserva win32/x64 como identificador de compatibilidad
+// para que Windows 1.0.1 acepte el mismo ZIP que reciben los otros destinos.
+export function validUniversalTargets(targets) {
+  return Array.isArray(targets) && targets.length === UNIVERSAL_TARGETS.length
+    && UNIVERSAL_TARGETS.every(target => targets.includes(target));
+}
+
+export function supportsProductTarget(manifest, platform = process.platform, arch = process.arch) {
+  if (!manifest) return false;
+  return manifest.targets
+    ? manifest.targets.includes(`${platform}-${arch}`)
+    : manifest.platform === platform && manifest.arch === arch;
+}
+
 /** Primer componente de una ruta del paquete, para reconocer Base/ sin distinguir mayúsculas. */
 const topLevel = (relative) => relative.split('/')[0].toLowerCase();
 
@@ -77,12 +93,16 @@ export function validateManifest(data) {
   if (!PLATFORMS.includes(data.platform) || !ARCHITECTURES.includes(data.arch)) {
     throw invalid('El manifiesto no indica una plataforma y arquitectura admitidas.');
   }
+  if (data.targets !== undefined && (data.platform !== 'win32' || data.arch !== 'x64' || !validUniversalTargets(data.targets))) {
+    throw invalid('El manifiesto universal no enumera todos los destinos admitidos.');
+  }
   if (data.baseFormatVersion !== undefined && (!Number.isSafeInteger(data.baseFormatVersion) || data.baseFormatVersion < 1)) {
     throw invalid('El manifiesto indica un formato de Base no válido.');
   }
   if (!data.files || typeof data.files !== 'object' || Array.isArray(data.files)) throw invalid('El manifiesto no contiene la lista de archivos.');
   const links = data.links ?? {};
   if (typeof links !== 'object' || Array.isArray(links)) throw invalid('Los enlaces del manifiesto no son válidos.');
+  if (data.targets && Object.keys(links).length) throw invalid('El ZIP universal debe contener archivos regulares.');
   const folded = new Set();
   const check = (relative) => {
     if (safeRelativePath(relative) !== relative) throw invalid(`Ruta no válida en el manifiesto: ${String(relative).slice(0, 200)}`);
@@ -110,6 +130,7 @@ export function validateManifest(data) {
   }
   return Object.freeze({
     ...data,
+    ...(data.targets ? { targets: Object.freeze([...data.targets]) } : {}),
     components: Array.isArray(data.components) ? data.components : [],
     files: Object.freeze({ ...data.files }),
     links: Object.freeze({ ...links }),

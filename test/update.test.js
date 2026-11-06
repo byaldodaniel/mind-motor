@@ -5,7 +5,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { updateMind } from '../src/commands/actualizar.js';
-import { hashFile, scanTree, readManifestFile } from '../src/product-files.js';
+import { hashFile, scanTree, readManifestFile, UNIVERSAL_TARGETS } from '../src/product-files.js';
 import { agentFixture } from './helpers/agent-fixture.js';
 import { openMotor } from '../src/motor.js';
 import { BASE_FORMAT_VERSION } from '../src/base-format.js';
@@ -16,21 +16,26 @@ import { openSession } from '../src/session.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 
-test('canal firmado: descarga, instalador en proceso separado, arranque nuevo y Base intacta', async t => {
+test('canal firmado: descarga, instalador en proceso separado, arranque nuevo y Base intacta', t => updateThroughSignedChannel(t));
+test('canal firmado universal: instala el mismo ZIP en el destino local y conserva la Base', t => updateThroughSignedChannel(t, true));
+
+async function updateThroughSignedChannel(t, universal = false) {
   const f = await agentFixture(t, { prefix: '.mind-auto-product-' });
   await packageAt(f.mind, '1.0.0', { real: true });
   const source = path.join(f.root, 'Nuevo');
-  await packageAt(source, '1.1.0', { real: true });
+  await packageAt(source, '1.1.0', { real: true, universal });
   const session = await f.open();
   await session.motor.recordContinuity({ content: 'Dato ficticio que se conserva' });
   await session.close();
   const before = await snapshot(f.layout.baseDirectory);
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   await fs.writeFile(path.join(f.mind, 'Motor', 'src', 'update-channel.json'), JSON.stringify({ repository: 'owner/mind', url: 'https://github.com/owner/mind/releases/latest/download/stable.json', publicKey: publicKey.export({ type: 'spki', format: 'pem' }) }));
-  const archive = path.join(f.root, process.platform === 'win32' ? 'Mind.zip' : 'Mind.tar.gz');
+  const zip = universal || process.platform === 'win32';
+  const archive = path.join(f.root, zip ? 'Mind.zip' : 'Mind.tar.gz');
   const entries = (await scanTree(source)).map(e => ({ ...e, source: { file: path.join(source, e.path) } }));
-  await (process.platform === 'win32' ? writeZip : writeTarGz)(archive, entries, { root: 'Mind', mtime: 1700000000 });
-  const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 1, mindVersion: '1.1.0', packages: [{ platform: process.platform, arch: process.arch,
+  await (zip ? writeZip : writeTarGz)(archive, entries, { root: 'Mind', mtime: 1700000000 });
+  const target = universal ? { platform: 'win32', arch: 'x64', targets: UNIVERSAL_TARGETS } : { platform: process.platform, arch: process.arch };
+  const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 1, mindVersion: '1.1.0', packages: [{ ...target,
     url: 'https://github.com/owner/mind/releases/download/v1.1.0/Mind.zip', sha256: await hashFile(archive), bytes: (await fs.stat(archive)).size }] }));
   let first = true;
   const result = await checkForUpdate({ root: f.mind, fetcher: async () => {
@@ -38,9 +43,11 @@ test('canal firmado: descarga, instalador en proceso separado, arranque nuevo y 
     return new Response(await fs.readFile(archive));
   } });
   assert.equal(result.status, 'actualizada', result.reason);
-  assert.equal((await readManifestFile(f.mind)).mindVersion, '1.1.0');
+  const manifest = await readManifestFile(f.mind);
+  assert.equal(manifest.mindVersion, '1.1.0');
+  assert.deepEqual(manifest.targets, target.targets);
   assert.deepEqual(await snapshot(f.layout.baseDirectory), before);
-});
+}
 
 async function snapshot(root) {
   const result = {};
@@ -50,36 +57,39 @@ async function snapshot(root) {
   return result;
 }
 
-async function packageAt(root, version, { real = false, platform = process.platform, baseFormatVersion = BASE_FORMAT_VERSION } = {}) {
+async function packageAt(root, version, { real = false, platform = process.platform, baseFormatVersion = BASE_FORMAT_VERSION, universal = false } = {}) {
+  const runtime = universal && process.platform !== 'win32'
+    ? path.join(root, 'Runtime', `${process.platform}-${process.arch}`) : path.join(root, 'Runtime');
   await fs.mkdir(path.join(root, 'Motor'), { recursive: true });
-  await fs.mkdir(path.join(root, 'Runtime', 'python', 'bin'), { recursive: true });
+  await fs.mkdir(path.join(runtime, 'python', 'bin'), { recursive: true });
   await fs.writeFile(path.join(root, 'LEEME.md'), `Paquete ficticio ${version}\n`);
   await fs.writeFile(path.join(root, 'Motor', 'prueba.txt'), version);
   // Solo comprueba el arranque de `version`: no simula un Python funcional ni
   // sustituye las pruebas de paquetes con los runtimes portables completos.
-  await fs.writeFile(path.join(root, 'Runtime', 'python', process.platform === 'win32' ? 'python.exe' : 'bin/python3'), 'Python ficticio\n');
+  await fs.writeFile(path.join(runtime, 'python', process.platform === 'win32' ? 'python.exe' : 'bin/python3'), 'Python ficticio\n');
   if (real) {
     for (const directory of ['src', 'bin']) {
       await fs.cp(path.join(motorDirectory, directory), path.join(root, 'Motor', directory), { recursive: true });
     }
     const pkg = JSON.parse(await fs.readFile(path.join(motorDirectory, 'package.json'), 'utf8'));
     await fs.writeFile(path.join(root, 'Motor', 'package.json'), JSON.stringify({ ...pkg, version }));
-    const executable = path.join(root, 'Runtime', 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
+    const executable = path.join(runtime, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
     await fs.mkdir(path.dirname(executable), { recursive: true });
     await fs.copyFile(process.execPath, executable, constants.COPYFILE_FICLONE);
     await fs.chmod(executable, 0o755);
   }
   const files = await snapshot(root);
   delete files['mind-producto.json'];
+  const target = universal ? { platform: 'win32', arch: 'x64', targets: UNIVERSAL_TARGETS } : { platform, arch: process.arch };
   await fs.writeFile(path.join(root, 'mind-producto.json'), JSON.stringify({
-    format: 'mind-product', version: 1, mindVersion: version, platform, arch: process.arch,
+    format: 'mind-product', version: 1, mindVersion: version, ...target,
     baseFormatVersion, files, links: {},
   }));
 }
 
-async function fixture(t, { real = false } = {}) {
+async function fixture(t, { real = false, currentUniversal = false } = {}) {
   const f = await agentFixture(t, { prefix: '.mind-update-test-' });
-  await packageAt(f.mind, '1.0.0');
+  await packageAt(f.mind, '1.0.0', { universal: currentUniversal });
   const source = path.join(f.root, 'Paquete nuevo');
   await packageAt(source, '1.1.0', { real });
   const session = await f.open();
@@ -123,6 +133,23 @@ test('paquete alterado y cancelación no cambian instalación ni Base', async (t
   await packageAt(f.source, '1.1.0');
   assert.equal((await updateMind({ ...f.options, confirm: () => false })).status, 'cancelada');
   assert.deepEqual(await snapshot(f.mind), before);
+});
+
+test('una instalación universal admite la actualización nativa manual del destino local', async (t) => {
+  const f = await fixture(t, { real: true, currentUniversal: true });
+  const before = await snapshot(f.mind);
+  const beforeBase = await snapshot(f.layout.baseDirectory);
+  const sourceManifest = path.join(f.source, 'mind-producto.json');
+  const native = await readManifestFile(f.source);
+  await fs.writeFile(sourceManifest, JSON.stringify({ ...native, arch: process.arch === 'x64' ? 'arm64' : 'x64' }));
+  await assert.rejects(updateMind(f.options), { code: 'UPDATE_PLATFORM_MISMATCH' });
+  assert.deepEqual(await snapshot(f.mind), before);
+  await fs.writeFile(sourceManifest, JSON.stringify(native));
+  const result = await updateMind(f.options);
+  assert.equal(result.platform, `${process.platform}-${process.arch}`);
+  assert.equal(result.status, 'actualizada');
+  assert.equal((await readManifestFile(f.mind)).targets, undefined);
+  assert.deepEqual(await snapshot(f.layout.baseDirectory), beforeBase);
 });
 
 test('fallo del Motor nuevo revierte la sustitución sin perder la Base', async (t) => {

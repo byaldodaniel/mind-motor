@@ -10,7 +10,7 @@ import { MotorError } from './errors.js';
  *     mind, mind.cmd          iniciadores
  *     mind-producto.json      manifiesto del paquete (marca el modo producto)
  *     Motor/                  este código; se sustituye al actualizar
- *     Runtime/node, Runtime/python
+ *     Runtime/                 ejecutores nativos incluidos
  *     Base/                   datos persistentes; se crea en el primer uso y nunca
  *                             forma parte del paquete
  *
@@ -42,10 +42,28 @@ async function readManifest(root) {
   return data;
 }
 
-function bundledPython(root) {
-  return process.platform === 'win32'
-    ? path.join(root, 'Runtime', 'python', 'python.exe')
-    : path.join(root, 'Runtime', 'python', 'bin', 'python3');
+/** Ubicaciones de los ejecutores del producto para el destino que lo inicia. */
+export function productRuntime(root, manifest, platform = process.platform, arch = process.arch) {
+  const target = `${platform}-${arch}`;
+  const universal = Array.isArray(manifest?.targets);
+  if (universal && !manifest.targets.includes(target)) {
+    throw new MotorError('PLATFORM_UNSUPPORTED', `Este paquete de Mind no incluye ${target}.`);
+  }
+  const directory = universal && platform !== 'win32' ? path.join(root, 'Runtime', target) : path.join(root, 'Runtime');
+  const windows = platform === 'win32';
+  return {
+    directory,
+    nodeExecutable: path.join(directory, 'node', windows ? 'node.exe' : 'bin/node'),
+    pythonExecutable: path.join(directory, 'python', windows ? 'python.exe' : 'bin/python3'),
+  };
+}
+
+/** Identifica el producto sin crear su Base ni abrir una sesión. */
+export async function productInstallation() {
+  const motorDirectory = await fs.realpath(MOTOR_DIRECTORY);
+  const candidateRoot = path.dirname(motorDirectory);
+  const manifest = path.basename(motorDirectory) === 'Motor' ? await readManifest(candidateRoot) : null;
+  return { motorDirectory, manifest, root: manifest ? candidateRoot : null };
 }
 
 async function exists(target) {
@@ -63,11 +81,8 @@ async function exists(target) {
  * @param {{ base?: string, env?: NodeJS.ProcessEnv }} [options]
  */
 export async function resolveLayout({ base, env = process.env } = {}) {
-  const motorDirectory = await fs.realpath(MOTOR_DIRECTORY);
-  const candidateRoot = path.dirname(motorDirectory);
-  const manifest = path.basename(motorDirectory) === 'Motor' ? await readManifest(candidateRoot) : null;
-  const product = manifest !== null;
-  const root = product ? candidateRoot : null;
+  const { motorDirectory, manifest, root } = await productInstallation();
+  const product = root !== null;
 
   let baseDirectory = base ?? env.MIND_BASE ?? (product ? path.join(root, 'Base') : null);
   if (baseDirectory === null) {
@@ -78,13 +93,13 @@ export async function resolveLayout({ base, env = process.env } = {}) {
   }
   baseDirectory = path.normalize(baseDirectory);
 
+  const runtime = product ? productRuntime(root, manifest) : null;
   let pythonExecutable = env.MIND_PYTHON ?? null;
-  if (pythonExecutable === null && product) {
-    const bundled = bundledPython(root);
-    if (!(await exists(bundled))) {
-      throw new MotorError('RUNTIME_MISSING', 'Falta el intérprete incluido en Runtime/python. Vuelve a extraer el paquete de Mind.');
+  if (pythonExecutable === null && runtime) {
+    if (!(await exists(runtime.pythonExecutable))) {
+      throw new MotorError('RUNTIME_MISSING', 'Falta el intérprete incluido de Python. Vuelve a extraer el paquete de Mind.');
     }
-    pythonExecutable = bundled;
+    pythonExecutable = runtime.pythonExecutable;
   }
   pythonExecutable ??= process.platform === 'win32' ? 'python' : 'python3';
 
@@ -94,6 +109,7 @@ export async function resolveLayout({ base, env = process.env } = {}) {
     root,
     motorDirectory,
     baseDirectory,
+    runtime,
     pythonExecutable,
     // En el producto ninguna carpeta autorizada puede solaparse con la carpeta
     // de Mind: incluye iniciadores y runtimes que se ejecutan con confianza.

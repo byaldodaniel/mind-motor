@@ -5,13 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { generateKeyPairSync, createHash, sign } from 'node:crypto';
 import { checkForUpdate, githubDownload } from '../src/auto-update.js';
+import { UNIVERSAL_TARGETS } from '../src/product-files.js';
 
-async function fixture(t) {
+async function fixture(t, current = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-update-channel-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'Motor', 'src'), { recursive: true });
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  await fs.writeFile(path.join(root, 'mind-producto.json'), JSON.stringify({ format: 'mind-product', mindVersion: '1.0.0', platform: 'win32', arch: 'x64' }));
+  await fs.writeFile(path.join(root, 'mind-producto.json'), JSON.stringify({ format: 'mind-product', mindVersion: '1.0.0', platform: 'win32', arch: 'x64', ...current }));
   await fs.writeFile(path.join(root, 'Motor', 'src', 'update-channel.json'), JSON.stringify({ repository: 'owner/distribution', url: 'https://github.com/owner/distribution/releases/latest/download/stable.json', publicKey: publicKey.export({ type: 'spki', format: 'pem' }) }));
   const bytes = Buffer.from('paquete ficticio');
   const feed = { format: 'mind-update', version: 1, mindVersion: '1.1.0', packages: [{ platform: 'win32', arch: 'x64', url: 'https://github.com/owner/distribution/releases/download/v1.1.0/mind.zip', sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length }] };
@@ -30,6 +31,49 @@ test('detecta, descarga y verifica un paquete firmado, instala sin preguntar y l
   assert.equal((await checkForUpdate(f.options)).status, 'actualizada');
   assert.equal(f.installed, 1);
   await assert.rejects(fs.stat(f.source), { code: 'ENOENT' });
+});
+
+test('el canal universal conserva win32/x64 para el cliente anterior y entrega ZIP a un destino POSIX', async t => {
+  const f = await fixture(t, { platform: 'darwin', arch: 'arm64' });
+  f.feed.packages[0].targets = UNIVERSAL_TARGETS;
+  assert.equal((await checkForUpdate(f.options)).status, 'actualizada');
+  assert.equal(f.installed, 1);
+  assert.equal(path.extname(f.source), '.zip');
+});
+
+test('el canal universal exige una sola entrada compatible con Windows anterior y la lista completa de destinos', async t => {
+  const invalid = [
+    entry => { entry.targets = UNIVERSAL_TARGETS.slice(1); },
+    entry => { entry.targets = [...UNIVERSAL_TARGETS.slice(1), UNIVERSAL_TARGETS[1]]; },
+    entry => { entry.arch = 'arm64'; },
+    (entry, packages) => { packages.push({ ...entry }); },
+  ];
+  for (const change of invalid) {
+    const f = await fixture(t);
+    f.feed.packages[0].targets = UNIVERSAL_TARGETS;
+    change(f.feed.packages[0], f.feed.packages);
+    const result = await checkForUpdate(f.options);
+    assert.equal(result.status, 'aplazada');
+    assert.match(result.reason, /canal universal/iu);
+    assert.equal(f.installed, 0);
+  }
+});
+
+test('una instalación universal no se convierte automáticamente a la edición nativa', async t => {
+  const f = await fixture(t, { targets: UNIVERSAL_TARGETS });
+  Object.assign(f.feed.packages[0], { platform: process.platform, arch: process.arch });
+  const result = await checkForUpdate(f.options);
+  assert.equal(result.status, 'aplazada');
+  assert.match(result.reason, /actualización universal/iu);
+  assert.equal(f.installed, 0);
+});
+
+test('una instalación universal recibe el mismo ZIP al actualizarse', async t => {
+  const f = await fixture(t, { targets: UNIVERSAL_TARGETS });
+  f.feed.packages[0].targets = UNIVERSAL_TARGETS;
+  assert.equal((await checkForUpdate(f.options)).status, 'actualizada');
+  assert.equal(f.installed, 1);
+  assert.equal(path.extname(f.source), '.zip');
 });
 
 test('sin internet continúa con la instalación actual', async t => {

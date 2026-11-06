@@ -15,6 +15,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startMcp } from '../test/helpers/mcp-client.js';
+import { readManifestFile } from '../src/product-files.js';
+import { productRuntime } from '../src/layout.js';
 
 const at = process.argv.indexOf('--mind');
 if (process.platform !== 'darwin' || at < 0) {
@@ -31,14 +33,20 @@ const fail = (message) => {
   process.exit(1);
 };
 
-const python = await fs.realpath(path.join(mind, 'Runtime', 'python', 'bin', 'python3'));
+const manifest = await readManifestFile(mind);
+const runtime = productRuntime(mind, manifest);
+const python = await fs.realpath(runtime.pythonExecutable);
 if (!marked(python) || !marked(path.join(mind, 'LEEME.md'))) fail('La carpeta no está marcada en cuarentena: no hay nada que comprobar.');
-process.stdout.write(`Antes: ${quarantinedIn(path.join(mind, 'Runtime')).length} entradas de Runtime en cuarentena.\n`);
+process.stdout.write(`Antes: ${quarantinedIn(runtime.directory).length} entradas del runtime activo en cuarentena.\n`);
 
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-cuarentena-'));
 const folder = path.join(temporary, 'Ficticia');
 await fs.mkdir(folder);
 await fs.writeFile(path.join(folder, 'nota.txt'), 'Nota ficticia\n');
+if (manifest.targets) {
+  const prepared = spawnSync(runtime.nodeExecutable, [path.join(mind, 'Motor', 'bin', 'mind.js'), 'preparar'], { encoding: 'utf8' });
+  if (prepared.status !== 0) fail(`No se preparó la configuración del agente: ${prepared.stderr}`);
+}
 const config = JSON.parse(await fs.readFile(path.join(mind, '.mcp.json'), 'utf8')).mcpServers.mind;
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(path|node_options|mind_base|mind_python)$/iu.test(key)));
 env.PATH = temporary;
@@ -66,8 +74,9 @@ try {
   await fs.rm(temporary, { recursive: true, force: true });
 }
 
-const remaining = quarantinedIn(path.join(mind, 'Runtime'));
+const remaining = quarantinedIn(runtime.directory);
 if (remaining.length > 0) fail(`Quedan archivos de Runtime en cuarentena: ${remaining.slice(0, 5).join(', ')}`);
 if (!marked(path.join(mind, 'LEEME.md')) || !marked(path.join(mind, 'mind'))) fail('Mind retiró la cuarentena fuera de su carpeta Runtime.');
+if (manifest.targets && !marked(path.join(mind, 'Runtime', 'node', 'node.exe'))) fail('Mind retiró la cuarentena del runtime de Windows.');
 if (!/Cuarentena de macOS retirada/u.test(client.stderr())) fail('El registro de Mind no anota la retirada verificada.');
 process.stdout.write('✔ Mind verificó sus runtimes, retiró la cuarentena solo de Runtime y el Python incluido indexó y leyó una carpeta ficticia.\n');

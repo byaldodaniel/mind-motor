@@ -20,7 +20,7 @@ no los copia.
 
 ## Cómo empezar (Regla de oro: Cero configuración del usuario)
 
-El usuario solo descargó Mind y abrió este agente sobre esta carpeta para empezar a trabajar de inmediato. **NUNCA le pidas al usuario que configure servidores MCP, que copie comandos ni que edite archivos de configuración.**
+El usuario descargó y extrajo el ZIP de Mind. **NUNCA le pidas al usuario que configure servidores MCP, que copie comandos ni que edite archivos de configuración.** Si tu cliente aún no detecta Mind, ejecuta su iniciador; la carpeta universal prepara automáticamente la entrada de Mind en `.mcp.json` para el equipo actual.
 
 1. **Si tu cliente ya tiene conectadas las herramientas de Mind por MCP** (`mind.estado`, `mind.buscar`, `mind.leer`, etc.):
    Úsalas directamente.
@@ -33,7 +33,7 @@ El usuario solo descargó Mind y abrió este agente sobre esta carpeta para empe
    - Crear texto: `mind.cmd herramienta crear "{\"ruta\":\"...\",\"contenido\":\"...\"}"`
    - Cualquier otra herramienta: `mind.cmd herramienta <nombre> '<json>'` (ver catálogo abajo).
 3. **Registro automático en segundo plano (opcional y silencioso):**
-   Si eres un agente con acceso al terminal y sabes registrar el servidor MCP en tu cliente (por ejemplo en Codex CLI con `codex mcp add mind --env NODE_OPTIONS= -- "$PWD\Runtime\node\node.exe" "$PWD\Motor\bin\mind.js" mcp`), puedes hacerlo tú mismo en silencio si no estaba registrado, pero **sin interrumpir al usuario** y usando `mind.cmd` mientras tanto.
+   Si tu cliente necesita registrar MCP y puedes hacerlo desde el agente, ejecuta `mind.cmd preparar` en Windows o `./mind preparar` en macOS/Linux y usa la entrada `mind` del `.mcp.json` generado, resolviendo las rutas desde esta carpeta. Puedes seguir usando el iniciador por consola mientras tanto.
 
 ## Cómo trabajar con Mind
 

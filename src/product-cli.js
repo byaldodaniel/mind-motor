@@ -10,6 +10,7 @@ const USAGE = `Mind ${MOTOR_VERSION}
 Uso: mind <orden> [opciones]
 
 Para el usuario:
+  preparar                   Prepara la conexión del agente en la carpeta portable.
   estado                     Resumen de la Base, las carpetas y sus permisos.
   autorizar [ruta]           Revisa y aprueba solicitudes de agentes; con una ruta,
                              autoriza esa carpeta (pregunta qué permisos conceder).
@@ -115,6 +116,21 @@ export async function main(args) {
   try {
     const { options, command, parameters } = parse(args);
     options.autoWorkspace = ['estado', 'herramienta'].includes(command);
+    if (!['version', '--version', 'actualizar'].includes(command)) {
+      const { prepareProductMcp } = await import('./product-mcp.js');
+      try {
+        const result = await prepareProductMcp();
+        if (command === 'preparar') {
+          print(result === 'personalizada'
+            ? 'Se conservó la conexión de Mind personalizada en .mcp.json.'
+            : 'Abre esta carpeta en tu agente para empezar a usar Mind.');
+          return 0;
+        }
+      } catch (error) {
+        if (command === 'preparar') throw error;
+        process.stderr.write(`Aviso al preparar la conexión de Mind: ${error.message}\n`);
+      }
+    }
     switch (command) {
       case undefined:
       case 'ayuda':

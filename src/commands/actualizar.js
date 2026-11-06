@@ -11,8 +11,9 @@ import { BASE_MARKER } from '../base-format.js';
 import { liveSessions } from '../session.js';
 import { requireInteractive, createPrompter } from '../console.js';
 import { readArchive, extractEntries, compareBytes } from '../archive.js';
+import { productRuntime } from '../layout.js';
 import {
-  MANIFEST_NAME, readManifestFile, verifyTree, describeProblems, compareVersions,
+  MANIFEST_NAME, readManifestFile, verifyTree, describeProblems, compareVersions, supportsProductTarget,
 } from '../product-files.js';
 
 /**
@@ -24,7 +25,7 @@ import {
  * 1. exige que no haya sesiones de Mind vivas sobre la Base;
  * 2. prepara al lado (dentro de la carpeta de Mind) una copia del paquete y
  *    verifica su manifiesto y el SHA-256 de cada archivo;
- * 3. exige la misma plataforma y arquitectura, rechaza bajar de versión salvo
+ * 3. exige que el paquete admita este equipo, rechaza bajar de versión salvo
  *    --forzar y comprueba que el Motor nuevo admite el formato de la Base;
  * 4. tras la confirmación del usuario, renombra lo anterior a
  *    .anterior-<versión>/ y coloca lo nuevo; comprueba que el Mind nuevo
@@ -285,14 +286,12 @@ async function uniqueDirectory(root, name) {
 
 /** Comprobación tras sustituir: el Mind nuevo arranca con su propio Node y declara la versión esperada. */
 export function smokeTest(root, manifest) {
-  const node = process.platform === 'win32'
-    ? path.join(root, 'Runtime', 'node', 'node.exe')
-    : path.join(root, 'Runtime', 'node', 'bin', 'node');
+  const { nodeExecutable } = productRuntime(root, manifest);
   return new Promise((resolve, reject) => {
     const env = { ...process.env, NODE_OPTIONS: '' };
     delete env.MIND_BASE;
     delete env.MIND_PYTHON;
-    const child = spawn(node, [path.join(root, 'Motor', 'bin', 'mind.js'), 'version'], {
+    const child = spawn(nodeExecutable, [path.join(root, 'Motor', 'bin', 'mind.js'), 'version'], {
       cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
     let output = '';
@@ -355,8 +354,9 @@ async function updateMindUnlocked({
   try {
     const { tree, manifest: incoming } = await prepare(sourcePath, staging, report);
     await protectBase(root, baseDirectory, [...managedItems(current, incoming), MANIFEST_NAME]);
-    if (incoming.platform !== current.platform || incoming.arch !== current.arch) {
-      throw fail('UPDATE_PLATFORM_MISMATCH', `El paquete es para ${incoming.platform}-${incoming.arch} y esta instalación es ${current.platform}-${current.arch}.`);
+    const { platform, arch } = current.targets ? process : current;
+    if (!supportsProductTarget(current, platform, arch) || !supportsProductTarget(incoming, platform, arch)) {
+      throw fail('UPDATE_PLATFORM_MISMATCH', `El paquete no admite ${platform}-${arch}, el destino de esta instalación.`);
     }
     const order = compareVersions(incoming.mindVersion, current.mindVersion);
     if (order < 0 && !force) {
@@ -369,7 +369,7 @@ async function updateMindUnlocked({
     }
     const backupName = `.anterior-${current.mindVersion.replace(/[^0-9A-Za-z.+-]/gu, '_')}`;
     const summary = {
-      from: current.mindVersion, to: incoming.mindVersion, platform: `${current.platform}-${current.arch}`,
+      from: current.mindVersion, to: incoming.mindVersion, platform: `${platform}-${arch}`,
       files: Object.keys(incoming.files).length, downgrade: order < 0, reinstall: order === 0,
       base: stored === null ? 'sin crear' : `formato ${stored}`, supportedBase: supported, backup: backupName,
     };

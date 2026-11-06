@@ -25,13 +25,14 @@ function script(name, ...args) {
 
 const candidates = path.join(output, 'candidatos');
 const upgrades = path.join(output, 'ensayo');
-script('construir-paquetes', '--sumas-oficiales', '--salida', candidates);
+const cache = process.env.MIND_COMPONENT_CACHE ? ['--cache', path.resolve(process.env.MIND_COMPONENT_CACHE)] : [];
+script('construir-paquetes', '--sumas-oficiales', '--salida', candidates, ...cache);
 script('firmar-actualizacion', '--verificar', version, candidates);
-script('construir-paquetes', '--version-paquete', next, '--salida', upgrades);
+script('construir-paquetes', '--version-paquete', next, '--salida', upgrades, ...cache);
 script('firmar-actualizacion', '--verificar', next, upgrades);
 if (reproducibility) {
   const repeated = path.join(output, 'repeticion');
-  script('construir-paquetes', '--salida', repeated);
+  script('construir-paquetes', '--salida', repeated, ...cache);
   const [first, second] = await Promise.all([candidates, repeated].map(dir => fs.readFile(path.join(dir, 'SHA256SUMS'), 'utf8')));
   if (first !== second) throw new Error('La segunda construcción produjo archivos diferentes.');
 }
@@ -44,16 +45,11 @@ execFileSync('git', ['archive', '--format=zip', '--output', harnessFile, commit,
   'test/helpers/mcp-client.js', 'scripts/probar-paquete.mjs', 'scripts/producto-12-casos.mjs',
   'scripts/producto-actualizacion-automatica.mjs', 'scripts/producto-cuarentena-macos.mjs'], { cwd: root });
 
-const packages = [];
-for (const platform of plataformas) {
-  const extension = platform.startsWith('win32-') ? 'zip' : 'tar.gz';
-  const name = `Mind-${version}-${platform}.${extension}`;
-  const upgrade = `Mind-${next}-${platform}.${extension}`;
-  packages.push({
-    plataforma: platform,
-    paquete: { name, sha256: await hashFile(path.join(candidates, name)) },
-    actualizacion: { name: upgrade, sha256: await hashFile(path.join(upgrades, upgrade)) },
-  });
-}
+const name = `Mind-${version}-universal.zip`;
+const upgrade = `Mind-${next}-universal.zip`;
+const paquete = { name, sha256: await hashFile(path.join(candidates, name)) };
+const actualizacion = { name: upgrade, sha256: await hashFile(path.join(upgrades, upgrade)) };
+// La matriz contiene cinco ejecuciones, todas sobre los mismos dos archivos.
+const packages = plataformas.map(plataforma => ({ plataforma, paquete, actualizacion }));
 const matrix = { version, commit, harness: { name: harness, sha256: await hashFile(harnessFile) }, paquetes: packages };
 await fs.writeFile(path.join(output, 'matriz.json'), JSON.stringify(matrix, null, 2) + '\n');

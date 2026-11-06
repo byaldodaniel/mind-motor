@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractEntries, readArchive } from '../src/archive.js';
-import { hashFile, readManifestFile } from '../src/product-files.js';
+import { hashFile, readManifestFile, supportsProductTarget } from '../src/product-files.js';
+import { productRuntime } from '../src/layout.js';
 
 const [archive, update, archiveHash, updateHash, reportDir, flag, claude] = process.argv.slice(2);
 if (!archive || !update || !archiveHash || !updateHash || !reportDir || (flag && (flag !== '--claude' || !claude))) {
@@ -28,7 +29,7 @@ async function extract(folder) {
 
 function run(node, script, args) {
   const result = spawnSync(node, [fileURLToPath(new URL(script, import.meta.url)), ...args], {
-    stdio: 'inherit', windowsHide: true, timeout: 600_000,
+    stdio: 'inherit', windowsHide: true, timeout: 1_200_000,
   });
   if (result.error) throw result.error;
   return result.status === 0;
@@ -37,13 +38,12 @@ function run(node, script, args) {
 try {
   const mind = await extract('Producto');
   const manifest = await readManifestFile(mind);
-  if (!manifest || `${manifest.platform}-${manifest.arch}` !== platform) {
+  if (!supportsProductTarget(manifest)) {
     throw new Error(`El paquete no corresponde al destino nativo ${platform}.`);
   }
   report.version = manifest.mindVersion;
   report.commit = manifest.builtFrom;
-  const nodeRelative = process.platform === 'win32' ? 'Runtime/node/node.exe' : 'Runtime/node/bin/node';
-  const node = path.join(mind, nodeRelative);
+  const { nodeExecutable: node } = productRuntime(mind, manifest);
 
   const auto = run(node, './producto-actualizacion-automatica.mjs', [mind, path.resolve(update), path.join(temporary, 'auto.json')]);
   const autoReport = await readReport('auto.json');
@@ -65,7 +65,7 @@ try {
   if (process.platform === 'darwin') {
     const fresh = await extract('Cuarentena');
     execFileSync('/usr/bin/xattr', ['-r', '-w', 'com.apple.quarantine', '0083;00000000;Safari;', fresh]);
-    quarantine = run(path.join(fresh, nodeRelative), './producto-cuarentena-macos.mjs', ['--mind', fresh]);
+    quarantine = run(productRuntime(fresh, manifest).nodeExecutable, './producto-cuarentena-macos.mjs', ['--mind', fresh]);
     report.cuarentena_simulada = quarantine ? 'superada' : 'fallida';
     report.primera_apertura_grafica = 'pendiente de comprobación independiente';
   }

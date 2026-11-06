@@ -4,9 +4,12 @@ import path from 'node:path';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { productRuntime } from './layout.js';
 
 const MAX_FEED = 128 * 1024;
 const MAX_PACKAGE = 512 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+const UNIVERSAL_DOWNLOAD_BYTES_PER_SECOND = 512 * 1024;
 const ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
 export function githubDownload(value, repository) {
@@ -51,14 +54,20 @@ export function verifyFeed(envelope, publicKey) {
   return feed;
 }
 
-/** No importa código del Motor antes de sustituirlo: la instalación ocurre en otro proceso. */
+/** Instala en otro proceso antes de iniciar una sesión del Motor. */
 export async function checkForUpdate({ root = ROOT, fetcher = fetch, install = installPackage, baseDirectory, report = () => {} } = {}) {
   let temporary;
   try {
     const current = JSON.parse(await fs.readFile(path.join(root, 'mind-producto.json'), 'utf8'));
     const channel = JSON.parse(await fs.readFile(path.join(root, 'Motor', 'src', 'update-channel.json'), 'utf8'));
     if (current.format !== 'mind-product' || !channel.publicKey) return { status: 'no-configurado' };
-    const { compareVersions, isVersion } = await import('./product-files.js');
+    const { compareVersions, isVersion, supportsProductTarget, validUniversalTargets } = await import('./product-files.js');
+    const universal = current.targets !== undefined;
+    if (universal && (current.platform !== 'win32' || current.arch !== 'x64'
+        || !validUniversalTargets(current.targets) || !supportsProductTarget(current))) {
+      throw new Error('La edición instalada no admite este equipo.');
+    }
+    const { platform, arch } = universal ? process : current;
     const feedUrl = githubDownload(channel.url, channel.repository);
     let feedResult;
     try { feedResult = await download(feedUrl, { fetcher, signal: AbortSignal.timeout(5000), limit: MAX_FEED }); }
@@ -66,17 +75,31 @@ export async function checkForUpdate({ root = ROOT, fetcher = fetch, install = i
     const feed = verifyFeed(JSON.parse(feedResult.text), channel.publicKey);
     if (!isVersion(feed.mindVersion) || feed.mindVersion.includes('-')) throw new Error('El canal estable no admite versiones preliminares.');
     if (compareVersions(feed.mindVersion, current.mindVersion) <= 0) return { status: 'al-dia' };
-    const matching = feed.packages.filter(p => p.platform === current.platform && p.arch === current.arch);
+    const universalPackage = feed.packages.find(p => p?.targets !== undefined);
+    if (universalPackage && (feed.packages.length !== 1 || universalPackage.platform !== 'win32'
+        || universalPackage.arch !== 'x64' || !validUniversalTargets(universalPackage.targets))) {
+      throw new Error('El canal universal no enumera un único ZIP para todos los destinos.');
+    }
+    const matching = feed.packages.filter(p => supportsProductTarget(p, platform, arch));
     if (matching.length !== 1) throw new Error('Falta un paquete único para este equipo.');
     const selected = matching[0];
+    if (universal && !universalPackage) throw new Error('El canal no ofrece una actualización universal.');
     const url = githubDownload(selected.url, channel.repository);
+    if (universalPackage && !new URL(url).pathname.toLowerCase().endsWith('.zip')) {
+      throw new Error('El canal universal debe ofrecer un ZIP.');
+    }
     if (!/^[a-f0-9]{64}$/.test(selected.sha256) || !Number.isSafeInteger(selected.bytes)
         || selected.bytes < 1 || selected.bytes > MAX_PACKAGE) throw new Error('Paquete no válido.');
     // Este directorio es externo a la instalación y nunca contiene información de la Base.
     temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-descarga-'));
-    const source = path.join(temporary, current.platform === 'win32' ? 'mind.zip' : 'mind.tar.gz');
+    const source = path.join(temporary, universalPackage || platform === 'win32' ? 'mind.zip' : 'mind.tar.gz');
+    // El ZIP universal incluye los runtimes de todos los destinos. Conserva el
+    // plazo mínimo y concede tiempo proporcional al tamaño firmado del ZIP.
+    const timeout = universalPackage
+      ? Math.max(DOWNLOAD_TIMEOUT_MS, Math.ceil(selected.bytes / UNIVERSAL_DOWNLOAD_BYTES_PER_SECOND * 1000))
+      : DOWNLOAD_TIMEOUT_MS;
     report(`Descargando Mind ${feed.mindVersion}…`);
-    const received = await download(url, { fetcher, signal: AbortSignal.timeout(120000), limit: selected.bytes, file: source });
+    const received = await download(url, { fetcher, signal: AbortSignal.timeout(timeout), limit: selected.bytes, file: source });
     if (received.bytes !== selected.bytes || received.sha256 !== selected.sha256) throw new Error('El paquete descargado no coincide con la versión firmada.');
     await install({ root, source, version: feed.mindVersion, baseDirectory });
     report(`Mind se actualizó a ${feed.mindVersion}.`);
@@ -116,13 +139,14 @@ export async function launch(args) {
     filtered.push(args[index]);
   }
   const command = filtered[0];
-  if (!process.env.MIND_UPDATE_RESTART && !['version', '--version', 'actualizar', 'ayuda', '--help', '-h'].includes(command ?? args[0])) {
+  if (!process.env.MIND_UPDATE_RESTART && !['version', '--version', 'actualizar', 'preparar', 'ayuda', '--help', '-h'].includes(command ?? args[0])) {
     const baseIndex = args.lastIndexOf('--base');
     const result = await checkForUpdate({ baseDirectory: baseIndex >= 0 ? args[baseIndex + 1] : undefined, report: message => process.stderr.write(`${message}\n`) });
     if (result.status === 'actualizada') {
-      const node = process.platform === 'win32' ? path.join(ROOT, 'Runtime', 'node', 'node.exe') : path.join(ROOT, 'Runtime', 'node', 'bin', 'node');
+      const manifest = JSON.parse(await fs.readFile(path.join(ROOT, 'mind-producto.json'), 'utf8'));
+      const { nodeExecutable } = productRuntime(ROOT, manifest);
       return new Promise((resolve, reject) => {
-        const child = spawn(node, [path.join(ROOT, 'Motor', 'bin', 'mind.js'), ...args], {
+        const child = spawn(nodeExecutable, [path.join(ROOT, 'Motor', 'bin', 'mind.js'), ...args], {
           stdio: 'inherit', windowsHide: true, env: { ...process.env, NODE_OPTIONS: '', MIND_UPDATE_RESTART: '1' },
         });
         child.on('error', reject);

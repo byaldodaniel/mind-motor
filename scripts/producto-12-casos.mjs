@@ -27,7 +27,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startMcp } from '../test/helpers/mcp-client.js';
-import { readManifestFile, verifyTree, describeProblems } from '../src/product-files.js';
+import { readManifestFile, verifyTree, describeProblems, supportsProductTarget } from '../src/product-files.js';
+import { productRuntime } from '../src/layout.js';
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -118,7 +119,13 @@ function isolatedEnv() {
   return env;
 }
 
-/** Lanza el servidor tal como lo haría el agente a partir del .mcp.json del paquete. */
+function launchCommand(command) {
+  return windows
+    ? run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" ${command}"`], { env: isolatedEnv(), verbatim: true })
+    : run(path.join(mind, 'mind'), [command], { env: isolatedEnv() });
+}
+
+/** Lanza el servidor tal como lo haría el agente a partir del .mcp.json de Mind. */
 async function launch({ clientInfo, onElicit = null } = {}) {
   const config = JSON.parse(await fs.readFile(path.join(mind, '.mcp.json'), 'utf8')).mcpServers.mind;
   check(config && typeof config.command === 'string', 'El .mcp.json del paquete no declara el servidor "mind".');
@@ -173,20 +180,23 @@ try {
   await step(1, 'La carpeta se extrae correctamente', PACKAGE, async () => {
     manifest = await readManifestFile(mind);
     check(manifest, 'Falta mind-producto.json.');
-    check(manifest.platform === process.platform && manifest.arch === process.arch,
-      `Paquete para ${manifest.platform}-${manifest.arch}, equipo ${process.platform}-${process.arch}.`);
+    check(supportsProductTarget(manifest), `Paquete incompatible con ${process.platform}-${process.arch}.`);
     await fs.access(base).then(() => { throw new Error('El paquete no debe contener una Base.'); }, () => {});
     const verified = await verifyTree(mind, manifest);
     check(verified.ok, `La carpeta no coincide con su manifiesto: ${describeProblems(verified.problems)}`);
+    if (manifest.targets) {
+      const prepared = await launchCommand('preparar');
+      check(prepared.code === 0, `No se preparó Mind: ${prepared.stderr}`);
+    }
     const config = await fs.readFile(path.join(mind, '.mcp.json'), 'utf8');
     const server = JSON.parse(config).mcpServers.mind;
     check(!path.isAbsolute(server.command) && !server.args.some((value) => path.isAbsolute(value)), 'El .mcp.json no debe usar rutas absolutas.');
+    check(path.resolve(mind, server.command) === productRuntime(mind, manifest).nodeExecutable, 'MCP debe usar el Node del destino.');
     return { version: manifest.mindVersion, archivos: verified.files, enlaces: verified.links, commit: manifest.builtFrom };
   });
 
   await step(2, 'Los runtimes incluidos funcionan sin programas externos', PACKAGE, async () => {
-    const node = path.join(mind, 'Runtime', 'node', windows ? 'node.exe' : path.join('bin', 'node'));
-    const python = path.join(mind, 'Runtime', 'python', windows ? 'python.exe' : path.join('bin', 'python3'));
+    const { nodeExecutable: node, pythonExecutable: python } = productRuntime(mind, manifest);
     const expected = Object.fromEntries(manifest.components.map((item) => [item.name, item.version]));
     const nodeVersion = await run(node, ['--version'], { env: isolatedEnv() });
     check(nodeVersion.code === 0 && nodeVersion.stdout.trim() === `v${expected.node}`, `Node: ${nodeVersion.stdout}${nodeVersion.stderr}`);
@@ -196,10 +206,7 @@ try {
   });
 
   await step(3, 'El iniciador ejecuta Mind', PACKAGE, async () => {
-    const result = windows
-      // Como lo escribe una persona en cmd: "<Mind>\mind.cmd" version (argumentos literales).
-      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" version"`], { env: isolatedEnv(), verbatim: true })
-      : await run(path.join(mind, 'mind'), ['version'], { env: isolatedEnv() });
+    const result = await launchCommand('version');
     check(result.code === 0, `Código ${result.code}: ${result.stderr}`);
     const reported = JSON.parse(result.stdout);
     check(reported.mind === manifest.mindVersion, `Versión informada: ${result.stdout}`);
@@ -502,7 +509,7 @@ try {
     const project = path.join(temporary, 'Proyecto abierto ñ');
     await fs.mkdir(project);
     await fs.writeFile(path.join(project, 'nota.txt'), 'Información ficticia del proyecto');
-    const node = path.join(mind, 'Runtime', 'node', windows ? 'node.exe' : path.join('bin', 'node'));
+    const { nodeExecutable: node } = productRuntime(mind, manifest);
     const client = startMcp({ command: node, commandArgs: [path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project, baseEnv: isolatedEnv(), capabilities: {} });
     clients.push(client);
     await client.initialize();

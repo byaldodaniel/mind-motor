@@ -1,53 +1,44 @@
-# Entrega de Mind para Windows, macOS y Linux
+# Entrega de la carpeta universal de Mind
 
-El desarrollo usa ramas y pull requests en `byaldodaniel/mind-motor` (privado).
-El producto validado y su canal firmado se publican en `byaldodaniel/mind-updates`.
-La edición estable 1.0.1 para Windows se conserva. El proceso nuevo prepara
-cinco paquetes de una sola versión, definidos en `packaging/publicacion.json`.
+El repositorio privado `byaldodaniel/mind-motor` contiene el desarrollo.
+`byaldodaniel/mind-updates` distribuye un solo `Mind-<versión>-universal.zip`.
+El archivo se extrae a una carpeta `Mind/` con un único `Motor/`. Los iniciadores
+usan el Node y el Python incluidos para Windows x64, Mac Intel y Apple Silicon
+o Linux x64 y ARM64 con glibc. El primer arranque prepara la conexión del agente.
 
-## Preparar
+El manifiesto enumera los cinco destinos en `targets`. Conserva `win32/x64`
+como identificador principal y los ejecutores de Windows en sus rutas previas
+para que la instalación pública 1.0.1 pueda recibir el mismo ZIP firmado.
 
-1. Usar una copia limpia en el commit que se quiere probar. Se necesita Git,
-   Node 24 y Python 3.12 en Windows o `xz` en Linux/macOS.
-2. Ejecutar `node scripts/preparar-paridad.mjs <carpeta-nueva> --reproducibilidad`.
-   Construye dos versiones, verifica las huellas de los componentes y comprueba
-   que cada conjunto de cinco paquetes contiene el mismo Motor. Produce
-   `candidatos/`, `ensayo/`, `pruebas-mind.zip` y `matriz.json`.
-3. Usar `matriz.json` para probar cada archivo exacto en su plataforma nativa.
-   Los archivos de `ensayo/` se usan para probar actualización. El archivo de
-   pruebas se obtiene del mismo commit y contiene solo el código de producto
-   y la batería de pruebas. La clave de producción permanece fuera de CI.
+## Preparar y validar
 
-## Validar
+1. Desde un commit limpio, ejecutar
+   `node scripts/preparar-paridad.mjs <carpeta-nueva> --reproducibilidad`.
+   Se necesita Git, Node 24 y Python 3.12 en Windows o `xz` en Linux/macOS.
+   `MIND_COMPONENT_CACHE` puede indicar una caché de componentes existente.
+2. Guardar el ZIP de `candidatos/` y su SHA-256. `ensayo/` contiene una versión
+   superior para probar el actualizador. `matriz.json` referencia los mismos
+   dos ZIP en las cinco filas. La clave de producción permanece fuera de CI.
+3. Ejecutar `scripts/probar-paquete.mjs` sobre los mismos archivos y huellas en
+   los cinco destinos. Comprobar la extracción, el primer arranque, la conexión
+   por MCP, la lectura, la escritura y la actualización conservando Base.
+4. Probar también la actualización desde 1.0.1 Windows x64, con una Base de
+   prueba y el canal de ensayo firmado. Mantener datos reales fuera de CI.
+5. Confirmar el primer uso en ambos Mac tras la descarga normal con Gatekeeper
+   activo, y probar el programador nativo con la sesión de Mind cerrada.
+   Documentar la arquitectura y el entorno Linux ensayados.
 
-- La vía gratuita usa los cinco ejecutores estándar de `mind-updates`.
-  Conservar los candidatos y la batería de pruebas en un borrador separado
-  de la publicación estable. Los informes deben indicar versión, commit y
-  SHA-256 de los paquetes. El workflow privado manual sirve para desarrollo
-  cuando haya cuota disponible.
-- `scripts/probar-paquete.mjs` comprueba el paquete extraído con sus propios
-  ejecutores, la preservación de la Base al actualizar y el arranque posterior.
-  El canal de ensayo usa una clave Ed25519 efímera y transporte simulado.
-- Para la salida estable, comprobar el primer uso con un cliente compatible
-  y el recorrido desde navegador y Finder en ambos Mac, con Gatekeeper activo.
-  La cuarentena sintética cubre el arranque de Mind y se registra por separado.
-  Documentar el entorno Linux y el programador usado para probar las funciones
-  automáticas.
-- Si falta un paquete, su huella difiere o algún recorrido falla, conservar
-  la versión estable anterior. Los resultados de una candidata anterior no
-  acreditan los archivos de la nueva entrega.
+La matriz privada manual consume la cuota de `mind-motor`. Los ejecutores
+estándar de `mind-updates` sirven para la validación gratuita de un borrador.
+Sus informes deben identificar el commit y la huella del mismo ZIP universal.
 
-## Publicar tras la revisión
+## Publicar después de la revisión
 
-1. Revisar los cinco informes y los resultados de primer uso. Etiquetar el
-   commit probado y firmar desde ese commit con
-   `node scripts/firmar-actualizacion.mjs <versión> <clave.pem> <candidatos> <stable.json>`.
-2. Preparar un borrador estable con los cinco paquetes de `candidatos/`,
-   `SHA256SUMS`, `stable.json` y notas. Tras la aprobación de Aldo, publicarlo
-   inicialmente sin marcarlo como la última versión.
-3. Comprobar las descargas públicas y sus huellas. Promover la entrega a
-   última estable y verificar el canal firmado público. Usar los enlaces
-   comprobados en los tres botones del sitio.
-4. Conservar las versiones publicadas. Si aparece un fallo, restaurar el
-   canal y los enlaces anteriores mientras se prepara un parche superior.
-   Las instalaciones que ya se actualizaron se corrigen con ese parche.
+1. Revisar los informes del ZIP que se va a distribuir. Etiquetar el commit
+   probado y firmar con `node scripts/firmar-actualizacion.mjs <versión> <clave.pem> <candidatos> <stable.json>`.
+2. Preparar un borrador con el ZIP universal, `SHA256SUMS`, `stable.json` y notas.
+   La aprobación de Aldo habilita su publicación inicial.
+3. Verificar la descarga, promover la entrega a estable y comprobar el canal
+   firmado. El sitio ofrece el mismo enlace en todos los sistemas.
+4. Si aparece un fallo, restaurar el canal anterior mientras se prepara un
+   parche superior para las instalaciones ya actualizadas.

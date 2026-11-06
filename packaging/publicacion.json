@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "paquete": "universal",
   "plataformas": [
     "win32-x64",
     "darwin-arm64",

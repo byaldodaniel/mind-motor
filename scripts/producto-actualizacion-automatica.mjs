@@ -2,6 +2,7 @@
 // Prueba el iniciador del producto y su reinicio con paquetes reales.
 // Solo se simula el transporte HTTPS. La Base de prueba y la clave son ficticias.
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -10,7 +11,8 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { extractEntries, readArchive } from '../src/archive.js';
 import { githubDownload, verifyFeed } from '../src/auto-update.js';
-import { compareVersions, hashFile, MANIFEST_NAME, readManifestFile } from '../src/product-files.js';
+import { compareVersions, hashFile, MANIFEST_NAME, readManifestFile, supportsProductTarget } from '../src/product-files.js';
+import { productRuntime } from '../src/layout.js';
 import { startMcp } from '../test/helpers/mcp-client.js';
 
 const [mindArgument, archiveArgument, thirdArgument, fourthArgument, ...extra] = process.argv.slice(2);
@@ -55,14 +57,14 @@ async function prepareFetch(mind, archive, incoming) {
     await fs.writeFile(channelFile, JSON.stringify(channel) + '\n');
     const url = `https://github.com/${channel.repository}/releases/download/v${incoming.mindVersion}/${encodeURIComponent(path.basename(archive))}`;
     const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 1, mindVersion: incoming.mindVersion,
-      packages: [{ platform: incoming.platform, arch: incoming.arch, url, bytes, sha256 }] }));
+      packages: [{ platform: incoming.platform, arch: incoming.arch, ...(incoming.targets ? { targets: incoming.targets } : {}), url, bytes, sha256 }] }));
     feed = path.join(temporary, 'stable.json');
     await fs.writeFile(feed, JSON.stringify({ payload: payload.toString('base64'),
       signature: sign(null, payload, privateKey).toString('base64') }));
   }
   const verified = verifyFeed(JSON.parse(await fs.readFile(feed, 'utf8')), channel.publicKey);
   assert.equal(verified.mindVersion, incoming.mindVersion, 'El canal debe indicar la versión del paquete nuevo.');
-  const matching = verified.packages.filter(entry => entry.platform === incoming.platform && entry.arch === incoming.arch);
+  const matching = verified.packages.filter(entry => supportsProductTarget(entry));
   assert.equal(matching.length, 1, 'El canal debe contener un solo paquete para esta plataforma.');
   const [selected] = matching;
   assert.equal(selected.sha256, sha256, 'La huella firmada no corresponde al paquete.');
@@ -95,16 +97,14 @@ try {
   const [origin, archive] = await Promise.all([fs.realpath(mindArgument), fs.realpath(archiveArgument)]);
   const before = await readManifestFile(origin);
   assert.ok(before, 'La instalación de origen debe venir de un paquete extraído.');
-  assert.equal(before.platform, process.platform);
-  assert.equal(before.arch, process.arch);
+  assert.ok(supportsProductTarget(before));
   assert.ok(!(await fs.readdir(origin)).some(name => name.toLowerCase() === 'base'),
     'Usa un paquete recién extraído, sin Base del usuario.');
   const { manifest: incoming, motorVersion } = await readIncomingProduct(archive);
   report.desde = before.mindVersion;
   report.hasta = incoming.mindVersion;
   report.motor = motorVersion;
-  assert.equal(incoming.platform, before.platform, 'El paquete nuevo debe ser de la misma plataforma.');
-  assert.equal(incoming.arch, before.arch, 'El paquete nuevo debe ser de la misma arquitectura.');
+  assert.ok(supportsProductTarget(incoming), 'El paquete nuevo debe admitir este equipo.');
   assert.ok(compareVersions(incoming.mindVersion, before.mindVersion) > 0, 'El paquete nuevo debe tener una versión superior.');
 
   const mind = path.join(temporary, 'Mind de prueba ñ');
@@ -127,6 +127,7 @@ try {
   await fs.mkdir(project);
   await fs.writeFile(path.join(project, 'nota.txt'), 'Texto ficticio');
 
+  if (before.targets) execFileSync(productRuntime(mind, before).nodeExecutable, [path.join(mind, 'Motor', 'bin', 'mind.js'), 'preparar']);
   const { mcpServers: { mind: config } } = JSON.parse(await fs.readFile(path.join(mind, '.mcp.json'), 'utf8'));
   const node = path.resolve(mind, config.command);
   const [launcher, ...args] = config.args;
@@ -146,8 +147,9 @@ try {
     const state = await client.call('estado');
     assert.equal(state.isError, false, state.text);
     assert.equal(state.data.mind.motor, motorVersion);
-    assert.equal(await fs.realpath(state.data.mind.runtime.node), await fs.realpath(node));
-    assert.equal(await fs.realpath(state.data.mind.runtime.python), await fs.realpath(layout.pythonExecutable));
+    const nextRuntime = productRuntime(mind, incoming);
+    assert.equal(await fs.realpath(state.data.mind.runtime.node), await fs.realpath(nextRuntime.nodeExecutable));
+    assert.equal(await fs.realpath(state.data.mind.runtime.python), await fs.realpath(nextRuntime.pythonExecutable));
     assert.equal(state.data.carpetas.length, 1);
     assert.equal(await fs.realpath(state.data.carpetas[0].ruta), await fs.realpath(project));
     const note = await client.call('leer', { ruta: 'nota.txt' });
@@ -164,7 +166,7 @@ try {
     assert.equal(client.elicitations.length, 0);
   };
   const deadline = new Promise((_, reject) => {
-    timeout = setTimeout(() => reject(new Error('La actualización o las comprobaciones MCP excedieron el plazo.')), 180_000);
+    timeout = setTimeout(() => reject(new Error('La actualización o las comprobaciones MCP excedieron el plazo.')), 600_000);
     client.child.once('error', reject);
   });
   const prematureExit = client.exited.then(({ code }) => {
