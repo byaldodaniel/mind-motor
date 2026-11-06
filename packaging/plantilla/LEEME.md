@@ -1,4 +1,4 @@
-# Mind 1.0 — Windows x64
+# Mind
 
 Mind permite a tu agente encontrar, leer, crear, modificar y organizar la
 información con la que trabajas. Tus archivos permanecen en su ubicación.
@@ -6,27 +6,36 @@ La carpeta `Base` conserva los índices y la continuidad de tus trabajos.
 
 ## Empezar
 
-1. **Extrae** el ZIP en la ubicación que prefieras. No necesita permisos de administrador ni instalaciones externas (ya incluye Node.js y Python portables).
-2. **Abre tu agente** (Claude Code, Codex, Cursor, Gemini CLI o cualquier otro) sobre la carpeta de Mind y empieza a hablarle. Tu agente leerá `AGENTS.md`, reconocerá las capacidades de Mind de inmediato y empezará a trabajar sin que tengas que configurar nada.
+1. **Extrae** el archivo que corresponde a tu equipo en una carpeta tuya. Mind
+   incluye Node.js y Python. Windows x64 usa ZIP. Mac Intel y Apple Silicon
+   y Linux x64 y ARM64 con glibc usan TAR.GZ.
+2. **Abre la carpeta Mind en tu agente** y pídele que use Mind. Claude Code
+   descubre el servidor incluido. Un agente con terminal puede seguir las
+   instrucciones de `AGENTS.md` y usar el iniciador incluido.
 3. **Pídele lo que necesites**: buscar archivos, leer documentos, organizar carpetas o continuar tareas anteriores.
 
-Si abres tu agente directamente sobre otro proyecto, pídele al agente que use Mind indicando su ruta o utilizando `--carpeta "C:\ruta\de\tu\proyecto"`. La carpeta abierta tiene acceso completo para trabajar.
+Si abres el agente sobre otro proyecto, pídele que use Mind en esa carpeta.
+El iniciador acepta `--carpeta` con la ruta absoluta del proyecto. El acceso
+completo de la carpeta abierta dura la sesión.
+
+| Sistema | Iniciador desde la carpeta Mind | Ayuda |
+|---|---|---|
+| Windows (PowerShell) | `.\mind.cmd` | `.\mind.cmd ayuda` |
+| macOS y Linux | `./mind` | `./mind ayuda` |
+
+En Mac, macOS puede mostrar un aviso al abrir archivos descargados. Consulta
+el mensaje del sistema y confirma el origen de tu descarga antes de abrirlos.
 
 ## Conexión técnica (referencia opcional para clientes MCP)
 
-La mayoría de agentes operan automáticamente a través de sus instrucciones. Si utilizas un cliente con configuración manual de MCP por stdio:
+El archivo `.mcp.json` describe la conexión por stdio. En clientes que la
+configuran manualmente, usa las rutas absolutas de tu carpeta Mind y deja
+`NODE_OPTIONS` vacía.
 
-- Programa: `<Mind>\Runtime\node\node.exe`
-- Argumentos: `<Mind>\Motor\bin\mind.js`, `mcp`
-- Variable de entorno: `NODE_OPTIONS` vacía.
-
-Sustituye `<Mind>` por la ruta absoluta donde extrajiste Mind.
-
-Para registrarlo manualmente en Codex CLI desde PowerShell:
-
-    codex mcp add mind --env NODE_OPTIONS= -- "C:\ruta\Mind\Runtime\node\node.exe" "C:\ruta\Mind\Motor\bin\mind.js" mcp
-
-Claude Code descubre `.mcp.json` automáticamente al abrir la carpeta de Mind.
+| Sistema | Programa incluido | Argumentos |
+|---|---|---|
+| Windows | `Runtime\node\node.exe` | `Motor\bin\mind.js`, `mcp` |
+| macOS y Linux | `Runtime/node/bin/node` | `Motor/bin/mind.js`, `mcp` |
 
 ## Qué puedes hacer
 
@@ -42,19 +51,16 @@ Claude Code descubre `.mcp.json` automáticamente al abrir la carpeta de Mind.
 
 ## Actualizaciones
 
-Mind comprueba las nuevas versiones estables al iniciar. Si hay una para Windows,
+Mind comprueba las nuevas versiones estables al iniciar. Si hay una para tu equipo,
 la descarga, verifica su firma y la instala cuando no haya sesiones activas.
 Sin conexión continúa con la versión instalada. Los archivos personales y la Base
 se conservan; si la comprobación de arranque falla intenta recuperar la versión anterior.
 
-Una copia anterior al actualizador automático necesita recibir este ZIP una vez.
-Con todos los agentes cerrados, usa desde esa instalación:
-
-    mind actualizar "C:\ruta\Mind-1.0.0-win32-x64.zip"
+Para actualizar manualmente, cierra los agentes y usa el iniciador de la
+instalación con `actualizar` y la ruta del paquete de tu equipo.
 
 ## Alcance y datos
 
-Esta publicación es para Windows x64. Linux y macOS quedan para entregas futuras.
 El acceso a la carpeta abierta dura la sesión; las exclusiones se respetan.
 Si el cliente no comunica un proyecto válido, sigue disponible el acceso manual
 con `mind autorizar`. Se puede revisar con `mind permisos`.

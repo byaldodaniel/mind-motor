@@ -23,7 +23,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import { readArchive, extractEntries, writeTarGz, writeZip, compareBytes } from '../src/archive.js';
+import { readArchive, extractEntries, writeTarGz, writeZip, compareBytes, normalizedMode } from '../src/archive.js';
 import { hashFile, scanTree, validateManifest, verifyTree, describeProblems, MANIFEST_NAME } from '../src/product-files.js';
 import { BASE_FORMAT_VERSION } from '../src/base-format.js';
 
@@ -94,13 +94,20 @@ async function checkOfficialSums(components, targets) {
   }
 }
 
-/** Flujo descomprimido de un .tar.xz con el xz del sistema que construye (Node no incluye xz). */
+/** Node no incluye xz. En Windows se usa lzma del Python de construcción. */
 function decompressXz(file) {
-  const child = spawn('xz', ['-dc', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const windows = process.platform === 'win32';
+  const program = windows ? 'python' : 'xz';
+  const args = windows
+    ? ['-I', '-B', '-c', `import lzma, shutil, sys
+with lzma.open(sys.argv[1], "rb") as source:
+    shutil.copyfileobj(source, sys.stdout.buffer)`, file]
+    : ['-dc', file];
+  const child = spawn(program, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   child.on('close', (code) => {
-    if (code !== 0) child.stdout.destroy(new Error(`xz terminó con código ${code}: ${stderr.trim()}`));
+    if (code !== 0) child.stdout.destroy(new Error(`${program} terminó con código ${code}: ${stderr.trim()}`));
   });
   child.on('error', (error) => child.stdout.destroy(error));
   return child.stdout;
@@ -117,21 +124,23 @@ async function extractNode(file, stage, target) {
   });
   const found = new Set(extracted.filter((entry) => entry.type === 'file').map((entry) => entry.path));
   for (const name of keep) if (!found.has(name)) fail(`El archivo de Node no contiene ${name}.`);
+  return extracted;
 }
 
 /** CPython de python-build-standalone (install_only_stripped): su carpeta python/ completa. */
-async function extractPython(file, stage, target) {
+async function extractPython(file, stage, target, recordLinks) {
   const extracted = await extractEntries(readArchive(file), path.join(stage, 'Runtime', 'python'), {
     // share/terminfo (bases de datos de terminales para curses) no lo usa Mind y
     // contiene nombres que solo difieren en mayúsculas: chocan en macOS y Windows.
     map: (name) => (name.startsWith('python/') && !name.startsWith('python/share/terminfo/') ? name.slice('python/'.length) : null),
-    links: target.platform === 'win32' ? 'record' : 'create',
+    links: recordLinks || target.platform === 'win32' ? 'record' : 'create',
   });
   const interpreter = target.platform === 'win32' ? 'python.exe' : 'bin/python3';
   if (!extracted.some((entry) => entry.path === interpreter)) fail(`El archivo de Python no contiene ${interpreter}.`);
   if (target.platform === 'win32' && extracted.some((entry) => entry.type === 'symlink')) {
     fail('El Python de Windows contiene enlaces simbólicos, que el paquete zip no admite.');
   }
+  return extracted;
 }
 
 async function copyFile(source, destination, { crlf = false, mode } = {}) {
@@ -204,6 +213,21 @@ async function findPythonLicense(stage, target) {
   fail('No se encontró la licencia de CPython en el Python incluido.');
 }
 
+/** Comprueba los metadatos POSIX que el sistema de construcción no materializa. */
+async function verifyTarMetadata(file, entries) {
+  const remaining = new Map(entries.map((entry) => [`Mind/${entry.path}`, entry]));
+  for await (const entry of readArchive(file)) {
+    if (entry.type === 'directory') continue;
+    const expected = remaining.get(entry.name);
+    if (expected?.type !== entry.type || entry.mode !== normalizedMode(expected.type, expected.mode)
+        || (entry.type === 'symlink' && entry.linkname !== expected.target)) {
+      fail(`Metadatos inesperados en el paquete: ${entry.name}.`);
+    }
+    remaining.delete(entry.name);
+  }
+  if (remaining.size > 0) fail(`Faltan entradas en el paquete: ${[...remaining.keys()].slice(0, 5).join(', ')}.`);
+}
+
 async function buildTarget(id, { components, cache, output, mtime, version, keepStage }) {
   const target = TARGETS[id];
   process.stdout.write(`\n== ${id}\n`);
@@ -222,20 +246,29 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
     await copyRepositoryFile(relative, path.join(stage, 'Motor', ...relative.split('/')));
   }
 
-  await extractNode(nodeArchive, stage, target);
-  await extractPython(pythonArchive, stage, target);
+  const recordLinks = process.platform === 'win32' && target.platform !== 'win32';
+  const nodeEntries = await extractNode(nodeArchive, stage, target);
+  const pythonEntries = await extractPython(pythonArchive, stage, target, recordLinks);
+  const modes = new Map();
+  for (const entry of nodeEntries) modes.set(`Runtime/node/${entry.path}`, entry.mode);
+  for (const entry of pythonEntries) modes.set(`Runtime/python/${entry.path}`, entry.mode);
+  // Los enlaces POSIX se empaquetan sin crearlos en Windows.
+  const recordedLinks = recordLinks ? pythonEntries.filter((entry) => entry.type === 'symlink')
+    .map((entry) => ({ ...entry, path: `Runtime/python/${entry.path}` })) : [];
 
   // Documentación, instrucciones para agentes e iniciadores.
   for (const name of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'LEEME.md']) {
     await copyRepositoryFile(`packaging/plantilla/${name}`, path.join(stage, name));
   }
-    if (target.platform === 'win32') {
+  if (target.platform === 'win32') {
     await copyRepositoryFile('packaging/iniciadores/mind.cmd', path.join(stage, 'mind.cmd'), { crlf: true });
     await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.cmd', path.join(stage, 'Autorizar Mind.cmd'), { crlf: true });
   } else {
     await copyRepositoryFile('packaging/iniciadores/mind', path.join(stage, 'mind'), { mode: 0o755 });
+    modes.set('mind', 0o755);
     if (target.platform === 'darwin') {
       await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.command', path.join(stage, 'Autorizar Mind.command'), { mode: 0o755 });
+      modes.set('Autorizar Mind.command', 0o755);
     }
   }
   await fsp.writeFile(path.join(stage, '.mcp.json'), mcpConfig(target), { flag: 'wx' });
@@ -247,7 +280,7 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
   await fsp.writeFile(path.join(stage, 'LICENCIAS', 'AVISOS.md'), noticesText(components, id), { flag: 'wx' });
 
   // Manifiesto con la huella de cada archivo.
-  const tree = await scanTree(stage);
+  const tree = [...await scanTree(stage), ...recordedLinks].sort((a, b) => compareBytes(a.path, b.path));
   const other = tree.filter((entry) => entry.type === 'other');
   if (other.length > 0) fail(`Tipos de archivo no admitidos en el paquete: ${other.map((entry) => entry.path).join(', ')}`);
   const files = {};
@@ -271,18 +304,20 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
     links,
   });
   await fsp.writeFile(path.join(stage, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
-  const check = await verifyTree(stage, manifest);
+  const check = await verifyTree(stage, recordLinks ? { ...manifest, links: {} } : manifest);
   if (!check.ok) fail(`La carpeta construida no coincide con su manifiesto: ${describeProblems(check.problems)}`);
 
   // Archivo reproducible: carpeta raíz «Mind», fecha fija y permisos normalizados.
-  const entries = (await scanTree(stage)).map((entry) => (entry.type === 'symlink'
+  const entries = tree.map((entry) => (entry.type === 'symlink'
     ? { path: entry.path, type: 'symlink', target: entry.target }
-    : { path: entry.path, type: 'file', mode: entry.mode, source: { file: path.join(stage, ...entry.path.split('/')) } }));
+    : { path: entry.path, type: 'file', mode: modes.get(entry.path) ?? 0o644, source: { file: path.join(stage, ...entry.path.split('/')) } }));
+  entries.push({ path: MANIFEST_NAME, type: 'file', source: { file: path.join(stage, MANIFEST_NAME) } });
   const name = `Mind-${version}-${id}.${target.format}`;
   const destination = path.join(output, name);
   await fsp.rm(destination, { force: true });
   const write = target.format === 'zip' ? writeZip : writeTarGz;
   const written = await write(destination, entries, { root: 'Mind', mtime });
+  if (recordLinks) await verifyTarMetadata(destination, entries);
   const sha256 = await hashFile(destination);
   const size = (await fsp.stat(destination)).size;
   process.stdout.write(`  ${name}: ${written.entries} entradas, ${(size / 1048576).toFixed(1)} MiB, sha256 ${sha256}\n`);

@@ -1,45 +1,52 @@
-name: Paquete Windows
-on: [push, workflow_dispatch]
+name: Paquetes de las cinco plataformas
+# La ejecución privada consume cuota. Para validar gratuitamente archivos
+# preparados localmente se usan los ejecutores públicos de mind-updates.
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  windows:
-    runs-on: windows-latest
+  paquete:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, target: win32-x64, extension: zip }
+          - { os: macos-15, target: darwin-arm64, extension: tar.gz }
+          - { os: macos-15-intel, target: darwin-x64, extension: tar.gz }
+          - { os: ubuntu-24.04, target: linux-x64, extension: tar.gz }
+          - { os: ubuntu-24.04-arm, target: linux-arm64, extension: tar.gz }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      MIND_TARGET: ${{ matrix.target }}
+      MIND_EXTENSION: ${{ matrix.extension }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: npm test
-      - run: node scripts/construir-paquetes.mjs --salida dist
-      - name: Construir el segundo paquete para probar la actualización
+      - name: Construir dos versiones y probar el paquete nativo
         shell: pwsh
         run: |
-          $next = node --input-type=module -e "import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('package.json')).version.split('.').map(Number);v[2]++;process.stdout.write(v.join('.'));"
-          node scripts/construir-paquetes.mjs --version-paquete $next --salida dist-test-update
-      - name: Comprobar la reproducibilidad
-        shell: pwsh
-        run: |
-          node scripts/construir-paquetes.mjs --salida dist-2
-          if ((Get-Content dist/SHA256SUMS -Raw) -ne (Get-Content dist-2/SHA256SUMS -Raw)) { throw 'Paquetes distintos' }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Mind-Windows
-          path: dist/*
-          if-no-files-found: error
-      - name: Probar el paquete extraído
-        shell: pwsh
-        run: |
-          $folder = Join-Path $env:RUNNER_TEMP 'Mind Windows ñ'
-          Expand-Archive (Get-ChildItem dist/Mind-*.zip).FullName -DestinationPath $folder
-          $mind = Join-Path $folder Mind
-          $next = (Get-ChildItem dist-test-update/Mind-*.zip).FullName
-          & "$mind/Runtime/node/node.exe" scripts/producto-12-casos.mjs --mind $mind --actualizacion $next --informe informe-producto-windows.json
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $parts = $v.Split('.')
+          $next = "$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
+          node scripts/construir-paquetes.mjs --plataforma $env:MIND_TARGET --sumas-oficiales --salida dist/candidato
+          node scripts/construir-paquetes.mjs --plataforma $env:MIND_TARGET --version-paquete $next --salida dist/ensayo
+          $archive = "dist/candidato/Mind-$v-$env:MIND_TARGET.$env:MIND_EXTENSION"
+          $upgrade = "dist/ensayo/Mind-$next-$env:MIND_TARGET.$env:MIND_EXTENSION"
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $upgradeHash = (Get-FileHash $upgrade -Algorithm SHA256).Hash.ToLowerInvariant()
+          node scripts/probar-paquete.mjs $archive $upgrade $hash $upgradeHash dist/informes
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Informe-Windows
-          path: informe-producto-windows.json
+          name: informe-${{ matrix.target }}
+          path: dist/informes/*.json
+          if-no-files-found: warn

@@ -1,37 +1,53 @@
-# Workflow de Mind y primera versión Windows
+# Entrega de Mind para Windows, macOS y Linux
 
-Decisiones de Aldo: 2026-11-02, America/Lima.
+El desarrollo usa ramas y pull requests en `byaldodaniel/mind-motor` (privado).
+El producto validado y su canal firmado se publican en `byaldodaniel/mind-updates`.
+La edición estable 1.0.1 para Windows se conserva. El proceso nuevo prepara
+cinco paquetes de una sola versión, definidos en `packaging/publicacion.json`.
 
-- Repo 2, privado: `byaldodaniel/mind-motor`. Desarrollar por ramas y PR,
-  integrar y validar aquí. Trabajo local en `Mind - Desarrollo`.
-- Repo 1, público: `byaldodaniel/mind-updates`. Publicar exclusivamente el
-  producto listo para descargar, su canal firmado y notas de versión.
-- Primera entrega estable: **Mind 1.0.0 para Windows x64**. Linux y macOS
-  quedan para entregas posteriores y no bloquean esta publicación.
-- Actualizaciones: comprobar al iniciar, descargar el paquete estable firmado
-  de la plataforma y aplicar cuando no haya sesiones activas.
-- Acceso: la carpeta abierta por el cliente o iniciador tiene acceso completo
-  durante esa sesión, sin otra autorización de Mind. Borrar conserva confirmación.
+## Preparar
 
-## Cierre de una versión
+1. Usar una copia limpia en el commit que se quiere probar. Se necesita Git,
+   Node 24 y Python 3.12 en Windows o `xz` en Linux/macOS.
+2. Ejecutar `node scripts/preparar-paridad.mjs <carpeta-nueva> --reproducibilidad`.
+   Construye dos versiones, verifica las huellas de los componentes y comprueba
+   que cada conjunto de cinco paquetes contiene el mismo Motor. Produce
+   `candidatos/`, `ensayo/`, `pruebas-mind.zip` y `matriz.json`.
+3. Usar `matriz.json` para probar cada archivo exacto en su plataforma nativa.
+   Los archivos de `ensayo/` se usan para probar actualización. El archivo de
+   pruebas se obtiene del mismo commit y contiene solo el código de producto
+   y la batería de pruebas. La clave de producción permanece fuera de CI.
 
-1. Completar el alcance acordado en repo 2.
-2. Pasar las pruebas automáticas de Windows, incluidas las regresiones corregidas.
-3. Construir el paquete portable desde un commit limpio, verificarlo, extraerlo
-   y ejecutar las pruebas de producto con sus propios runtimes y datos ficticios.
-4. Comprobar la actualización y conservación de la Base, y la apertura sin
-   formulario del proyecto. Documentar las limitaciones comprobadas.
-5. Integrar la versión terminada en repo 2 y etiquetar el commit de publicación.
-6. Firmar el canal y subir el ZIP, `SHA256SUMS`, `stable.json` y notas al
-   borrador de la release de repo 1. Comprobar el contenido y publicar.
-7. Verificar las descargas públicas y su firma. Una versión publicada se conserva;
-   las correcciones se entregan con una versión posterior.
+## Validar
 
-`packaging/publicacion.json` define las plataformas exigidas en cada entrega.
-GitHub Actions está bloqueado por facturación; para esta entrega las pruebas y
-la construcción se ejecutan localmente en Windows. El workflow acordado no
-requiere Cloudflare ni cambiar el presupuesto para publicar esta versión.
+- La vía gratuita usa los cinco ejecutores estándar de `mind-updates`.
+  Conservar los candidatos y la batería de pruebas en un borrador separado
+  de la publicación estable. Los informes deben indicar versión, commit y
+  SHA-256 de los paquetes. El workflow privado manual sirve para desarrollo
+  cuando haya cuota disponible.
+- `scripts/probar-paquete.mjs` comprueba el paquete extraído con sus propios
+  ejecutores, la preservación de la Base al actualizar y el arranque posterior.
+  El canal de ensayo usa una clave Ed25519 efímera y transporte simulado.
+- Para la salida estable, comprobar el primer uso con un cliente compatible
+  y el recorrido desde navegador y Finder en ambos Mac, con Gatekeeper activo.
+  La cuarentena sintética cubre el arranque de Mind y se registra por separado.
+  Documentar el entorno Linux y el programador usado para probar las funciones
+  automáticas.
+- Si falta un paquete, su huella difiere o algún recorrido falla, conservar
+  la versión estable anterior. Los resultados de una candidata anterior no
+  acreditan los archivos de la nueva entrega.
 
-La primera descarga incluye ya el actualizador. Las copias anteriores deben
-recibir una vez este paquete, usando la actualización manual con Mind cerrado.
-La instalación personal de Aldo se actualiza en una operación separada.
+## Publicar tras la revisión
+
+1. Revisar los cinco informes y los resultados de primer uso. Etiquetar el
+   commit probado y firmar desde ese commit con
+   `node scripts/firmar-actualizacion.mjs <versión> <clave.pem> <candidatos> <stable.json>`.
+2. Preparar un borrador estable con los cinco paquetes de `candidatos/`,
+   `SHA256SUMS`, `stable.json` y notas. Tras la aprobación de Aldo, publicarlo
+   inicialmente sin marcarlo como la última versión.
+3. Comprobar las descargas públicas y sus huellas. Promover la entrega a
+   última estable y verificar el canal firmado público. Usar los enlaces
+   comprobados en los tres botones del sitio.
+4. Conservar las versiones publicadas. Si aparece un fallo, restaurar el
+   canal y los enlaces anteriores mientras se prepara un parche superior.
+   Las instalaciones que ya se actualizaron se corrigen con ese parche.
