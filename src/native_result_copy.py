@@ -12,6 +12,20 @@ _spec.loader.exec_module(writer)
 reader=writer.reader
 Refusal=reader.Refusal
 
+def fingerprint(source):
+    info=os.fstat(source.fileno())
+    times=(info.st_mtime_ns,info.st_ctime_ns)
+    if os.name=='nt':
+        import msvcrt
+        backend=writer.Windows()
+        basic=backend.Basic()
+        if not backend.kernel.GetFileInformationByHandleEx(msvcrt.get_osfhandle(source.fileno()),0,backend.c.byref(basic),backend.c.sizeof(basic)):
+            raise backend.c.WinError(backend.c.get_last_error())
+        # FileBasicInfo conserva ChangeTime y precisión de 100 ns; os.fstat
+        # puede reutilizar tiempos de apertura del descriptor en Windows.
+        times=(basic.written,basic.changed)
+    return (info.st_dev,info.st_ino,info.st_size,*times)
+
 def copy_result(request, confirm=None, before_finish=None):
     keys={'sourceRoot','sourcePath','targetRoot','targetPath','maxBytes'}
     if not isinstance(request,dict) or set(request)!=keys:
@@ -19,8 +33,9 @@ def copy_result(request, confirm=None, before_finish=None):
     maximum=request['maxBytes']
     if not isinstance(maximum,int) or isinstance(maximum,bool) or maximum<0 or maximum>4*1024**3:
         raise Refusal('FILE_TOO_LARGE')
-    with os.fdopen(reader.safe_open(request['sourceRoot'],request['sourcePath']),'rb',buffering=0) as source:
+    with os.fdopen(reader.safe_open(request['sourceRoot'],request['sourcePath'],share_writes=False),'rb',buffering=0) as source:
         before=os.fstat(source.fileno())
+        before_fingerprint=fingerprint(source)
         if before.st_size>maximum:
             raise Refusal('FILE_TOO_LARGE')
         digest=hashlib.sha256()
@@ -37,9 +52,7 @@ def copy_result(request, confirm=None, before_finish=None):
                 digest.update(chunk)
             if before_finish:
                 before_finish()
-            after=os.fstat(source.fileno())
-            fingerprint=lambda st:(st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns)
-            if total!=before.st_size or fingerprint(before)!=fingerprint(after):
+            if total!=before.st_size or before_fingerprint!=fingerprint(source):
                 raise Refusal('SOURCE_CHANGED')
             backend.flush(handle)
             return total

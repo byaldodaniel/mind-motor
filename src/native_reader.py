@@ -86,7 +86,8 @@ class Windows:
     FILE_OPEN_REPARSE_POINT abre el enlace mismo; se rechaza por atributos del
     handle antes de usarlo como raíz o leerlo. No depende de OBJ_DONT_REPARSE.
     """
-    def __init__(self):
+    def __init__(self, share_writes=True):
+        self.share_writes = share_writes
         import ctypes as c
         from ctypes import wintypes as w
         self.c = c
@@ -139,7 +140,7 @@ class Windows:
         # Solo lectura/metadatos; FILE_OPEN (1), sin crear ni truncar.
         access = 0x100080 | (0x20 if directory else 1)  # SYNCHRONIZE, READ_ATTRIBUTES, TRAVERSE/READ_DATA
         result = self.nt.NtCreateFile(c.byref(handle), access, c.byref(attrs), c.byref(status),
-                                      None, 0, 7, 1, 0x200020, None, 0)
+                                      None, 0, 7 if directory or self.share_writes else 5, 1, 0x200020, None, 0)
         if result < 0:
             raise c.WinError(self.nt.RtlNtStatusToDosError(result))
         return handle.value
@@ -175,13 +176,13 @@ class Windows:
         return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
 
 
-def safe_open(root, relative, after_directory=None):
+def safe_open(root, relative, after_directory=None, *, share_writes=True):
     """Devuelve un descriptor propio; el llamador debe cerrarlo.
 
     after_directory se usa únicamente como barrera determinista en pruebas.
     No se activa por argumentos, entorno ni protocolo de producción.
     """
-    backend = Windows() if os.name == 'nt' else Posix()
+    backend = Windows(share_writes=share_writes) if os.name == 'nt' else Posix()
     parts = [component(part) for part in relative.split('/')]
     with contextlib.ExitStack() as stack:
         parent, ancestors = backend.root(root)

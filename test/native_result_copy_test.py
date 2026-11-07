@@ -35,9 +35,34 @@ class CopyTests(unittest.TestCase):
             native.copy_result(self.request())
         self.assertEqual((self.source/'origen.bin').read_bytes(),data)
     def test_source_change_discards_unpublished_file(self):
-        (self.source/'origen.bin').write_bytes(b'original')
-        with self.assertRaisesRegex(native.Refusal,'SOURCE_CHANGED'):
-            native.copy_result(self.request(),before_finish=lambda:(self.source/'origen.bin').write_bytes(b'cambiado'))
+        # Windows impide la escritura mientras copia; POSIX detecta el cambio.
+        for iteration in range(20):
+            with self.subTest(iteration=iteration):
+                origin=self.source/'origen.bin'
+                origin.write_bytes(b'original')
+                if os.name=='nt':
+                    blocked=[]
+                    def mutate():
+                        try:
+                            origin.write_bytes(b'cambiado')
+                        except PermissionError:
+                            blocked.append(True)
+                    copied=native.copy_result(self.request('copia-%d.bin'%iteration),before_finish=mutate)
+                    self.assertEqual(blocked,[True])
+                    self.assertEqual(copied['sha256'],hashlib.sha256(b'original').hexdigest())
+                    self.assertEqual((self.target/('copia-%d.bin'%iteration)).read_bytes(),b'original')
+                    origin.write_bytes(b'liberado')
+                else:
+                    with self.assertRaisesRegex(native.Refusal,'SOURCE_CHANGED'):
+                        native.copy_result(self.request(),before_finish=lambda:origin.write_bytes(b'cambiado'))
+                    self.assertEqual(list(self.target.iterdir()),[])
+    @unittest.skipUnless(os.name=='nt','compartición de handles propia de Windows')
+    def test_existing_writer_refuses_copy_before_publication(self):
+        origin=self.source/'origen.bin'
+        origin.write_bytes(b'original')
+        with origin.open('r+b'):
+            with self.assertRaises(PermissionError):
+                native.copy_result(self.request())
         self.assertEqual(list(self.target.iterdir()),[])
     def test_link_source_and_parent_traversal_refused(self):
         (self.source/'origen.bin').write_bytes(b'data')
