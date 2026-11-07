@@ -27,3 +27,6 @@ La regresión completa se registra en el cierre. No se publicó una versión est
 ## Memoria y alcance
 
 La revisión del consumo semántico detecta copias de pesos al verificar con readFile y construir Response desde buffers, además del vocabulario y la memoria WASM. La siguiente optimización a evaluar es lectura/verificación por flujo y entrega de pesos por streaming, manteniendo pesos, vectores y clasificación. No se modificó ni se afirma reducción de memoria en este cierre: el usuario priorizó terminar el guardado conversacional. La medición anterior de aproximadamente 1,1 GiB de pico sigue vigente para la variante semántica medida.
+
+Cierre de validación: regresión completa ejecutada, 385 JavaScript (382 aprobadas, 2 omitidas, 1 fallo de temporización artificial de 100 ms en la prueba de recarga) y 51 Python (48 aprobadas, 3 omitidas). Se ajustó únicamente ese plazo de prueba a 2 segundos y se repitieron las 22 pruebas afectadas de conversaciones/destinos/preferencias/híbrida/runtime: todas aprobadas. El código de producción no cambió por ese ajuste.
+

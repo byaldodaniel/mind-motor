@@ -24,7 +24,7 @@ test('modelo real offline trasladado: búsqueda no espera la carga, recuperació
     const directory=path.join(root,'Programa trasladado','semantica');
     await copySemanticBundle(directory,{source,manifestSha256:config.bundleManifestSha256});
     const base=path.join(root,'Base');await fs.mkdir(base);
-    encoder=createSemanticEncoder({directory,idleMs:100});
+    encoder=createSemanticEncoder({directory,idleMs:2000});
     motor=await openMotor({baseDirectory:base,semanticEncoder:encoder});
     const item=await motor.saveConversation({title:'Cita ficticia',important:'La cita con el dentista será el jueves por la tarde.'});
     const initial=await motor.searchConversations({query:'¿Cuándo tengo la consulta odontológica?'});
@@ -33,7 +33,7 @@ test('modelo real offline trasladado: búsqueda no espera la carga, recuperació
     const found=await motor.searchConversations({query:'¿Cuándo tengo la consulta odontológica?'});
     assert.equal(found.semantic.status,'activa');
     assert.equal(found.results[0].id,item.id);
-    await new Promise(resolve=>setTimeout(resolve,180));
+    await new Promise(resolve=>setTimeout(resolve,2500));
     assert.equal(encoder.isReady(),false);
     const start=performance.now();
     const waking=await motor.searchConversations({query:'¿Cuándo tengo la consulta odontológica?'});
@@ -48,3 +48,4 @@ test('modelo real offline trasladado: búsqueda no espera la carga, recuperació
     try { await assert.rejects(broken.embed(['ensayo']),{code:'SEMANTIC_FAILED'}); }
     finally { await broken.close(); }
   });
+
