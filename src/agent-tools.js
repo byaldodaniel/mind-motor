@@ -23,6 +23,8 @@ import { TOOL_FACTORIES } from './tools/index.js';
 
 export const AGENT_INSTRUCTIONS = `Mind es un motor local que te permite trabajar con la información del usuario a su manera: encontrar, leer, crear, modificar y organizar archivos en las carpetas que el usuario autorice, y conservar continuidad entre sesiones y agentes.
 
+Al conservar lo importante de una conversación, usa conversacion_guardar (titulo, importante y referencias opcionales). Conserva el id de Mind al retomarla y actualiza con la revision leída. Para recordar, usa conversaciones_buscar y conversacion_leer: recupera solo lo pertinente. El usuario decide qué conservar y dónde están sus recursos; no impongas una carpeta ni afirmes haber copiado el historial nativo.
+
 Úsalo cuando aporte valor; si otra herramienta basta, puedes usarla, respetando siempre las autorizaciones del usuario (usar otra herramienta no amplía tus permisos).
 
 Flujo recomendado:

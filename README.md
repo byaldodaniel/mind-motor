@@ -219,6 +219,10 @@ movimiento ni eliminación. Detalles en
 [docs/FUNCION_03_MODIFICAR.md](docs/FUNCION_03_MODIFICAR.md) y
 [docs/INTERFACES.md](docs/INTERFACES.md).
 
+## Conversaciones como elementos
+
+Mind puede conservar una conversación con título, información importante y referencias a recursos en distintas ubicaciones. El agente usa `conversacion_guardar`, `conversaciones_buscar` y `conversacion_leer` para recordar sin cargar todo el historial. La búsqueda de contenido se indexa localmente y conserva los permisos de continuidad. Ver [Conversaciones](docs/CONVERSACIONES.md).
+
 ## Continuidad entre agentes — Función 05
 
 El Motor conserva en la Base información útil de un trabajo (instrucciones,

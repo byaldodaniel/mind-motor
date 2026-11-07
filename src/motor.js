@@ -5,6 +5,7 @@ import { MotorError } from './errors.js';
 import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
 import { createContinuity } from './continuity.js';
+import { createConversations } from './conversations.js';
 import { createContinuityAccess } from './continuity-access.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
@@ -154,6 +155,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
+  const conversations = createConversations({ baseDirectory: base, continuity });
   const indexer = createFolderIndexer({
     baseDirectory: base,
     pythonExecutable,
@@ -249,6 +251,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     listContinuityIds: continuity.listContinuityIds,
     exportContinuity: continuity.exportContinuity,
     importContinuity: continuity.importContinuity,
+    // Conversaciones: administración del mismo motor, con permisos en las herramientas.
+    ...conversations,
     grantContinuityAccess: continuityAccess.grantContinuityAccess,
     describeContinuityAccess: continuityAccess.describeContinuityAccess,
     revokeContinuityAccess: continuityAccess.revokeContinuityAccess,

@@ -35,6 +35,10 @@ El usuario descargó y extrajo el ZIP de Mind. **NUNCA le pidas al usuario que c
 3. **Registro automático en segundo plano (opcional y silencioso):**
    Si tu cliente necesita registrar MCP y puedes hacerlo desde el agente, ejecuta `mind.cmd preparar` en Windows o `./mind preparar` en macOS/Linux y usa la entrada `mind` del `.mcp.json` generado, resolviendo las rutas desde esta carpeta. Puedes seguir usando el iniciador por consola mientras tanto.
 
+## Conversaciones como elementos
+
+Conserva la información importante elegida por el usuario con `conversacion_guardar`: título, información importante y referencias opcionales a recursos. No exige carpeta única ni historial completo. Mantén el mismo ID de Mind; al actualizar, usa la revisión leída. Para recordar, busca con `conversaciones_buscar` y lee solo los elementos pertinentes con `conversacion_leer`. Los recursos y destinos siguen la elección y los permisos del usuario. Una referencia o un ID nativo declarado no concede acceso a archivos.
+
 ## Cómo trabajar con Mind
 
 1. Llama a `estado`: muestra las carpetas autorizadas, sus permisos, sus índices

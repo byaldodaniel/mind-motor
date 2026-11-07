@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MotorError } from './errors.js';
+import { withIndexLock } from './index-lock.js';
+import { requestSignal } from './request-context.js';
 import { readJson, writeJson, removeJson } from './storage.js';
 
 const ENTRY_FORMAT = 'mind-continuity-entry';
@@ -354,45 +356,54 @@ export function createContinuity(motor) {
      * @param {{ expectedRevision?: number }} [options]
      */
     async updateContinuity(id, changes, { expectedRevision } = {}) {
-      rejectUnknownFields(changes, ['content', 'kind', 'source', 'references']);
-      if (Object.keys(changes).length === 0) fail('INVALID_CONTINUITY_FIELD', 'Indica al menos un campo a actualizar.');
-      const entry = await loadExisting(id);
-      checkRevision(entry, expectedRevision);
-      const next = { ...entry };
-      if (Object.hasOwn(changes, 'content')) next.content = validateContent(changes.content);
-      if (Object.hasOwn(changes, 'kind')) next.kind = validateLabel(changes.kind, 'kind');
-      if (Object.hasOwn(changes, 'source')) next.source = validateLabel(changes.source, 'source');
-      if (Object.hasOwn(changes, 'references')) {
-        next.references = validateReferences(changes.references);
-        await requireEntryReferences(next.references, id);
-      }
-      next.revision = entry.revision + 1;
-      next.updatedAt = nextTimestamp(entry.updatedAt);
-      return save(next);
+      validateId(id);
+      return withIndexLock(base, id, async () => {
+        rejectUnknownFields(changes, ['content', 'kind', 'source', 'references']);
+        if (Object.keys(changes).length === 0) fail('INVALID_CONTINUITY_FIELD', 'Indica al menos un campo a actualizar.');
+        const entry = await loadExisting(id);
+        checkRevision(entry, expectedRevision);
+        const next = { ...entry };
+        if (Object.hasOwn(changes, 'content')) next.content = validateContent(changes.content);
+        if (Object.hasOwn(changes, 'kind')) next.kind = validateLabel(changes.kind, 'kind');
+        if (Object.hasOwn(changes, 'source')) next.source = validateLabel(changes.source, 'source');
+        if (Object.hasOwn(changes, 'references')) {
+          next.references = validateReferences(changes.references);
+          await requireEntryReferences(next.references, id);
+        }
+        next.revision = entry.revision + 1;
+        next.updatedAt = nextTimestamp(entry.updatedAt);
+        return save(next);
+      }, 'continuity-entry', { signal: requestSignal() });
     },
 
     /** Añade referencias sin duplicar las existentes. */
     async relateContinuity(id, references, { expectedRevision } = {}) {
-      const added = validateReferences(references);
-      if (added.length === 0) fail('INVALID_CONTINUITY_REFERENCE', 'Indica al menos una referencia.');
-      const entry = await loadExisting(id);
-      checkRevision(entry, expectedRevision);
-      await requireEntryReferences(added, id);
-      const merged = validateReferences([...entry.references, ...added]);
-      if (merged.length === entry.references.length) return entry;
-      return save({
-        ...entry, references: merged, revision: entry.revision + 1, updatedAt: nextTimestamp(entry.updatedAt),
-      });
+      validateId(id);
+      return withIndexLock(base, id, async () => {
+        const added = validateReferences(references);
+        if (added.length === 0) fail('INVALID_CONTINUITY_REFERENCE', 'Indica al menos una referencia.');
+        const entry = await loadExisting(id);
+        checkRevision(entry, expectedRevision);
+        await requireEntryReferences(added, id);
+        const merged = validateReferences([...entry.references, ...added]);
+        if (merged.length === entry.references.length) return entry;
+        return save({
+          ...entry, references: merged, revision: entry.revision + 1, updatedAt: nextTimestamp(entry.updatedAt),
+        });
+      }, 'continuity-entry', { signal: requestSignal() });
     },
 
     /** Retira el registro de la Base. Otras referencias a él quedan como no disponibles. */
     async retireContinuity(id, { expectedRevision } = {}) {
-      if (expectedRevision !== undefined) {
-        const entry = await load(id);
-        if (entry === null) return false;
-        checkRevision(entry, expectedRevision);
-      }
-      return removeJson(filename(id));
+      validateId(id);
+      return withIndexLock(base, id, async () => {
+        if (expectedRevision !== undefined) {
+          const entry = await load(id);
+          if (entry === null) return false;
+          checkRevision(entry, expectedRevision);
+        }
+        return removeJson(filename(id));
+      }, 'continuity-entry', { signal: requestSignal() });
     },
 
     /** Identificadores presentes en la Base, sin abrir su contenido. */
