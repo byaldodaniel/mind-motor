@@ -34,6 +34,8 @@ export function copyResultNative(request,{pythonExecutable,confirm}) {
 }
 export function createResultCopier({loadAuthorizedFolder,pythonExecutable=process.platform==='win32'?'python':'python3'}) {
   const grants=new WeakMap();
+  const verifications=new WeakMap();
+  const denyVerification=()=>new MotorError('RESULT_VERIFICATION_NOT_AUTHORIZED','No hay permiso vigente para esta comprobación.');
   const deny=()=>new MotorError('COPY_NOT_AUTHORIZED','No hay permiso vigente para esta copia.');
   async function scope(folderId,relativePath) {
     const folder=await loadAuthorizedFolder(folderId);
@@ -42,6 +44,27 @@ export function createResultCopier({loadAuthorizedFolder,pythonExecutable=proces
     return folder;
   }
   return {
+    async grantResultVerification({requester,folderId,relativePath}={}) {
+      if(!requester||typeof requester!=='object')throw denyVerification();
+      const relative=outputName(relativePath),folder=await scope(folderId,relative);
+      const authorization=Object.freeze(Object.create(null));
+      verifications.set(authorization,{requester,folderId,relative,generation:folder.generation,used:false});
+      return authorization;
+    },
+    async verifyResultFile({requester,authorization,confirm}={}) {
+      const grant=verifications.get(authorization);
+      if(!grant||grant.used||grant.requester!==requester)throw denyVerification();
+      grant.used=true;
+      const validate=async()=>{
+        const folder=await scope(grant.folderId,grant.relative);
+        if(folder.generation!==grant.generation)throw denyVerification();
+        return folder;
+      };
+      const folder=await validate();
+      const value=await copyResultNative({verifyOnly:true,sourceRoot:folder.path,sourcePath:grant.relative,maxBytes:4*1024**3},
+        {pythonExecutable,confirm:async()=>{await validate();await confirm?.();}});
+      return {...value,folderId:folder.id,relativePath:grant.relative};
+    },
     async grantResultCopy({requester,sourceFolderId,sourcePath,targetFolderId,targetPath}={}) {
       if(!requester||typeof requester!=='object')throw deny();
       const from=outputName(sourcePath),to=outputName(targetPath);

@@ -57,7 +57,7 @@ try {
   ]);
   const productReport = await readReport('producto.json');
   report.casos = productReport.casos.map(({ caso, nombre, tipo, resultado }) => ({ caso, nombre, tipo, resultado }));
-  const allRequired = productReport.casos.length === 24 && productReport.casos.every(
+  const allRequired = productReport.casos.length === 25 && productReport.casos.every(
     ({ caso, resultado }) => resultado === 'superado' || (caso === 4 && resultado === 'pendiente' && !claude),
   );
 

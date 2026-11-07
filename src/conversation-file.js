@@ -1,10 +1,17 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { MotorError } from './errors.js';
-import { textVersion } from './text-modifier.js';
 
 export function conversationMarkdown(value) {
   return `<!-- mind-conversation:${value.id} revision:${value.revision} -->\n# ${value.title.replace(/[\r\n]/g,' ')}\n\n${value.important}\n`;
+}
+// El marcador puede quedar en una revisión anterior por cambios solo de metadatos.
+export function matchesConversationMarkdown(text, value) {
+  if (typeof text !== 'string') return false;
+  const marker = /^<!-- mind-conversation:([a-f0-9-]{36}) revision:([1-9][0-9]*) -->\n/.exec(text);
+  if (!marker || marker[1] !== value.id || !Number.isSafeInteger(Number(marker[2]))
+      || Number(marker[2]) > value.revision) return false;
+  return text.slice(marker[0].length) === conversationMarkdown(value).replace(/^[^\n]*\n/, '');
 }
 // Las únicas escrituras pasan por las herramientas seguras y sus permisos.
 export async function prepareConversationFile({ motor, before, destination, directory, context }) {
@@ -35,7 +42,7 @@ export async function prepareConversationFile({ motor, before, destination, dire
   let previous;
   try { previous = await context.readFile(folder,relative); }
   catch(error) { if(error.code !== 'FILE_NOT_FOUND') throw error; }
-  if (previous && (!before || before.file !== target || previous.version !== textVersion(conversationMarkdown(before)))) {
+  if (previous && (!before || before.file !== target || !matchesConversationMarkdown(previous.content, before))) {
     throw new MotorError('CONVERSATION_FILE_CONFLICT','El archivo existe o fue editado fuera de Mind. Se conserva intacto: elige otro destino o revisa su contenido antes de actualizar.');
   }
   const components = relative.split('/').slice(0,-1);

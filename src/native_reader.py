@@ -112,6 +112,11 @@ class Windows:
                         ('volume', w.DWORD), ('size_high', w.DWORD), ('size_low', w.DWORD),
                         ('links', w.DWORD), ('index_high', w.DWORD), ('index_low', w.DWORD)]
 
+        class Standard(c.Structure):
+            _fields_ = [('allocated', c.c_longlong), ('eof', c.c_longlong),
+                        ('links', w.DWORD), ('delete_pending', c.c_ubyte), ('directory', c.c_ubyte)]
+
+        self.Standard = Standard
         self.Unicode, self.Attributes, self.Status, self.Info = Unicode, Attributes, Status, Info
         self.nt.NtCreateFile.argtypes = [c.POINTER(w.HANDLE), w.DWORD, c.POINTER(Attributes),
                                         c.POINTER(Status), w.LPVOID, w.ULONG, w.ULONG,
@@ -121,6 +126,13 @@ class Windows:
         self.nt.RtlNtStatusToDosError.restype = w.ULONG
         self.kernel.GetFileInformationByHandle.argtypes = [w.HANDLE, c.POINTER(Info)]
         self.kernel.GetFileInformationByHandle.restype = w.BOOL
+        self.kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, c.c_int, w.LPVOID, w.DWORD]
+        self.kernel.GetFileInformationByHandleEx.restype = w.BOOL
+        self.volume_information = getattr(self.kernel, 'GetVolumeInformationByHandleW', None)
+        if self.volume_information is not None:
+            self.volume_information.argtypes = [w.HANDLE, w.LPWSTR, w.DWORD, c.POINTER(w.DWORD),
+                                               c.POINTER(w.DWORD), c.POINTER(w.DWORD), w.LPWSTR, w.DWORD]
+            self.volume_information.restype = w.BOOL
         self.kernel.GetFileType.argtypes = [w.HANDLE]
         self.kernel.GetFileType.restype = w.DWORD
         self.kernel.CloseHandle.argtypes = [w.HANDLE]
@@ -158,13 +170,37 @@ class Windows:
     def child(self, parent, name, directory):
         return self._open(parent, component(name), directory)
 
+    def _fat32_no_hardlinks_flags(self, handle, volume):
+        if self.volume_information is None:
+            return None
+        c, w = self.c, self.w
+        serial, flags = w.DWORD(), w.DWORD()
+        filesystem = c.create_unicode_buffer(261)
+        if not self.volume_information(handle, None, 0, c.byref(serial), None,
+                                       c.byref(flags), filesystem, len(filesystem)):
+            return None
+        if serial.value != volume or filesystem.value != 'FAT32' or flags.value & 0x00400000:
+            return None
+        return flags.value
+
+    def _zero_links_supported(self, handle, volume):
+        # DriveFS expone FAT32 y comunica cero enlaces incluso en archivos nuevos.
+        # Sólo se admite con el mismo handle, volumen y capacidades confirmadas.
+        if self._fat32_no_hardlinks_flags(handle, volume) is None:
+            return False
+        standard = self.Standard()
+        if not self.kernel.GetFileInformationByHandleEx(handle, 1, self.c.byref(standard), self.c.sizeof(standard)):
+            return False
+        return standard.links == 0 and not standard.delete_pending and not standard.directory
+
     def check(self, handle, directory):
         info = self.Info()
         if not self.kernel.GetFileInformationByHandle(handle, self.c.byref(info)):
             raise self.c.WinError(self.c.get_last_error())
         if (self.kernel.GetFileType(handle) != 1 or info.attributes & 0x400
                 or bool(info.attributes & 0x10) != directory
-                or (not directory and info.links != 1)):
+                or (not directory and info.links != 1
+                    and not (info.links == 0 and self._zero_links_supported(handle, info.volume)))):
             raise Refusal('UNSAFE_PATH')
         return info.volume
 

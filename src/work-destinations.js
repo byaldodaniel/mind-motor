@@ -29,7 +29,7 @@ export function outputDirectory(value) {
       || value.includes('\0') || value.length > 4096) fail('El destino debe ser una carpeta absoluta.');
   return path.normalize(value);
 }
-function policy(value) {
+export function validateWorkDestinations(value) {
   if (!object(value) || Object.keys(value).some(key => !['carpeta','tipos'].includes(key))) fail('Política de destinos no válida.');
   const result = {};
   if (value.carpeta !== undefined) result.carpeta = outputDirectory(value.carpeta);
@@ -44,6 +44,7 @@ function scope({ project, conversation } = {}) {
   if (conversation !== undefined && (typeof conversation !== 'string' || !/^[a-f0-9-]{36}$/.test(conversation))) fail('ID de conversación no válido.');
   return conversation !== undefined ? ['conversaciones',conversation] : project !== undefined ? ['proyectos',projectKey(project)] : ['general'];
 }
+const policy = validateWorkDestinations;
 export function createWorkDestinations(baseDirectory) {
   const filename = path.join(baseDirectory,'work-destinations.json');
   async function read() {
@@ -96,5 +97,15 @@ export function createWorkDestinations(baseDirectory) {
     const policies=[value.general,...Object.values(value.proyectos),...Object.values(value.conversaciones)];
     return [...new Set(policies.flatMap(item=>[item.carpeta,...Object.values(item.tipos??{})]).filter(Boolean))];
   }
-  return {get,configure,directories};
+  async function relocate(map) {
+    return withIndexLock(baseDirectory,'all',async()=>{
+      const value=await read(),before=JSON.stringify(value);
+      for(const item of [value.general,...Object.values(value.proyectos),...Object.values(value.conversaciones)]) {
+        if(item.carpeta!==undefined)item.carpeta=map(item.carpeta);
+        if(item.tipos)for(const type of Object.keys(item.tipos))item.tipos[type]=map(item.tipos[type]);
+      }
+      if(JSON.stringify(value)!==before)await writeJson(filename,{format:'mind-work-destinations',version:1,...value,revision:value.revision+1});
+    },'work-destinations',{signal:requestSignal()});
+  }
+  return {get,configure,directories,relocate};
 }

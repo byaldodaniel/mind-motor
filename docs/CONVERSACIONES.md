@@ -121,3 +121,15 @@ La política e interfaz de herramientas son comunes a los agentes; cada cliente 
 ## Conversaciones nuevas sin repetir el prompt de Mind
 
 La instalación prepara instrucciones globales de los clientes detectados en su primer uso. El siguiente chat carga ese bloque y consulta Mind; sin MCP usa `inicio` desde la carpeta actual. Esta orden no necesita JSON y devuelve instrucciones y destinos. El agente mantiene la selección por proyecto/conversación y las preferencias de conservación. La preparación se puede revisar con `preparar`; los chats que ya estaban abiertos no necesariamente recargan sus instrucciones.
+
+## Traslado y continuación sin configurar
+
+Un usuario nuevo puede empezar con Conversaciones junto a Base y modo esencial, sin elegir destinos. El agente conserva el ID y registra los resultados creados.
+
+Por un encargo de traslado, `conversacion_trasladar {id,revision,destino}` reúne el Markdown, los resultados registrados y las referencias a archivos locales en una carpeta elegida. Usa copias físicas seguras con SHA-256, incluso entre discos; no reemplaza archivos y conserva los originales. Primero valida y copia; después publica las rutas y la preferencia por conversación. Las decisiones, ID y modo de memoria se conservan. Las colisiones de nombres entre dos recursos se resuelven con un prefijo numérico; archivos ajenos ya presentes se rechazan. Un fallo de copia conserva el elemento original y comunica los archivos copiados; un fallo de publicación mantiene un diario técnico que se reintenta antes de acceder a la continuidad. Un estado pendiente no es éxito.
+
+`mover` y `renombrar` actualizan las rutas del Markdown, referencias locales, resultados y destinos dentro del árbol trasladado. No sustituyen texto libre de decisiones ni URLs. Las operaciones sobre archivos existentes no cambian las decisiones. El motor coordina los registros y recupera una publicación interrumpida antes de leer o escribir el estado de conversación. Cambiar solamente preferencias de destino sigue afectando a resultados nuevos. Los movimientos externos al motor no están detectados automáticamente.
+
+Los cambios de metadatos pueden dejar el marcador Markdown con una revisión anterior; se admite si el ID, título y cuerpo coinciden exactamente y la revisión no es futura. Cualquier edición externa de contenido sigue provocando conflicto. Después de trasladar, el agente vuelve a leer el ID y la revisión antes de actualizar.
+
+Este incremento mantiene la misma Base local entre agentes. La exportación genérica de continuidad no incluye archivos ni constituye un paquete de conversación para otro equipo.

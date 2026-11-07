@@ -97,5 +97,53 @@ class CopyTests(unittest.TestCase):
         self.assertEqual(list(self.target.iterdir()),[])
         child.stdout.close();child.stderr.close()
 
+    def verify_request(self):
+        return dict(verifyOnly=True,sourceRoot=str(self.source),sourcePath='origen.bin',maxBytes=4*1024**3)
+    def test_verify_binary_without_copy(self):
+        data=bytes(range(256))*12001
+        (self.source/'origen.bin').write_bytes(data)
+        confirmed=[]
+        value=native.verify_result(self.verify_request(),confirm=lambda:confirmed.append(True))
+        self.assertEqual(confirmed,[True])
+        self.assertEqual(value,dict(size=len(data),sha256=hashlib.sha256(data).hexdigest()))
+        self.assertEqual(list(self.target.iterdir()),[])
+        self.assertEqual((self.source/'origen.bin').read_bytes(),data)
+    def test_verify_rejects_links_and_limits(self):
+        origin=self.source/'origen.bin';origin.write_bytes(b'1234')
+        request=self.verify_request();request['maxBytes']=3
+        with self.assertRaisesRegex(native.Refusal,'FILE_TOO_LARGE'):
+            native.verify_result(request)
+        os.link(origin,self.source/'enlace.bin')
+        with self.assertRaisesRegex(native.Refusal,'UNSAFE_PATH'):
+            native.verify_result(self.verify_request())
+    def test_verify_detects_or_blocks_source_change(self):
+        origin=self.source/'origen.bin';origin.write_bytes(b'original')
+        if os.name=='nt':
+            blocked=[]
+            def mutate():
+                try:
+                    origin.write_bytes(b'cambiado')
+                except PermissionError:
+                    blocked.append(True)
+            value=native.verify_result(self.verify_request(),before_finish=mutate)
+            self.assertEqual(blocked,[True]);self.assertEqual(value['sha256'],hashlib.sha256(b'original').hexdigest())
+            origin.write_bytes(b'liberado')
+        else:
+            with self.assertRaisesRegex(native.Refusal,'SOURCE_CHANGED'):
+                native.verify_result(self.verify_request(),before_finish=lambda:origin.write_bytes(b'cambiado'))
+    def test_verify_does_not_read_before_confirmation(self):
+        (self.source/'origen.bin').write_bytes(b'test')
+        child=subprocess.Popen([sys.executable,'-I','-B',str(ROOT/'src'/'native_result_copy.py'),'--parent-pid',str(os.getpid())],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        try:
+            child.stdin.write((json.dumps(self.verify_request())+'\n').encode());child.stdin.flush()
+            self.assertEqual(child.stderr.readline().rstrip(b'\r\n'),b'READY')
+            child.stdin.write(b'N');child.stdin.close();child.wait(timeout=5)
+            self.assertNotEqual(child.returncode,0);self.assertEqual(child.stdout.read(),b'')
+        finally:
+            if child.poll() is None:child.kill()
+            child.wait(timeout=5)
+            if not child.stdin.closed:child.stdin.close()
+            child.stdout.close();child.stderr.close()
+
 if __name__=='__main__':
     unittest.main()

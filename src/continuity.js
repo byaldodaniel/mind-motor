@@ -300,13 +300,14 @@ export function createContinuity(motor) {
     return entry;
   }
 
-  async function requireEntryReferences(references, selfId) {
+  async function requireEntryReferences(references, selfId, existingReferences = []) {
+    const existing = new Set(existingReferences.map(ref=>ref.entry).filter(Boolean));
     for (const reference of references) {
       if (reference.entry === undefined) continue;
       if (reference.entry === selfId) {
         fail('INVALID_CONTINUITY_REFERENCE', 'Un registro no puede referirse a sí mismo.');
       }
-      if (await load(reference.entry) === null) {
+      if (!existing.has(reference.entry) && await load(reference.entry) === null) {
         fail('CONTINUITY_REFERENCE_NOT_FOUND', 'La referencia apunta a un registro de continuidad inexistente.');
       }
     }
@@ -355,7 +356,7 @@ export function createContinuity(motor) {
      * @param {{ content?: JsonValue, kind?: string | null, source?: string | null, references?: ContinuityReference[] }} changes
      * @param {{ expectedRevision?: number }} [options]
      */
-    async updateContinuity(id, changes, { expectedRevision } = {}) {
+    async updateContinuity(id, changes, { expectedRevision, preserveExistingReferences = false } = {}) {
       validateId(id);
       return withIndexLock(base, id, async () => {
         rejectUnknownFields(changes, ['content', 'kind', 'source', 'references']);
@@ -368,7 +369,7 @@ export function createContinuity(motor) {
         if (Object.hasOwn(changes, 'source')) next.source = validateLabel(changes.source, 'source');
         if (Object.hasOwn(changes, 'references')) {
           next.references = validateReferences(changes.references);
-          await requireEntryReferences(next.references, id);
+          await requireEntryReferences(next.references, id, preserveExistingReferences ? entry.references : []);
         }
         next.revision = entry.revision + 1;
         next.updatedAt = nextTimestamp(entry.updatedAt);

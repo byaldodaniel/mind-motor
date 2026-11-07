@@ -115,6 +115,7 @@ export function createOrganizeTools({ session, connection }) {
         estado: 'movido', carpeta: folder.id, carpeta_destino: target.id, desde: from, hasta: to,
         ruta_absoluta: absolute(target.path, to), tipo: TYPE_OUT[moved.type] ?? moved.type,
         propiedades_trasladadas: moved.properties.moved ?? 0,
+        continuidad: moved.continuity,
       };
     },
 
@@ -131,6 +132,7 @@ export function createOrganizeTools({ session, connection }) {
       return {
         estado: 'renombrado', carpeta: folder.id, desde: from, hasta: to, ruta_absoluta: absolute(folder.path, to),
         tipo: TYPE_OUT[moved.type] ?? moved.type, propiedades_trasladadas: moved.properties.moved ?? 0,
+        continuidad: moved.continuity,
       };
     },
 

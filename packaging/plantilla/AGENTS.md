@@ -105,3 +105,7 @@ Esta política guía al agente. Mind no intercepta escrituras arbitrarias realiz
 ## Arranque fuera de esta carpeta
 
 El iniciador prepara reglas globales de los clientes detectados en el primer uso. En un chat nuevo, consulta `destinos_consultar` antes de trabajar; si no hay MCP, ejecuta el Node incluido con `Motor/bin/mind.js inicio` desde la carpeta actual, sin cambiar de proyecto. La respuesta contiene las instrucciones y destinos que debes aplicar. No pidas al usuario pegar este prompt en cada conversación. `preparar` permite revisar el resultado por cliente; el programa conserva las reglas existentes.
+
+## Trasladar y continuar
+
+Si el usuario pide trasladar una conversación con recursos dispersos o a otro disco, usa conversacion_trasladar con su id, revision leída y carpeta destino. Reúne memoria y archivos, comprueba las copias y conserva los originales como recuperación; informa ese hecho. Para mover o renombrar una carpeta ya organizada usa mover/renombrar: Mind actualiza las rutas vinculadas y los destinos. Tras el traslado vuelve a leer el elemento y usa la nueva revisión; no copies solo el .md ni crees otro elemento. Un estado pendiente no es un traslado confirmado. Los movimientos hechos fuera de Mind no actualizan automáticamente sus referencias.

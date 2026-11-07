@@ -190,5 +190,52 @@ class ReaderTest(unittest.TestCase):
             os.close(fd)
 
 
+
+@unittest.skipUnless(os.name == 'nt', 'comprobaciones de handle propias de Windows')
+class ZeroLinksWindowsTest(unittest.TestCase):
+    def backend(self, *, filesystem='FAT32', flags=0x106, volume=42, serial=42,
+                links=0, standard_links=0, deleted=0, reparse=False,
+                volume_ok=True, standard_ok=True, directory=False):
+        backend=native.Windows()
+        kernel=mock.Mock()
+        def info(handle, pointer):
+            pointer._obj.attributes=0x80 | (0x400 if reparse else 0)
+            pointer._obj.links=links;pointer._obj.volume=volume
+            return True
+        def standard(handle, kind, pointer, size):
+            pointer._obj.links=standard_links;pointer._obj.delete_pending=deleted
+            pointer._obj.directory=directory
+            return standard_ok
+        def volume_info(handle,name,name_size,serial_pointer,maximum,flags_pointer,fsname,fs_size):
+            serial_pointer._obj.value=serial;flags_pointer._obj.value=flags;fsname.value=filesystem
+            return volume_ok
+        kernel.GetFileInformationByHandle.side_effect=info
+        kernel.GetFileInformationByHandleEx.side_effect=standard
+        kernel.GetFileType.return_value=1
+        backend.kernel=kernel;backend.volume_information=mock.Mock(side_effect=volume_info)
+        return backend
+
+    def test_exact_supported_zero_link_volume_is_accepted(self):
+        self.assertEqual(self.backend().check(123,False),42)
+
+    def test_ntfs_unknown_hardlinks_and_wrong_volume_are_refused(self):
+        for config in [dict(filesystem='NTFS'),dict(filesystem='UNKNOWN'),dict(filesystem='exFAT'),
+                       dict(flags=0x00400106),dict(serial=99),dict(volume_ok=False)]:
+            with self.subTest(config=config),self.assertRaisesRegex(native.Refusal,'UNSAFE_PATH'):
+                self.backend(**config).check(123,False)
+
+    def test_multiple_links_reparse_and_deleted_objects_remain_refused(self):
+        for config in [dict(links=2),dict(links=3),dict(reparse=True),dict(deleted=1),
+                       dict(standard_links=1),dict(standard_ok=False),dict(directory=True)]:
+            with self.subTest(config=config),self.assertRaisesRegex(native.Refusal,'UNSAFE_PATH'):
+                self.backend(**config).check(123,False)
+
+    def test_missing_volume_api_is_refused_but_single_link_does_not_need_it(self):
+        backend=self.backend();backend.volume_information=None
+        with self.assertRaisesRegex(native.Refusal,'UNSAFE_PATH'):
+            backend.check(123,False)
+        backend=self.backend(links=1);backend.volume_information=None
+        self.assertEqual(backend.check(123,False),42)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

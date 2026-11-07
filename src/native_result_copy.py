@@ -60,6 +60,37 @@ def copy_result(request, confirm=None, before_finish=None):
         result['sha256']=digest.hexdigest()
         return result
 
+
+def verify_result(request, confirm=None, before_finish=None):
+    """Huella de un archivo existente por el mismo descriptor seguro de copia."""
+    keys={'verifyOnly','sourceRoot','sourcePath','maxBytes'}
+    if not isinstance(request,dict) or set(request)!=keys or request['verifyOnly'] is not True:
+        raise Refusal('COPY_FAILED')
+    maximum=request['maxBytes']
+    if not isinstance(maximum,int) or isinstance(maximum,bool) or maximum<0 or maximum>4*1024**3:
+        raise Refusal('FILE_TOO_LARGE')
+    with os.fdopen(reader.safe_open(request['sourceRoot'],request['sourcePath'],share_writes=False),'rb',buffering=0) as source:
+        before=fingerprint(source)
+        if before[2]>maximum:
+            raise Refusal('FILE_TOO_LARGE')
+        if confirm:
+            confirm()
+        digest=hashlib.sha256()
+        total=0
+        while True:
+            chunk=source.read(1024*1024)
+            if not chunk:
+                break
+            total+=len(chunk)
+            if total>maximum:
+                raise Refusal('FILE_TOO_LARGE')
+            digest.update(chunk)
+        if before_finish:
+            before_finish()
+        if total!=before[2] or before!=fingerprint(source):
+            raise Refusal('SOURCE_CHANGED')
+        return {'size':total,'sha256':digest.hexdigest()}
+
 def run():
     try:
         guard=reader.guard_parent()
@@ -70,7 +101,8 @@ def run():
             if sys.stdin.buffer.read(1)!=b'W':
                 raise Refusal('COPY_FAILED')
             guard.begin_commit(120)
-        sys.stdout.write(json.dumps(copy_result(request,confirm=confirm)))
+        operation=verify_result if request.get('verifyOnly') is True else copy_result
+        sys.stdout.write(json.dumps(operation(request,confirm=confirm)))
         return 0
     except Exception as error:
         sys.stderr.write(writer.error_code(error)+'\n')

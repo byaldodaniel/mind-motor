@@ -28,5 +28,22 @@ export function createResultRegistry(baseDirectory) {
       return entry;
     },'conversation-results',{signal:requestSignal()});
   }
-  return {read,remember};
+  async function replace(id,{expectedRevision,results}) {
+    validId(id);
+    if (!Array.isArray(results)) throw new MotorError('INVALID_RESULT','Resultados no válidos.');
+    const normalized=results.map(value=>{
+      const location=outputDirectory(value.path);
+      if(!OUTPUT_TYPES.includes(value.type)||!Number.isSafeInteger(value.bytes)||value.bytes<0
+        || value.sha256!==undefined&&!/^[a-f0-9]{64}$/.test(value.sha256)) throw new MotorError('INVALID_RESULT','Resultado no válido.');
+      return {...value,path:location};
+    });
+    if(normalized.length>1000||Buffer.byteLength(JSON.stringify(normalized))>256*1024)throw new MotorError('RESULTS_TOO_LARGE','Demasiados resultados en esta conversación.');
+    return withIndexLock(baseDirectory,id,async()=>{
+      const previous=await read(id);
+      if(previous.revision!==expectedRevision)throw new MotorError('RESULTS_REVISION_CONFLICT','Los resultados cambiaron; vuelve a consultarlos.');
+      await writeJson(file(id),{format:'mind-conversation-results',version:1,revision:previous.revision+1,results:normalized});
+      return {revision:previous.revision+1,results:normalized};
+    },'conversation-results',{signal:requestSignal()});
+  }
+  return {read,remember,replace};
 }

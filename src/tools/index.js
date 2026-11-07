@@ -10,6 +10,7 @@
  *
  * Para añadir un área: importar su fábrica y agregarla a la lista.
  */
+import { createConversationTransferTools } from './conversation-transfer.js';
 import { createDestinationTools } from './destinos.js';
 import { createConversationTools } from './conversaciones.js';
 import { createOrganizeTools } from './organizar.js';
@@ -20,6 +21,7 @@ import { createFunctionTools } from './funciones.js';
 
 export const TOOL_FACTORIES = Object.freeze([
   createDestinationTools,
+  createConversationTransferTools,
   createConversationTools, // Conversaciones como elementos e índice de información importante.
   createOrganizeTools, // Función 03: organizar y papelera.
   createPropertyTools, // Función 02: propiedades.

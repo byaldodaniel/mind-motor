@@ -50,5 +50,13 @@ export function createConversationPreferences(baseDirectory) {
       return next;
     });
   }
-  return { read, write, lock };
+  async function relocate(map) {
+    return lock(async()=>{
+      const previous=await read(),directory=previous.preferences.directory;
+      if(directory===undefined || map(directory)===directory)return;
+      await writeJson(filename,{format:'mind-conversation-preferences',version:1,revision:previous.revision+1,
+        preferences:{...previous.preferences,directory:map(directory)}});
+    });
+  }
+  return { read, write, lock, relocate };
 }

@@ -60,3 +60,5 @@ La Base contiene rutas, metadatos y continuidad: consérvala como información p
 Los respaldos cifrados no tienen una auditoría criptográfica externa.
 
 Ayuda: `mind ayuda`. Licencia: `LICENCIA.txt`. Componentes: `LICENCIAS/`.
+
+Puedes pedirle al agente trasladar una conversación con sus decisiones y archivos a un proyecto. Mind conserva su identidad y prepara los destinos para continuar. Cuando reúne archivos mediante copias, mantiene los originales como recuperación y el agente indica dónde quedó el trabajo vigente. Mover o renombrar una carpeta mediante Mind también actualiza sus referencias.

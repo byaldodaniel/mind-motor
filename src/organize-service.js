@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { MotorError } from './errors.js';
 import { untrustedText } from './consent.js';
 
@@ -73,7 +74,9 @@ export async function moveEntry(session, { requester, folder, from, to, target =
   const taken = await session.motor.takeProperties(folder.id, from).catch(() => []);
   let moved;
   try {
-    moved = await session.motor.moveEntry({ requester, authorization });
+    moved = await session.motor.moveWithConversationRelocation({
+      from:path.join(folder.path,...from.split('/')),to:path.join(target.path,...to.split('/'))
+    },()=>session.motor.moveEntry({ requester, authorization }));
   } catch (error) {
     if (taken.length > 0) await session.motor.putProperties(folder.id, from, taken).catch(() => {});
     throw error;

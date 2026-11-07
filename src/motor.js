@@ -9,6 +9,7 @@ import { createWorkDestinations } from './work-destinations.js';
 import { createResultRegistry } from './result-registry.js';
 import { createResultCopier } from './result-copier.js';
 import { createConversations } from './conversations.js';
+import { createConversationRelocation } from './conversation-relocation.js';
 import { createContinuityAccess } from './continuity-access.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
@@ -182,6 +183,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   const organizer = createOrganizer({ loadAuthorizedFolder, pythonExecutable, trash });
   const workDestinations = createWorkDestinations(base);
   const resultRegistry = createResultRegistry(base);
+  const relocation=createConversationRelocation({baseDirectory:base,continuity,conversations,results:resultRegistry,destinations:workDestinations});
+  const coordinated=operation=>(...args)=>relocation.withState(()=>operation(...args));
   const resultCopier = createResultCopier({loadAuthorizedFolder,pythonExecutable});
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
@@ -249,22 +252,30 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     getTrashEntry: trash.get,
     // Continuidad: administración del anfitrión. El agente recibe solo la vista
     // { readContext, recordResult } de bindContinuityAgent, nunca estas operaciones.
-    recordContinuity: continuity.recordContinuity,
-    getContinuity: continuity.getContinuity,
-    updateContinuity: continuity.updateContinuity,
-    relateContinuity: continuity.relateContinuity,
-    retireContinuity: continuity.retireContinuity,
-    listContinuityIds: continuity.listContinuityIds,
-    exportContinuity: continuity.exportContinuity,
-    importContinuity: continuity.importContinuity,
+    recordContinuity: coordinated(continuity.recordContinuity),
+    getContinuity: coordinated(continuity.getContinuity),
+    updateContinuity: coordinated(continuity.updateContinuity),
+    relateContinuity: coordinated(continuity.relateContinuity),
+    retireContinuity: coordinated(continuity.retireContinuity),
+    listContinuityIds: coordinated(continuity.listContinuityIds),
+    exportContinuity: coordinated(continuity.exportContinuity),
+    importContinuity: coordinated(continuity.importContinuity),
     // Conversaciones: administración del mismo motor, con permisos en las herramientas.
     ...conversations,
-    getWorkDestinations: workDestinations.get,
-    configureWorkDestinations: workDestinations.configure,
-    workDestinationDirectories: workDestinations.directories,
-    readConversationResults: resultRegistry.read,
-    rememberConversationResult: resultRegistry.remember,
+    ...Object.fromEntries(['getConversation','saveConversation','searchConversations','getConversationPreferences','configureConversationPreferences']
+      .map(name=>[name,coordinated(conversations[name])])),
+    getWorkDestinations: coordinated(workDestinations.get),
+    configureWorkDestinations: coordinated(workDestinations.configure),
+    workDestinationDirectories: coordinated(workDestinations.directories),
+    readConversationResults: coordinated(resultRegistry.read),
+    rememberConversationResult: coordinated(resultRegistry.remember),
+    replaceConversationResults: coordinated(resultRegistry.replace),
+    moveWithConversationRelocation: relocation.move,
+    relocateConversationMetadata: relocation.metadata,
+    resumeConversationRelocation: relocation.recover,
     grantResultCopy: resultCopier.grantResultCopy,
+    grantResultVerification: resultCopier.grantResultVerification,
+    verifyResultFile: resultCopier.verifyResultFile,
     async copyResultFile(request) {
       const copied=await resultCopier.copyResultFile(request);
       const iso=value=>Number.isSafeInteger(value)?new Date(value).toISOString():null;

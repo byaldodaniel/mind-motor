@@ -306,5 +306,6 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
   return Object.freeze({ getConversation, saveConversation, searchConversations,
     getConversationPreferences, configureConversationPreferences,
     prepareConversationSearch,
+    relocateConversationPreferenceDirectories: preferences.relocate,
     async closeConversationSearch() { closing = true; await semanticEncoder.close(); await preparing; await warming; } });
 }
