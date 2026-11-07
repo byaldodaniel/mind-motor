@@ -1,3 +1,4 @@
+import { ensureUserDataDirectory } from './user-data-directory.js';
 import { lockInstallation } from './installation-lock.js';
 import fs from 'node:fs/promises';
 import { watch as fsWatch } from 'node:fs';
@@ -49,12 +50,14 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   motorFactory = openMotor }) {
   const releaseStartup = layout.product ? await lockInstallation(layout.root) : async () => {};
   try {
+  await ensureUserDataDirectory(layout);
   const base = await ensureBase(layout.baseDirectory, { motorVersion, protectedFrom: layout.motorDirectory });
   const lifecycle = new AbortController();
   const motor = await motorFactory({
     baseDirectory: base.baseDirectory,
     pythonExecutable: layout.pythonExecutable,
     protectedDirectories: layout.protectedDirectories,
+    userDataDirectory: layout.userDataDirectory,
     functionExecutors,
     signal: lifecycle.signal,
   });

@@ -71,10 +71,14 @@ class Posix(reader.Posix):
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
         return os.open(component(name), flags, 0o666, dir_fd=parent)
 
-    def write(self, handle, data):
+    def write(self, handle, data, flush=True):
         view = memoryview(data)
         while view:
             view = view[os.write(handle, view):]
+        if flush:
+            self.flush(handle)
+
+    def flush(self, handle):
         os.fsync(handle)
 
     def _same(self, handle, parent, name):
@@ -189,7 +193,7 @@ class Windows(reader.Windows):
                                           None, 0x80, 0, 2, 0x200060, None, 0))
         return handle.value
 
-    def write(self, handle, data):
+    def write(self, handle, data, flush=True):
         c, w = self.c, self.w
         offset = 0
         while offset < len(data):
@@ -198,6 +202,10 @@ class Windows(reader.Windows):
             if not self.kernel.WriteFile(handle, chunk, len(chunk), c.byref(written), None) or written.value == 0:
                 raise c.WinError(c.get_last_error())
             offset += written.value
+        if flush:
+            self.flush(handle)
+
+    def flush(self, handle):
         if not self.kernel.FlushFileBuffers(handle):
             raise c.WinError(c.get_last_error())
 
@@ -269,7 +277,7 @@ def open_parent(backend, stack, root, parts, after_directory=None):
     return parent, volume
 
 
-def create_file(root, relative, data, confirm=None, after_directory=None, before_publish=None, backend=None):
+def create_file(root, relative, data, confirm=None, after_directory=None, before_publish=None, backend=None, write_data=None):
     """Crea relative con data; nunca sobrescribe ni deja resultados parciales en el destino.
 
     after_directory y before_publish son barreras deterministas solo para pruebas.
@@ -290,7 +298,10 @@ def create_file(root, relative, data, confirm=None, after_directory=None, before
         try:
             if backend.check(handle, False) != volume:
                 raise Refusal('UNSAFE_PATH')
-            backend.write(handle, data)
+            written_size = write_data(backend, handle) if write_data else None
+            if write_data is None:
+                backend.write(handle, data)
+                written_size = len(data)
             if before_publish:
                 before_publish(temporary)
             backend.publish(handle, parent, temporary, name)
@@ -304,7 +315,7 @@ def create_file(root, relative, data, confirm=None, after_directory=None, before
         try:
             return backend.metadata(handle)
         except (OSError, Refusal):
-            return {'size': len(data), 'modifiedMs': None, 'changedMs': None, 'createdMs': None}
+            return {'size': written_size, 'modifiedMs': None, 'changedMs': None, 'createdMs': None}
 
 
 def error_code(error):

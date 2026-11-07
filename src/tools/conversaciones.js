@@ -103,8 +103,13 @@ export function createConversationTools({ session }) {
         const before = args.id === undefined ? null : await motor.getConversation(args.id);
         const policy = await motor.getConversationPreferences(args.id);
         if ((policy.effective.mode === 'manual' || args.preferencias?.modo === 'manual') && args.solicitado !== true) throw new MotorError('CONVERSATION_MANUAL_ONLY','El usuario eligió guardar solo cuando lo indique.');
+        const destinations=await motor.getWorkDestinations({conversation:args.id,project:args.proyecto??before?.project??undefined});
         const file = await prepareConversationFile({motor,before,destination:args.destino,
-          directory:args.preferencias?.carpeta_destino ?? policy.effective.directory,context});
+          directory:args.preferencias?.carpeta_destino ?? policy.override?.directory
+          ?? destinations.conversacion?.tipos?.memoria ?? destinations.conversacion?.carpeta
+          ?? destinations.proyecto?.tipos?.memoria ?? destinations.proyecto?.carpeta
+          ?? policy.global.directory ?? destinations.general.tipos?.memoria ?? destinations.general.carpeta
+          ?? session.layout.userDataDirectory,context});
         input.file = file.target;
         const value = await motor.saveConversation(input);
         try { await file.write(value); }
@@ -146,7 +151,8 @@ export function createConversationTools({ session }) {
         await requireContinuity('leer');
         const value = await motor.getConversation(text(args.id, 'id', { max: 64 }));
         await requireContinuity('leer');
-        return { conversacion: output(value) };
+        const resources=await motor.readConversationResults(value.id);
+        return { conversacion: {...output(value),resultados:resources.results.map(item=>({archivo:item.path,tipo:item.type,bytes:item.bytes,...item.sha256?{sha256:item.sha256}:{}}))} };
       },
     },
   ];

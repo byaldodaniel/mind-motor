@@ -58,7 +58,7 @@ function clientName(clientInfo) {
  * personal completa y cualquier ubicación que contenga o esté dentro de Mind.
  * @returns {Promise<string>} Ruta física.
  */
-export async function validateCandidateFolder(folderPath, { protectedDirectories = [], baseDirectory, motorDirectory }) {
+export async function validateCandidateFolder(folderPath, { protectedDirectories = [], baseDirectory, motorDirectory, userDataDirectory }) {
   if (typeof folderPath !== 'string' || folderPath.includes('\0') || !path.isAbsolute(folderPath)) {
     throw new MotorError('INVALID_FOLDER_PATH', 'Indica la ruta absoluta de una carpeta existente.');
   }
@@ -77,7 +77,12 @@ export async function validateCandidateFolder(folderPath, { protectedDirectories
   if (path.relative(home, canonical) === '' || contains(canonical, home)) {
     throw new MotorError('FOLDER_TOO_BROAD', 'No se puede autorizar la carpeta personal completa ni una que la contenga. Elige una carpeta concreta.');
   }
-  for (const internal of [baseDirectory, motorDirectory, ...protectedDirectories].filter(Boolean)) {
+  for (const internal of [baseDirectory,motorDirectory].filter(Boolean)) {
+    if(contains(internal,canonical)||contains(canonical,internal))throw new MotorError('FOLDER_OVERLAPS_INTERNAL','Motor y Base permanecen protegidos.');
+  }
+  const userData=userDataDirectory ? await fs.realpath(userDataDirectory).catch(()=>null) : null;
+  for (const internal of protectedDirectories.filter(Boolean)) {
+    if(userData && contains(internal,userData) && contains(userData,canonical))continue;
     if (contains(internal, canonical) || contains(canonical, internal)) {
       throw new MotorError('FOLDER_OVERLAPS_INTERNAL', 'La carpeta no puede contener ni estar dentro de la carpeta de Mind.');
     }

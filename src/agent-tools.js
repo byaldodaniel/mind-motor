@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { resolveWorkOutput, rememberOutput } from './work-routing.js';
 import { processDiagnostics } from './process-supervisor.js';
 import { withRequestContext } from './request-context.js';
 import { MotorError } from './errors.js';
@@ -23,7 +24,7 @@ import { TOOL_FACTORIES } from './tools/index.js';
 
 export const AGENT_INSTRUCTIONS = `Mind es un motor local que te permite trabajar con la información del usuario a su manera: encontrar, leer, crear, modificar y organizar archivos en las carpetas que el usuario autorice, y conservar continuidad entre sesiones y agentes.
 
-Antes de conservar una conversación, consulta conversacion_preferencias (general o con id). Predeterminado esencial: decisiones y motivos, correcciones, resultados y ubicaciones, pendientes y siguiente paso; actualiza ante cambios relevantes o al completar etapas. Detallado amplía el contexto; manual prohíbe guardar salvo petición expresa (solicitado:true); personalizado sigue las reglas del usuario. Cambia preferencias con conversacion_configurar únicamente por indicación del usuario. Las excepciones por conversación prevalecen sobre la general. No inventes datos ni guardes secretos innecesarios. Mind no genera el resumen por sí mismo: lo redactas con lo que puedes leer. Cada guardado de conversación escribe además un Markdown en destino elegido por el usuario. Sin destino se conserva el archivo previo; para una conversación nueva se usa carpeta_destino de preferencias o Conversaciones dentro de la única carpeta abierta con lectura y escritura. No impongas una carpeta única para sus otros recursos. Al conservar lo importante de una conversación, usa conversacion_guardar (titulo, importante y referencias opcionales). Conserva el id de Mind al retomarla y actualiza con la revision leída. Para recordar, usa conversaciones_buscar (híbrida predeterminada, palabras y significado, consulta semantica.estado: preparando/cargando significa resultados parciales mientras se prepara en segundo plano; activa significa que el índice está preparado) y conversacion_leer: recupera solo lo pertinente. El usuario decide qué conservar y dónde están sus recursos; no impongas una carpeta ni afirmes haber copiado el historial nativo.
+Antes de conservar una conversación, consulta conversacion_preferencias (general o con id). Predeterminado esencial: decisiones y motivos, correcciones, resultados y ubicaciones, pendientes y siguiente paso; actualiza ante cambios relevantes o al completar etapas. Detallado amplía el contexto; manual prohíbe guardar salvo petición expresa (solicitado:true); personalizado sigue las reglas del usuario. Cambia preferencias con conversacion_configurar únicamente por indicación del usuario. Las excepciones por conversación prevalecen sobre la general. No inventes datos ni guardes secretos innecesarios. Mind no genera el resumen por sí mismo: lo redactas con lo que puedes leer. Cada guardado de conversación escribe además un Markdown en destino elegido por el usuario. Sin destino se conserva el archivo previo; para una conversación nueva se aplican las preferencias de memoria y los destinos efectivos; sin elección se usa Conversaciones junto a Base en la carpeta de Mind. En desarrollo sin instalación se usa la única carpeta abierta con lectura y escritura. No impongas una carpeta única para sus otros recursos. Al iniciar o retomar una conversación llama destinos_consultar, conserva su ID de Mind cuando exista y aplica las carpetas efectivas ANTES de cualquier creación de documentos, imágenes, código o resultados. Si el usuario elige otra ubicación para un proyecto, usa destinos_configurar con ese proyecto; no cambies los demás. Para crear con herramientas externas usa destino_resolver (preparar:true) y entrega el archivo físico allí; si la herramienta impone un temporal, usa resultado_importar, que copia sin enlazar y conserva el origen. Usa resultado_registrar para archivos ya creados directamente en su destino. Pasa proyecto/conversacion al crear o resolver y lee resultados al retomar. Si creaste resultados antes de guardar la primera memoria, regístralos con resultado_registrar cuando obtengas su ID. No anunciar un destino deseado como guardado hasta comprobar el archivo. Al conservar lo importante de una conversación, usa conversacion_guardar (titulo, importante y referencias opcionales). Conserva el id de Mind al retomarla y actualiza con la revision leída. Para recordar, usa conversaciones_buscar (híbrida predeterminada, palabras y significado, consulta semantica.estado: preparando/cargando significa resultados parciales mientras se prepara en segundo plano; activa significa que el índice está preparado) y conversacion_leer: recupera solo lo pertinente. El usuario decide qué conservar y dónde están sus recursos; no impongas una carpeta ni afirmes haber copiado el historial nativo.
 
 Úsalo cuando aporte valor; si otra herramienta basta, puedes usarla, respetando siempre las autorizaciones del usuario (usar otra herramienta no amplía tus permisos).
 
@@ -136,7 +137,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
     name: 'crear',
     title: 'Crear un archivo de texto',
     description: 'Crea un archivo de texto nuevo (UTF-8, hasta 1 MiB) en una carpeta autorizada. Nunca sobrescribe: si existe, falla con FILE_EXISTS. Las carpetas padre deben existir. Requiere "escribir".',
-    inputSchema: schema({ carpeta: FOLDER_REF, ruta: RELATIVE_PATH, contenido: { type: 'string' } }, ['ruta', 'contenido']),
+    inputSchema: schema({ carpeta: FOLDER_REF, ruta: RELATIVE_PATH, contenido: { type: 'string' }, destino:{type:'string'}, tipo:{type:'string'}, proyecto:{type:'string'}, conversacion:{type:'string'} }, ['ruta', 'contenido']),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
@@ -651,17 +652,25 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       };
     },
 
-    async crear(args) {
-      only(args, ['carpeta', 'ruta', 'contenido']);
-      const folder = await resolveFolder(args.carpeta);
+    async crear(args, host) {
+      only(args, ['carpeta','ruta','contenido','destino','tipo','proyecto','conversacion']);
+      let selected;
+      const destinations = host.internalFile ? null : await motor.getWorkDestinations({project:args.proyecto,conversation:args.conversacion});
+      if(!host.internalFile && (host.defaultDirectory || args.destino || args.proyecto || args.conversacion || Object.keys(destinations.efectivos).length)) {
+        if(args.conversacion)await requireContinuity('leer','registrar');
+        selected=await resolveWorkOutput({motor,context:host,name:args.ruta,type:args.tipo,destination:args.destino,
+          folderReference:args.carpeta,project:args.proyecto,conversation:args.conversacion,prepare:true});
+      }
+      const folder = selected?.folder ?? await resolveFolder(args.carpeta);
       await requireAccess(folder, 'escribir');
-      const relativePath = text(args.ruta, 'ruta');
+      const relativePath = selected?.path ?? text(args.ruta, 'ruta');
       if (typeof args.contenido !== 'string') throw invalid('contenido debe ser texto.');
       const authorization = await motor.grantTextCreate({ requester, folderId: folder.id, relativePath });
       const created = await motor.createTextFile({ requester, authorization, content: args.contenido });
       await session.audit('archivo-creado', { carpeta: folder.id, ruta: relativePath, bytes: created.size, cliente: source });
+      const registration=selected ? await rememberOutput(motor,args.conversacion,{path:selected.absolute,type:selected.type,bytes:created.size}) : {estado:'sin_conversacion'};
       return {
-        estado: 'creado', carpeta: folder.id, ruta: relativePath, ruta_absoluta: absolute(folder.path, relativePath),
+        registro:registration, estado: 'creado', carpeta: folder.id, ruta: relativePath, ruta_absoluta: absolute(folder.path, relativePath),
         bytes: created.size, version: textVersion(args.contenido), indice: created.index.status,
       };
     },
@@ -830,10 +839,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       return withRequestContext(context, async () => {
         try {
           context?.signal?.throwIfAborted();
-          const host = { ...context, requester, consent, resolveFolder, requireAccess, requireContinuity, source, readFile };
+          const host = { ...context, requester, consent, resolveFolder, requireAccess, requireContinuity, source, readFile, defaultDirectory:session.layout.userDataDirectory };
           host.fileTool = (name, input) => {
             if (!['crear','modificar','crear_carpeta'].includes(name)) throw new MotorError('UNKNOWN_TOOL','Operación de archivo no válida.');
-            return handlers[name](input,host);
+            return handlers[name](input,{...host,internalFile:true});
           };
           return await handler(args, host);
         } catch (error) {

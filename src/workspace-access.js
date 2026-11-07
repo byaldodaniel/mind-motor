@@ -1,3 +1,4 @@
+import { contains } from './paths.js';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { validateCandidateFolder } from './consent.js';
@@ -9,13 +10,20 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
   let grants = new Map();
   const reduced = new Set();
   let ready = Promise.resolve();
+  const userDataDirectory = session.layout.userDataDirectory;
+  async function isDestination(folder) {
+    if(!folder)return false;
+    const directories=await session.motor.workDestinationDirectories();
+    return directories.some(directory=>contains(folder.path,directory));
+  }
   const policy = {
     ...session.policy,
     async get(id) {
       if (!active || reduced.has(id)) return session.policy.get(id);
       const generation = grants.get(id);
       const folder = await session.motor.getAuthorizedFolder(id);
-      if (!grants.has(id) || !folder || folder.generation !== generation) return null;
+      if(!grants.has(id))return await isDestination(folder) ? session.policy.get(id) : null;
+      if(!folder || folder.generation !== generation)return null;
       return { folderId: id, access: Object.fromEntries(ACCESS_LEVELS.map(x => [x, true])), channel: 'carpeta-abierta' };
     },
     async set(id, access, options) {
@@ -33,7 +41,13 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
       ...session.motor,
       async listAuthorizedFolders() {
         const folders = await session.motor.listAuthorizedFolders();
-        return active ? folders.filter(f => grants.has(f.id)) : folders;
+        if(!active)return folders;
+        const allowed=[];
+        for(const folder of folders) {
+          if(grants.has(folder.id))allowed.push(folder);
+          else if(await isDestination(folder) && (await session.policy.get(folder.id))?.access.encontrar)allowed.push(folder);
+        }
+        return allowed;
       },
     },
   };
@@ -41,7 +55,7 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
   async function replace(nextPaths) {
     // Cerrar el ámbito anterior antes de validar o registrar el nuevo.
     grants = new Map();
-    for (const candidate of nextPaths) {
+    for (const candidate of [...new Set([...nextPaths,...userDataDirectory?[userDataDirectory]:[]])]) {
       try {
         const canonical = await validateCandidateFolder(candidate, session.layout);
         const registered = await session.motor.authorizeFolder(canonical);
@@ -58,20 +72,16 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
   return {
     session: scopedSession,
     async initialize(connection) {
-      if (connection.clientCapabilities?.roots && paths.length === 0) {
-        active = true;
-        await this.refresh(connection);
-      } else if (!active) {
-        // El directorio de inicio lo fija el cliente/iniciador, no una llamada del modelo.
-        try {
-          const folder = await validateCandidateFolder(cwd, session.layout);
-          active = true;
-          ready = replace([folder]);
-          await ready;
-        } catch { /* La carpeta de Mind o el home no son un proyecto abierto. */ }
-      } else if (active) {
-        ready = replace(paths);
-        await ready;
+      if(connection.clientCapabilities?.roots && paths.length===0) {
+        active=true;await this.refresh(connection);
+      } else {
+        let candidates=paths;
+        if(candidates.length===0) {
+          try {candidates=[await validateCandidateFolder(cwd,session.layout)];}catch{}
+        }
+        if(candidates.length>0 || userDataDirectory) {
+          active=true;ready=replace(candidates);await ready;
+        }
       }
     },
     async refresh(connection) {
@@ -101,7 +111,8 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
       if (active && name === 'solicitar_acceso' && args.continuidad === undefined) {
         const canonical = await validateCandidateFolder(args.ruta, session.layout);
         const folders = await scopedSession.motor.listAuthorizedFolders();
-        if (!folders.some(f => f.path === canonical)) {
+        const configured=await session.motor.workDestinationDirectories();
+        if (!folders.some(f => f.path === canonical) && !configured.some(directory=>contains(canonical,directory))) {
           throw new MotorError('WORKSPACE_REQUIRED', 'Abre esta carpeta en tu agente para trabajar con ella mediante Mind.');
         }
       }

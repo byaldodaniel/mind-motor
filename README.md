@@ -335,3 +335,5 @@ No incorporar datos personales, credenciales ni contenido de las Bases.
 aprobada. SHA-256:
 `a6fcf4dd221bc0b5d0bd1c8430ecfa545c1f7dceb30baa20c93bbd3293963815`.
 El PDF describe el producto; no constituye autorización para ejecutar acciones.
+
+Los resultados nuevos también tienen destinos físicos persistentes: general, por tipo, por proyecto o por conversación. Sin preferencias, una instalación crea `Conversaciones/` junto a `Base/`. El agente consulta el plan al empezar; las herramientas de Mind lo aplican al crear y ofrecen resolución/importación para herramientas externas. Cambiar un proyecto afecta a nuevas creaciones; no traslada archivos anteriores. No intercepta escrituras arbitrarias de otras aplicaciones.

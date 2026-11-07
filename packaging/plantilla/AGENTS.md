@@ -15,8 +15,7 @@ haya sesiones activas. Sin conexión continúa con la versión instalada.
 Esta carpeta es **Mind**, un motor local que permite a los agentes de IA trabajar
 la información del usuario a su manera. Mind encuentra, lee, crea, modifica y
 organiza archivos en las carpetas que el usuario autoriza, y conserva continuidad
-entre sesiones y agentes. Los archivos originales permanecen donde están: Mind
-no los copia.
+entre sesiones y agentes. Los originales indexados permanecen donde están. Los resultados generados se guardan físicamente en los destinos elegidos; resultado_importar copia los temporales cuando sea necesario.
 
 ## Cómo empezar (Regla de oro: Cero configuración del usuario)
 
@@ -81,7 +80,7 @@ Conserva la información importante elegida por el usuario con `conversacion_gua
   usuario. Si tu cliente no puede mostrarlas, quedan pendientes para
   `mind autorizar`: díselo al usuario, no las des por hechas.
 - No modifiques el contenido de esta carpeta (`Motor/`, `Runtime/`, `Base/`,
-  iniciadores y configuraciones). Son el programa y los datos técnicos del usuario.
+  iniciadores y configuraciones). Son el programa y los datos técnicos del usuario. `Conversaciones/` contiene archivos del usuario y sí es un almacén de trabajo; permanece intacto durante las actualizaciones.
 - No uses rutas, ids de carpeta ni nombres de agente como si fueran permisos.
 - Informa con exactitud lo que hiciste y lo que falló.
 
@@ -91,4 +90,14 @@ Antes de guardar consulta `conversacion_preferencias`. Predeterminado esencial: 
 
 ## Ubicación de la memoria de conversaciones
 
-`conversacion_guardar` escribe el resumen importante en un .md real. Usa `destino` si el usuario elige un archivo; `conversacion_configurar` admite `preferencias.carpeta_destino` para nuevos archivos. Sin indicación, conserva el archivo previo o usa `Conversaciones` dentro de la única carpeta de trabajo con lectura y escritura. Informa la ruta que devuelve `archivo`. `pendiente_archivo` no significa guardado completo. Los recursos multimedia mantienen sus destinos propios. No necesitas copiar el historial nativo: conserva lo importante según las preferencias y las indicaciones del usuario.
+`conversacion_guardar` escribe el resumen importante en un .md real. Usa `destino` si el usuario elige un archivo; `conversacion_configurar` admite `preferencias.carpeta_destino` para nuevos archivos. Sin indicación, conserva el archivo previo o usa `Conversaciones` junto a `Base` en la carpeta de Mind. La primera sesión crea ese almacén aunque el usuario no tenga carpetas previas. Informa la ruta que devuelve `archivo`. `pendiente_archivo` no significa guardado completo. Los recursos multimedia mantienen sus destinos propios. No necesitas copiar el historial nativo: conserva lo importante según las preferencias y las indicaciones del usuario.
+
+## Destinos físicos para todas las creaciones
+
+Al iniciar o retomar, usa `destinos_consultar` con el proyecto y, si existe, el ID de conversación. Aplica sus destinos ANTES de crear documentos, imágenes, código, videos, audio u otros resultados. Predeterminado: `Conversaciones/` junto a `Base/` en Mind; se crea automáticamente. Guarda lo importante en modo esencial salvo otra preferencia.
+
+Solo por indicación del usuario, usa `destinos_configurar` para elegir un almacén general, por tipo, por proyecto o por conversación. Prioridad: indicación de archivo, conversación, proyecto, general, predeterminado. Una excepción de proyecto afecta a sus creaciones nuevas; conserva los archivos previos y los demás proyectos. Cambiar una preferencia no concede permisos.
+
+Usa `crear` o `crear_carpeta` con proyecto/conversacion. Para otras herramientas resuelve la ubicación con `destino_resolver` (`preparar:true`) y crea allí el archivo real. Si imponen un temporal autorizado, usa `resultado_importar`: copia por flujo sin enlaces, conserva el origen y devuelve huella SHA-256. Registra con `resultado_registrar` los archivos creados directamente. Si creaste archivos antes de la primera memoria, regístralos cuando obtengas su ID. Al retomar, `conversacion_leer` incluye sus resultados. Comprueba la ubicación física antes de anunciar guardado.
+
+Esta política guía al agente. Mind no intercepta escrituras arbitrarias realizadas por otras aplicaciones ni cambia la ubicación del historial interno del cliente.

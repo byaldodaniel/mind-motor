@@ -5,6 +5,9 @@ import { MotorError } from './errors.js';
 import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
 import { createContinuity } from './continuity.js';
+import { createWorkDestinations } from './work-destinations.js';
+import { createResultRegistry } from './result-registry.js';
+import { createResultCopier } from './result-copier.js';
 import { createConversations } from './conversations.js';
 import { createContinuityAccess } from './continuity-access.js';
 import { createFolderRegistry } from './folders.js';
@@ -115,7 +118,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, userDataDirectory } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -151,7 +154,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   }
   const protectedPhysical = await Promise.all(protectedDirectories.map((item) => realpath(item)));
   // setExclusions solo se usa bajo la coordinación del índice (setFolderExclusions).
-  const { loadAuthorizedFolder, setExclusions, ...folders } = createFolderRegistry(base, motor, protectedPhysical);
+  const { loadAuthorizedFolder, setExclusions, ...folders } = createFolderRegistry(base, motor, protectedPhysical, userDataDirectory ? await realpath(userDataDirectory) : null);
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
@@ -177,6 +180,9 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   // Organización (Función 03): carpetas, mover y papelera de Mind, con permisos de un solo intento.
   const trash = createTrashRegistry({ baseDirectory: base, loadAuthorizedFolder });
   const organizer = createOrganizer({ loadAuthorizedFolder, pythonExecutable, trash });
+  const workDestinations = createWorkDestinations(base);
+  const resultRegistry = createResultRegistry(base);
+  const resultCopier = createResultCopier({loadAuthorizedFolder,pythonExecutable});
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
   /** Observadores abiertos en esta instancia; solo existen si el anfitrión los abre. */
@@ -253,6 +259,22 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     importContinuity: continuity.importContinuity,
     // Conversaciones: administración del mismo motor, con permisos en las herramientas.
     ...conversations,
+    getWorkDestinations: workDestinations.get,
+    configureWorkDestinations: workDestinations.configure,
+    workDestinationDirectories: workDestinations.directories,
+    readConversationResults: resultRegistry.read,
+    rememberConversationResult: resultRegistry.remember,
+    grantResultCopy: resultCopier.grantResultCopy,
+    async copyResultFile(request) {
+      const copied=await resultCopier.copyResultFile(request);
+      const iso=value=>Number.isSafeInteger(value)?new Date(value).toISOString():null;
+      let index;
+      try { index=await indexer.recordCreatedFile(copied.folderId,{
+        path:copied.relativePath,type:'file',size:copied.size,state:'indexed',reason:null,
+        modifiedAt:iso(copied.modifiedMs),changedAt:iso(copied.changedMs),createdAt:iso(copied.createdMs),identity:copied.identity??null
+      }); } catch(error) {index={status:'needs-reconciliation',code:error.code??'INDEX_UPDATE_FAILED'};}
+      return {...copied,index};
+    },
     grantContinuityAccess: continuityAccess.grantContinuityAccess,
     describeContinuityAccess: continuityAccess.describeContinuityAccess,
     revokeContinuityAccess: continuityAccess.revokeContinuityAccess,

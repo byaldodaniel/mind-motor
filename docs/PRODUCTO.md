@@ -156,3 +156,7 @@ probadas en Linux y Windows (`node scripts/test.mjs` y los 23 casos de
 | `mind programadas` | Ejecuta los turnos vencidos (lo usa el programador del sistema) |
 
 Estas órdenes se registran mediante `src/commands/index.js`.
+
+## Almacén de conversaciones y resultados
+
+La instalación crea `Conversaciones/` junto a `Base/` en la primera sesión. Es contenido del usuario: memorias importantes y resultados nuevos predeterminados. Se puede elegir otro almacén general, por tipo, por proyecto o por conversación mediante el agente. El manifiesto y las actualizaciones excluyen `Conversaciones/`; Base/Motor/Runtime mantienen sus protecciones. No se añade una carpeta Trabajo. La ubicación del historial nativo de cada cliente sigue bajo control de ese cliente.

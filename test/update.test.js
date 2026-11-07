@@ -107,10 +107,16 @@ async function fixture(t, { real = false, currentUniversal = false } = {}) {
 
 test('actualización sustituye Motor/Runtime, arranca el código nuevo y conserva toda la Base', async (t) => {
   const f = await fixture(t, { real: true });
+  const userData = path.join(f.mind, 'Conversaciones');
+  await fs.mkdir(userData);
+  await fs.writeFile(path.join(userData, 'memoria.md'), 'Decisión ficticia que conservar.');
+  await fs.writeFile(path.join(userData, 'imagen.png'), Buffer.from([0,255,127,42]));
+  const beforeData = await snapshot(userData);
   const before = await snapshot(f.layout.baseDirectory);
   const result = await updateMind(f.options); // smokeTest real con el Node copiado.
   assert.equal(result.status, 'actualizada');
   assert.equal(result.to, '1.1.0');
+  assert.deepEqual(await snapshot(userData), beforeData);
   assert.equal((await readManifestFile(f.mind)).mindVersion, '1.1.0');
   assert.equal(await fs.readFile(path.join(f.mind, 'Motor', 'prueba.txt'), 'utf8'), '1.1.0');
   assert.equal(await fs.readFile(path.join(f.mind, result.backup, 'Motor', 'prueba.txt'), 'utf8'), '1.0.0');

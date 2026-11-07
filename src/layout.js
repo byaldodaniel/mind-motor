@@ -114,5 +114,6 @@ export async function resolveLayout({ base, env = process.env } = {}) {
     // En el producto ninguna carpeta autorizada puede solaparse con la carpeta
     // de Mind: incluye iniciadores y runtimes que se ejecutan con confianza.
     protectedDirectories: product ? [root] : [],
+    userDataDirectory: product ? path.join(root,'Conversaciones') : null,
   });
 }

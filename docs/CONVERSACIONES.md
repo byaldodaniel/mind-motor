@@ -29,7 +29,7 @@ La excepción prevalece sobre cambios posteriores de la preferencia general. `pr
 
 Al guardar, `conversacion_guardar` comprueba la política efectiva. Si es manual y no recibe `solicitado:true`, devuelve `CONVERSATION_MANUAL_ONLY` sin escribir contenido. El agente solo debe indicar `solicitado:true` cuando el usuario realmente pidió ese guardado. Es una declaración, no una autenticación independiente. Las APIs genéricas de continuidad siguen siendo administrativas: esta preferencia no es una nueva frontera de permisos frente a programas que las usen directamente.
 
-En los otros modos, las instrucciones guían al agente: él selecciona y redacta el contenido que puede leer. El motor no detecta por sí solo decisiones, cierres de etapa o mensajes; no ejecuta un modelo generativo ni captura conversaciones de otras aplicaciones. No impone guardar más información ni crea un destino de archivos. Las preferencias se pueden indicar conversando con el agente, sin editar archivos técnicos.
+En los otros modos, las instrucciones guían al agente: él selecciona y redacta el contenido que puede leer. El motor no detecta por sí solo decisiones, cierres de etapa o mensajes; no ejecuta un modelo generativo ni captura conversaciones de otras aplicaciones. No impone guardar más información. El destino predeterminado de archivos es Conversaciones junto a Base en la instalación de Mind; las preferencias del usuario prevalecen. Las preferencias se pueden indicar conversando con el agente, sin editar archivos técnicos.
 
 ## Guardar y continuar
 
@@ -92,7 +92,7 @@ Cada llamada correcta a conversacion_guardar escribe la información importante 
 - destino: archivo .md absoluto elegido por el usuario para esa conversación.
 - preferencias.carpeta_destino: carpeta absoluta preferida para archivos de conversaciones nuevas, configurable general o por conversación junto con el modo de conservación.
 - Si no se indica destino, una conversación existente conserva su archivo.
-- Para una conversación nueva sin preferencia, se usa Conversaciones/conversacion-<uuid>.md dentro de la única carpeta abierta/autorizada con lectura y escritura. Se crean los directorios necesarios con las operaciones seguras de Mind. Si no hay una carpeta inequívoca, se solicita indicar destino en lugar de elegir una ubicación arbitraria.
+- Para una conversación nueva sin preferencia, se usa Mind/Conversaciones/conversacion-<uuid>.md, junto a Base. Se crea automáticamente aunque el usuario no tenga carpetas previas. En desarrollo sin instalación, se usa Conversaciones dentro de la única carpeta abierta/autorizada con lectura y escritura. Se crean los directorios necesarios con las operaciones seguras de Mind. Si no hay una carpeta inequívoca, se solicita indicar destino en lugar de elegir una ubicación arbitraria.
 
 Ejemplo: conversacion_guardar con titulo, importante y destino igual a la ruta del .md que el usuario desea en su Escritorio. Los otros recursos pueden mantenerse en ubicaciones independientes mediante referencias.
 
@@ -103,3 +103,17 @@ Los destinos deben estar en carpetas autorizadas/abiertas. Se reutilizan las her
 La escritura del JSON de continuidad y del Markdown son dos operaciones: si falla el archivo después de guardar el elemento, la respuesta es pendiente_archivo, incluye ID, ruta e incidencia y no se anuncia guardado completo. El agente debe resolver esa incidencia antes de afirmar que se guardó en la ubicación elegida. La API interna saveConversation conserva su uso como núcleo de almacenamiento; la escritura del archivo se aplica en la herramienta de agente, donde están los permisos sobre originales.
 
 Prueba específica: node --test test/conversation-destinations.test.js. Comprueba carpeta predeterminada, archivo elegido, preferencia persistente, continuidad de ID/archivo con otra sesión, corrección de acuerdo, conflicto con edición externa, archivo ajeno intacto, modo manual sin crear carpetas y destino fuera de permisos rechazado.
+
+## Destinos físicos de documentos y multimedia
+
+`destinos_consultar` devuelve política persistente y modo de memoria. `destinos_configurar` acepta `revision`, `destinos:{carpeta,tipos}` y, opcionalmente, `proyecto` o `conversacion`. Los tipos son documentos, imagenes, videos, audio, codigo, otros y memoria. Un ámbito puede heredar (`destinos:null`). Se conserva en Base/work-destinations.json, con revisión global y bloqueo para evitar escrituras perdidas.
+
+Precedencia para cada tipo: ruta explícita del archivo, conversación (tipo o carpeta), proyecto (tipo o carpeta), general (tipo o carpeta), Mind/Conversaciones. Cambiar un proyecto afecta a sus nuevas creaciones; los archivos existentes conservan ubicación. Los archivos de memoria existentes conservan su archivo salvo destino explícito; `preferencias.carpeta_destino` de conservación también se respeta para memorias nuevas.
+
+`crear` y `crear_carpeta` aplican destinos cuando se usan las preferencias/ámbitos o la instalación. En desarrollo sin preferencias conservan el comportamiento de carpeta explícita. Para otra herramienta, `destino_resolver` devuelve la ruta física antes de crear; `preparar:true` crea solo los directorios. `resultado_importar` copia un resultado temporal autorizado en bloques de 1 MiB, hasta 4 GiB, con SHA-256 y publicación exclusiva. No requiere cargar el archivo entero en JavaScript. Conserva el origen y nunca reemplaza. `resultado_registrar` verifica el índice de un archivo ya creado y conserva solo sus metadatos; no lo coloca físicamente.
+
+El registro separado conversation-results-<id>.json evita cambiar la revisión de memoria al registrar archivos. `conversacion_leer` devuelve resultados (ruta, tipo, tamaño y huella cuando existe); máximo 1000 resultados o 256 KiB por registro. Si falla este registro después de crear, la respuesta indica pendiente y no oculta que el archivo existe. No sigue movimientos externos ni incorpora el contenido binario a la búsqueda semántica.
+
+Los destinos elegidos deben estar abiertos o autorizados con permisos vigentes. La carpeta predeterminada es una excepción positiva y específica dentro del producto; Base, Motor y Runtime siguen protegidos. No se admiten enlaces como almacén predeterminado. El manifiesto del programa no puede incluir Base ni Conversaciones, de modo que las actualizaciones preservan los archivos del usuario.
+
+La política e interfaz de herramientas son comunes a los agentes; cada cliente debe leerlas y aplicarlas. No se interceptan escrituras de otras herramientas ni se reubica el historial interno del agente. Una prueba de un cliente no demuestra cumplimiento universal. Ver evidencia de pruebas físicas y continuidad en `docs/evidencia/DESTINOS_FISICOS_2026-11-07.md`.

@@ -106,7 +106,7 @@ export function validateManifest(data) {
   const folded = new Set();
   const check = (relative) => {
     if (safeRelativePath(relative) !== relative) throw invalid(`Ruta no válida en el manifiesto: ${String(relative).slice(0, 200)}`);
-    if (topLevel(relative) === 'base' || relative === MANIFEST_NAME) throw invalid(`El paquete no puede contener ${relative}.`);
+    if (['base','conversaciones'].includes(topLevel(relative)) || relative === MANIFEST_NAME) throw invalid(`El paquete no puede contener ${relative}.`);
     const key = relative.normalize('NFC').toLowerCase();
     if (folded.has(key)) throw invalid(`Rutas repetidas (o que difieren solo en mayúsculas): ${relative}`);
     folded.add(key);
@@ -118,7 +118,7 @@ export function validateManifest(data) {
   for (const [relative, target] of Object.entries(links)) {
     check(relative);
     const resolved = resolveLinkTarget(relative, target);
-    if (!resolved || topLevel(resolved) === 'base') throw invalid(`Enlace no válido en el manifiesto: ${relative}`);
+    if (!resolved || ['base','conversaciones'].includes(topLevel(resolved))) throw invalid(`Enlace no válido en el manifiesto: ${relative}`);
   }
   // Ningún archivo puede quedar «dentro» de otro archivo o de un enlace.
   const leaves = new Set([...Object.keys(data.files), ...Object.keys(links)]);
