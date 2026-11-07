@@ -386,6 +386,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       registryWatcher = null;
       listeners.clear();
       const cleanup = (async () => {
+        await motor.closeConversationSearch();
         await syncing?.catch(() => {});
         await Promise.allSettled([
           observer?.close(),

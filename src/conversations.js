@@ -4,6 +4,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { MotorError } from './errors.js';
 import { withIndexLock } from './index-lock.js';
 import { requestSignal } from './request-context.js';
+import { createConversationPreferences, retention, describeRetention } from './conversation-preferences.js';
+import { createSemanticEncoder } from './semantic-encoder.js';
+import { semanticSearch, fuseResults, prepareConversationVectors } from './conversation-search.js';
 
 export const CONVERSATION_INDEX = 'conversation-index.sqlite';
 const FORMAT = 'mind-conversation';
@@ -32,6 +35,7 @@ function content(input) {
     project: text(input.project, 'project', { nullable: true }),
     agent: text(input.agent, 'agent', { nullable: true }),
     externalId: text(input.externalId, 'externalId', { nullable: true, max: 512 }),
+    ...(input.preferences == null ? {} : { preferences: retention(input.preferences) }),
   };
 }
 function asConversation(entry) {
@@ -46,9 +50,71 @@ function asConversation(entry) {
 /**
  * Conversaciones sobre la continuidad del mismo motor. Los JSON son la fuente;
  * SQLite es un índice derivado que se abre y cierra en cada búsqueda.
- * No lee originales ni historiales, no crea carpetas de trabajo ni procesos.
+ * No lee originales ni historiales ni crea carpetas de trabajo.
+ * Inferencia local bajo demanda en un worker que se libera tras inactividad.
  */
-export function createConversations({ baseDirectory, continuity }) {
+export function createConversations({ baseDirectory, continuity, semanticEncoder = createSemanticEncoder() }) {
+  const preferences = createConversationPreferences(baseDirectory);
+  let preparing;
+  let warming;
+  let preparationError;
+  let closing = false;
+  function startPreparation() {
+    if (preparing || closing) return;
+    preparing = (async () => {
+      const db = await openIndex();
+      try {
+        return await prepareConversationVectors(db, semanticEncoder, async (row, values) => {
+          await withIndexLock(baseDirectory, 'all', async () => {
+            if (closing) return;
+            // Inferencia fuera del bloqueo. Comprobar la fuente antes de publicar
+            // para no revivir un registro editado o retirado mientras se calculaba.
+            const source = await continuity.getContinuity(row.id);
+            const current = db.prepare('SELECT revision FROM conversations WHERE id=?').get(row.id);
+            if (!source || source.revision !== Number(row.revision) || !current || Number(current.revision) !== Number(row.revision)) return;
+            db.exec('SAVEPOINT vector_document');
+            try {
+              db.prepare('DELETE FROM conversation_vectors WHERE id=?').run(row.id);
+              const insert = db.prepare('INSERT OR REPLACE INTO conversation_vectors VALUES (?,?,?,?,?)');
+              for (const value of values) insert.run(...value);
+              db.exec('RELEASE vector_document');
+            } catch (error) { db.exec('ROLLBACK TO vector_document; RELEASE vector_document'); throw error; }
+          }, 'conversation-index', { timeoutMs: 5000 });
+        });
+      } finally { db.close(); }
+    })().then(value => { preparationError = null; return value; }).catch(error => { preparationError = error.code ?? 'SEMANTIC_FAILED'; return 0; }).finally(() => { preparing = null; });
+  }
+  async function prepareConversationSearch() {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const result = await searchConversations({ query: 'preparar' });
+      if (result.semantic.pending === 0) { await warming; return { error: preparationError ?? null }; }
+      if (result.semantic.status === 'no_disponible') return { error: 'SEMANTIC_UNAVAILABLE' };
+      await preparing;
+      if (preparationError) return { error: preparationError };
+    }
+    return { error: 'CONVERSATION_INDEX_CHANGED' };
+  }
+  async function getConversationPreferences(conversationId) {
+    const global = await preferences.read();
+    const conversation = conversationId === undefined ? null : await getConversation(conversationId);
+    const override = conversation?.preferences ?? null;
+    return { revision: global.revision, conversationRevision: conversation?.revision ?? null,
+      override, inherited: override === null, effective: describeRetention(override ?? global.preferences),
+      global: global.preferences };
+  }
+  async function configureConversationPreferences({ id: conversationId, expectedRevision, preferences: value }) {
+    if (conversationId === undefined) {
+      await preferences.write(value, expectedRevision);
+      return getConversationPreferences();
+    }
+    return preferences.lock(async () => {
+      const before = await getConversation(conversationId);
+      const normalized = value === null ? null : retention(value);
+      const next = { ...before, preferences: normalized };
+      await continuity.updateContinuity(before.id, { content: content(next) }, { expectedRevision });
+      return getConversationPreferences(before.id);
+    });
+  }
   async function getConversation(value) {
     const entry = await continuity.getContinuity(id(value));
     const conversation = asConversation(entry);
@@ -56,10 +122,18 @@ export function createConversations({ baseDirectory, continuity }) {
     return conversation;
   }
 
-  async function saveConversation(input) {
-    const allowed = ['id', 'expectedRevision', 'title', 'important', 'project', 'agent', 'externalId', 'references', 'source'];
+  async function saveConversationUnlocked(input) {
+    const allowed = ['id', 'expectedRevision', 'title', 'important', 'project', 'agent', 'externalId', 'references', 'source', 'preferences', 'explicit'];
     if (!input || typeof input !== 'object' || Array.isArray(input)
         || Object.keys(input).some(key => !allowed.includes(key))) fail('INVALID_CONVERSATION', 'Campos de conversación no válidos.');
+    if (input.explicit !== undefined && typeof input.explicit !== 'boolean') fail('INVALID_CONVERSATION', 'explicit debe ser booleano.');
+    const beforePolicy = input.id === undefined ? null : await getConversation(input.id);
+    const effective = input.preferences == null ? (beforePolicy?.preferences ?? (await preferences.read()).preferences) : retention(input.preferences);
+    // Una escritura de contenido no puede cambiar silenciosamente su política.
+    const prior = beforePolicy?.preferences ?? (await preferences.read()).preferences;
+    if ((effective.mode === 'manual' || prior.mode === 'manual') && input.explicit !== true) {
+      fail('CONVERSATION_MANUAL_ONLY', 'El usuario eligió guardar solo cuando lo indique. No se registró contenido.');
+    }
     if (input.id === undefined) {
       if (input.expectedRevision !== undefined) fail('INVALID_CONVERSATION', 'Una conversación nueva no indica revisión previa.');
       const entry = await continuity.recordContinuity({
@@ -74,13 +148,15 @@ export function createConversations({ baseDirectory, continuity }) {
     }
     // La lectura-modificación del JSON se coordina en continuidad, incluyendo
     // las escrituras hechas por las herramientas genéricas de continuidad.
-    const next = content(Object.fromEntries(['title', 'important', 'project', 'agent', 'externalId']
+    const next = content(Object.fromEntries(['title', 'important', 'project', 'agent', 'externalId', 'preferences']
       .map(key => [key, Object.hasOwn(input, key) ? input[key] : before[key]])));
     const entry = await continuity.updateContinuity(input.id, {
       content: next, ...(input.references !== undefined ? { references: input.references } : {}),
     }, { expectedRevision: input.expectedRevision });
     return asConversation(entry);
   }
+
+  const saveConversation = input => preferences.lock(() => saveConversationUnlocked(input));
 
   async function openIndex() {
     const filename = path.join(baseDirectory, CONVERSATION_INDEX);
@@ -97,19 +173,22 @@ export function createConversations({ baseDirectory, continuity }) {
     const db = new DatabaseSync(filename, { enableForeignKeyConstraints: true });
     try {
       const version = db.prepare('PRAGMA user_version').get().user_version;
-      if (version !== 0 && version !== 1) fail('CONVERSATION_INDEX_VERSION', 'El índice requiere una versión de Mind compatible.');
+      if (![0,1,2].includes(version)) fail('CONVERSATION_INDEX_VERSION', 'El índice requiere una versión de Mind compatible.');
       db.exec(`CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
         CREATE VIRTUAL TABLE IF NOT EXISTS conversations USING fts5(
           id UNINDEXED, revision UNINDEXED, updated UNINDEXED,
           title, important, project, agent, project_key UNINDEXED,
           tokenize='unicode61 remove_diacritics 2');
-        PRAGMA user_version=1;`);
+        CREATE TABLE IF NOT EXISTS conversation_vectors (
+          id TEXT NOT NULL, part INTEGER NOT NULL, model TEXT NOT NULL, vector BLOB NOT NULL, excerpt TEXT NOT NULL,
+          PRIMARY KEY(id,part,model));
+        PRAGMA user_version=2;`);
       return db;
     } catch (error) { db.close(); throw error; }
   }
 
-  async function searchConversations({ query = '', project, limit = 20 } = {}) {
-    if (typeof query !== 'string' || query.length > 256 || !query.isWellFormed()
+  async function searchConversations({ query = '', project, limit = 20, mode = 'hibrida' } = {}) {
+    if (!['hibrida','palabras'].includes(mode) || typeof query !== 'string' || query.length > 256 || !query.isWellFormed()
         || query.includes('\0') || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
       fail('INVALID_CONVERSATION_QUERY', 'Consulta de hasta 256 caracteres y límite de 1 a 50.');
     }
@@ -127,7 +206,9 @@ export function createConversations({ baseDirectory, continuity }) {
         const present = new Set();
         let read = 0;
         let omitted = 0;
-        const drop = db.prepare('DELETE FROM conversations WHERE id=?');
+        const deleteText = db.prepare('DELETE FROM conversations WHERE id=?');
+        const deleteVectors = db.prepare('DELETE FROM conversation_vectors WHERE id=?');
+        const drop = { run(value) { deleteText.run(value); deleteVectors.run(value); } };
         const remember = db.prepare('INSERT OR REPLACE INTO files VALUES (?,?)');
         const insert = db.prepare('INSERT INTO conversations VALUES (?,?,?,?,?,?,?,?)');
         for (const name of names) {
@@ -175,17 +256,54 @@ export function createConversations({ baseDirectory, continuity }) {
         const total = db.prepare('SELECT count(*) AS total FROM conversations' + where).get(...args).total;
         const excerpt = expression ? "snippet(conversations,4,'','',' … ',32)" : 'substr(important,1,300)';
         const rows = db.prepare(`SELECT id,revision,updated,title,project,${excerpt} AS excerpt
-          FROM conversations${where} ORDER BY ${expression ? 'rank,' : ''} updated DESC,id LIMIT ?`).all(...args, limit);
+          FROM conversations${where} ORDER BY ${expression ? 'rank,' : ''} updated DESC,id LIMIT ?`).all(...args, mode === 'hibrida' ? 200 : limit);
         db.exec('COMMIT');
-        return { total, results: rows.map(row => ({ id: row.id, revision: Number(row.revision),
+        let selected = rows;
+        let totalResults = total;
+        const semantic = { status: 'no_solicitada', embedded: 0, model: semanticEncoder.model };
+        if (mode === 'hibrida' && expression) {
+          try {
+            if (!(await semanticEncoder.available())) semantic.status = 'no_disponible';
+            else {
+              const pending = db.prepare('SELECT count(*) AS n FROM conversations WHERE id NOT IN (SELECT id FROM conversation_vectors WHERE model=?)').get(semanticEncoder.model).n;
+              const indexed = db.prepare('SELECT count(*) AS n FROM conversation_vectors WHERE model=?').get(semanticEncoder.model).n;
+              semantic.pending = pending;
+              semantic.status = pending ? 'preparando' : 'activa';
+              const ready = semanticEncoder.isReady?.() !== false;
+              const found = indexed && ready ? await semanticSearch(db, semanticEncoder, { query, projectKey: project === undefined ? undefined : fold(project), signal }) : { matches: [], embedded: 0 };
+              if (indexed && !ready) {
+                semantic.status = 'cargando';
+                if (!warming && !preparing && !closing) {
+                  warming = semanticEncoder.embed([query], { kind: 'query' }).then(() => { preparationError = null; })
+                    .catch(error => { preparationError = error.code ?? 'SEMANTIC_FAILED'; }).finally(() => { warming = null; });
+                }
+              }
+              if (pending) startPreparation();
+              if (preparationError) semantic.status = 'fallo';
+              const fused = fuseResults(rows, found.matches, { exactIdentifiers: /\d/.test(query) || /[/\\.]/.test(query) });
+              selected = fused.slice(0, limit).map(row => {
+                const metadata = db.prepare('SELECT revision,updated,title,project FROM conversations WHERE id=?').get(row.id);
+                return { ...metadata, ...row };
+              });
+              totalResults = fused.length;
+            }
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            semantic.status = 'fallo';
+          }
+        }
+        return { total: totalResults, semantic, results: selected.slice(0, limit).map(row => ({ id: row.id, revision: Number(row.revision),
           title: row.title, project: row.project || null, updatedAt: row.updated,
-          excerpt: row.excerpt.slice(0, 500) })),
+          excerpt: row.excerpt.slice(0, 500), match: row.match ?? 'palabras' })),
           index: { examined: present.size, read, omitted } };
       } catch (error) {
         try { db.exec('ROLLBACK'); } catch {}
         throw error;
       } finally { db.close(); }
-    }, 'conversation-index', { signal });
+    }, 'conversation-index', { signal, timeoutMs: 5000 });
   }
-  return Object.freeze({ getConversation, saveConversation, searchConversations });
+  return Object.freeze({ getConversation, saveConversation, searchConversations,
+    getConversationPreferences, configureConversationPreferences,
+    prepareConversationSearch,
+    async closeConversationSearch() { closing = true; await semanticEncoder.close(); await preparing; await warming; } });
 }

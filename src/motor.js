@@ -115,7 +115,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -155,7 +155,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
-  const conversations = createConversations({ baseDirectory: base, continuity });
+  const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder });
   const indexer = createFolderIndexer({
     baseDirectory: base,
     pythonExecutable,

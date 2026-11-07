@@ -1,3 +1,4 @@
+import { RETENTION_MODES } from '../conversation-preferences.js';
 import { MotorError } from '../errors.js';
 import { only, schema, text, integer, referencesIn } from './helpers.js';
 
@@ -5,12 +6,27 @@ function output(value) {
   return { id: value.id, revision: value.revision, creado: value.createdAt,
     actualizado: value.updatedAt, titulo: value.title, importante: value.important,
     proyecto: value.project, agente: value.agent, id_externo: value.externalId,
+    preferencias: value.preferences ? preferenceOut(value.preferences) : null,
     referencias: value.references.map(ref => ({
       ...(ref.entry ? { registro: ref.entry } : { ubicacion: ref.locator }),
       ...(ref.relation ? { relacion: ref.relation } : {}),
     })) };
 }
+const preferenceSchema = schema({ modo: { type: 'string', enum: RETENTION_MODES }, reglas: { type: 'string' } }, ['modo']);
+const preferenceIn = value => {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new MotorError('INVALID_ARGUMENTS', 'Preferencias no válidas.');
+  only(value, ['modo','reglas']);
+  return { mode: value.modo, rules: value.reglas ?? '' };
+};
+const preferenceOut = value => ({ modo: value.mode, reglas: value.rules });
+const preferenceResult = value => ({ revision: value.revision, revision_conversacion: value.conversationRevision,
+  general: preferenceOut(value.global), excepcion: value.override ? preferenceOut(value.override) : null,
+  heredada: value.inherited, efectiva: { ...preferenceOut(value.effective), automatica: value.effective.automatic,
+    indicaciones: value.effective.guidance, contenido_max_bytes: value.effective.maxContentBytes } });
 const fields = {
+  solicitado: { type: 'boolean', description: 'true solo si el usuario pidió este guardado expresamente. Obligatorio en modo manual. No acredita identidad.' },
+  preferencias: preferenceSchema,
   id: { type: 'string', description: 'ID estable de Mind. Omitir para crear; conservarlo al retomar.' },
   revision: { type: 'integer', minimum: 1, description: 'Revisión leída, obligatoria al actualizar.' },
   titulo: { type: 'string', description: 'Título de la conversación, hasta 200 bytes.' },
@@ -25,8 +41,42 @@ export function createConversationTools({ session }) {
   const motor = session.motor;
   return [
     {
+      definition: { name: 'conversaciones_preparar', title: 'Preparar búsqueda de conversaciones',
+        description: 'Espera la preparación local del índice semántico de conversaciones. Puede tardar en Bases grandes; la búsqueda normal continúa sin esperar. Útil desde CLI, que no mantiene un proceso entre llamadas. No descarga componentes ni copia historiales. Requiere continuidad leer.',
+        inputSchema: schema({}), annotations: { readOnlyHint: true, openWorldHint: false } },
+      async handler(args, { requireContinuity }) {
+        only(args, []); await requireContinuity('leer');
+        const result = await motor.prepareConversationSearch();
+        await requireContinuity('leer');
+        return { estado: result.error ? 'no_preparada' : 'preparada', incidencia: result.error };
+      },
+    },
+    {
+      definition: { name: 'conversacion_preferencias', title: 'Consultar preferencias de conversación',
+        description: 'Consulta cómo y cuándo conservar conversaciones: esencial predeterminado, detallado, manual o personalizado. Sin id: general; con id: efectiva y excepción. Leer antes de guardar. Requiere continuidad leer.',
+        inputSchema: schema({ id: { type: 'string' } }), annotations: { readOnlyHint: true, openWorldHint: false } },
+      async handler(args, { requireContinuity }) {
+        only(args, ['id']); await requireContinuity('leer');
+        const result = await motor.getConversationPreferences(args.id);
+        await requireContinuity('leer'); return preferenceResult(result);
+      },
+    },
+    {
+      definition: { name: 'conversacion_configurar', title: 'Personalizar conservación de conversaciones',
+        description: 'Cambia preferencias solo por indicación del usuario. Sin id configura la general con su revision; con id configura una excepción usando revision_conversacion. preferencias:null con id restaura herencia. No borra ni modifica el resumen guardado. Requiere continuidad leer y registrar.',
+        inputSchema: schema({ id: { type: 'string' }, revision: { type: 'integer', minimum: 0 },
+          preferencias: { anyOf: [preferenceSchema, { type: 'null' }] } }, ['revision','preferencias']),
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false } },
+      async handler(args, { requireContinuity }) {
+        only(args, ['id','revision','preferencias']); await requireContinuity('leer','registrar');
+        const result = await motor.configureConversationPreferences({ id: args.id,
+          expectedRevision: args.revision, preferences: preferenceIn(args.preferencias) });
+        await requireContinuity('leer'); return preferenceResult(result);
+      },
+    },
+    {
       definition: { name: 'conversacion_guardar', title: 'Guardar conversación en Mind',
-        description: 'Registra una conversación como elemento o actualiza su información importante. Nueva: titulo e importante. Actualizar: id y revision leída. No exige carpeta ni copia el historial. Requiere continuidad leer y registrar.',
+        description: 'Antes de guardar consulta conversacion_preferencias. Registra una conversación como elemento o actualiza su información importante. Nueva: titulo e importante. Actualizar: id y revision leída. No exige carpeta ni copia el historial. Requiere continuidad leer y registrar.',
         inputSchema: schema(fields),
         annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false } },
       async handler(args, { requireContinuity, source }) {
@@ -37,6 +87,8 @@ export function createConversationTools({ session }) {
           ['importante','important'],['proyecto','project'],['agente','agent'],['id_externo','externalId']]) {
           if (Object.hasOwn(args,a)) input[b] = args[a];
         }
+        if (Object.hasOwn(args, 'solicitado')) input.explicit = args.solicitado;
+        if (Object.hasOwn(args, 'preferencias')) input.preferences = preferenceIn(args.preferencias);
         if (Object.hasOwn(args, 'referencias')) {
           if (!Array.isArray(args.referencias) || args.referencias.some(ref => !ref || typeof ref !== 'object'
               || (Object.hasOwn(ref, 'registro') === Object.hasOwn(ref, 'ubicacion')))) {
@@ -50,22 +102,24 @@ export function createConversationTools({ session }) {
     },
     {
       definition: { name: 'conversaciones_buscar', title: 'Buscar conversaciones',
-        description: 'Busca por palabras en títulos e información importante indexada, sin cargar todos los historiales. Devuelve extractos breves e IDs para leer. Consulta vacía: recientes. Requiere continuidad leer.',
-        inputSchema: schema({ consulta: { type: 'string' }, proyecto: { type: 'string' },
+        description: 'Busca por palabras y significado con modelo local; predeterminado hibrida. En primera indexación devuelve preparando y continúa en segundo plano; las coincidencias semánticas pueden ser parciales. Si falta el componente o falla, devuelve búsqueda por palabras y estado semantica. No carga historiales. Devuelve extractos breves e IDs para leer. Consulta vacía: recientes. Requiere continuidad leer.',
+        inputSchema: schema({ modo: { type: 'string', enum: ['hibrida','palabras'] }, consulta: { type: 'string' }, proyecto: { type: 'string' },
           limite: { type: 'integer', minimum: 1, maximum: 50 } }),
         annotations: { readOnlyHint: true, openWorldHint: false } },
       async handler(args, { requireContinuity }) {
-        only(args, ['consulta','proyecto','limite']);
+        only(args, ['consulta','proyecto','limite','modo']);
         await requireContinuity('leer');
         const found = await motor.searchConversations({
+          mode: args.modo,
           query: text(args.consulta, 'consulta', { optional: true, allowEmpty: true, max: 256 }),
           project: text(args.proyecto, 'proyecto', { optional: true, max: 200 }),
           limit: integer(args.limite, 'limite', { min: 1, max: 50 }),
         });
         await requireContinuity('leer');
-        return { total: found.total, mostradas: found.results.length,
+        return { semantica: { estado: found.semantic.status, fragmentos_generados: found.semantic.embedded, modelo: found.semantic.model, conversaciones_pendientes: found.semantic.pending ?? 0 },
+          total: found.total, mostradas: found.results.length,
           conversaciones: found.results.map(row => ({ id: row.id, revision: row.revision,
-            titulo: row.title, proyecto: row.project, actualizado: row.updatedAt, extracto: row.excerpt })),
+            titulo: row.title, proyecto: row.project, actualizado: row.updatedAt, extracto: row.excerpt, coincidencia: row.match })),
           indice: { examinados: found.index.examined, contenidos_leidos: found.index.read,
             omitidos: found.index.omitted, incompleto: found.index.omitted > 0 } };
       },

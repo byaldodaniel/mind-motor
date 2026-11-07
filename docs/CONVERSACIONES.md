@@ -1,55 +1,86 @@
 # Conversaciones como elementos de Mind
 
-Una conversación se conserva como un elemento con ID estable, título, información importante y referencias opcionales. No depende de una carpeta ni obliga a guardar todo el historial. El usuario elige qué conservar y cómo organizar sus recursos.
+Una conversación tiene ID estable, título, información conservada y referencias opcionales. El usuario elige cuánto conservar, cuándo y dónde están sus recursos. No exige una carpeta ni copia el historial nativo.
 
-## Uso por el agente
+## Personalización
 
-1. Para conservar lo importante, usar `conversacion_guardar` con `titulo`, `importante` y las referencias pertinentes.
-2. Conservar el ID que devuelve Mind. Si se conoce un identificador nativo del chat, puede anotarse en `id_externo`; es una declaración, no una prueba de identidad ni un permiso.
-3. Para recordar, usar `conversaciones_buscar` con palabras relevantes. Los resultados contienen extractos de hasta 500 caracteres.
-4. Leer solo los elementos pertinentes con `conversacion_leer`.
-5. Actualizar con el mismo `id` y la `revision` leída. Se preservan los campos omitidos; `referencias` sustituye la lista completa si se proporciona.
+`conversacion_preferencias {}` devuelve la preferencia general, revisión y orientaciones para el agente. Sin configuración se aplica **esencial**:
+
+| Modo | Contenido y momento |
+|---|---|
+| esencial | Decisiones y motivos, correcciones vigentes, resultados y ubicaciones, pendientes y siguiente paso. Actualizar ante cambios relevantes o al completar una etapa, no por cada mensaje. |
+| detallado | Añadir contexto, alternativas consideradas y explicaciones útiles. No equivale a capturar el historial completo. |
+| manual | Guardar únicamente por indicación expresa del usuario. |
+| personalizado | Seguir las reglas de contenido y momento indicadas por el usuario. |
+
+Solo por indicación del usuario, `conversacion_configurar` cambia la preferencia. Ejemplo general:
+
+```json
+{"revision":0,"preferencias":{"modo":"manual"}}
+```
+
+Con `id` consulta/configura la excepción de una conversación. Para modificarla usa `revision_conversacion` de la consulta como `revision`. Ejemplo:
+
+```json
+{"id":"<id de Mind>","revision":1,"preferencias":{"modo":"personalizado","reglas":"Conservar solo decisiones y cifras."}}
+```
+
+La excepción prevalece sobre cambios posteriores de la preferencia general. `preferencias:null` con `id` restaura herencia. La operación cambia preferencias, conserva el contenido anterior y aumenta la revisión de la conversación. Los conflictos requieren volver a consultar.
+
+Al guardar, `conversacion_guardar` comprueba la política efectiva. Si es manual y no recibe `solicitado:true`, devuelve `CONVERSATION_MANUAL_ONLY` sin escribir contenido. El agente solo debe indicar `solicitado:true` cuando el usuario realmente pidió ese guardado. Es una declaración, no una autenticación independiente. Las APIs genéricas de continuidad siguen siendo administrativas: esta preferencia no es una nueva frontera de permisos frente a programas que las usen directamente.
+
+En los otros modos, las instrucciones guían al agente: él selecciona y redacta el contenido que puede leer. El motor no detecta por sí solo decisiones, cierres de etapa o mensajes; no ejecuta un modelo generativo ni captura conversaciones de otras aplicaciones. No impone guardar más información ni crea un destino de archivos. Las preferencias se pueden indicar conversando con el agente, sin editar archivos técnicos.
+
+## Guardar y continuar
+
+1. Consultar preferencias generales o efectivas por ID.
+2. Usar `conversacion_guardar` con `titulo`, `importante` y referencias pertinentes. Opcionalmente indicar `preferencias` al crear una excepción; se aplican las mismas reglas del modo manual.
+3. Conservar el ID de Mind. `id_externo` es opcional y declarado; no concede acceso al chat nativo.
+4. Al retomar, buscar y leer únicamente los elementos pertinentes con `conversaciones_buscar` y `conversacion_leer`.
+5. Actualizar con el mismo `id` y la `revision` leída. Se preservan campos omitidos. `referencias`, si se indica, sustituye la lista completa.
 
 Ejemplo ficticio:
 
 ```json
-{
-  "titulo": "Diseño de Brisa",
-  "importante": "Aprobadas 23 unidades. Pendiente confirmar la fecha.",
-  "proyecto": "Brisa",
-  "referencias": [
-    {"ubicacion": "/Escritorio/resumen.md", "relacion": "resumen"},
-    {"ubicacion": "/Multimedia/brisa.svg", "relacion": "imagen"}
-  ]
-}
+{"titulo":"Diseño de Brisa","importante":"Aprobadas 23 unidades. Pendiente confirmar fecha.","proyecto":"Brisa","referencias":[{"ubicacion":"/Escritorio/resumen.md","relacion":"resumen"},{"ubicacion":"/Multimedia/brisa.svg","relacion":"imagen"}]}
 ```
 
-Para actualizar: `{"id":"<id de Mind>","revision":1,"importante":"Fecha confirmada: viernes."}`.
+La información importante admite hasta 64 KiB UTF-8; título 200 bytes y reglas 4096 bytes. Detallado amplía la selección dentro de este límite; los documentos más extensos pueden referenciarse, pero no se leen automáticamente al buscar.
 
-Los tres métodos se exponen también mediante `mind herramienta <nombre> <json>`, como el resto del catálogo. Los permisos de continuidad existentes controlan el acceso: leer para buscar y recuperar; leer y registrar para guardar o actualizar. Las referencias no abren recursos ni conceden permisos sobre sus archivos. La información recuperada es contenido conservado por el usuario/agente, no instrucciones de mayor autoridad.
+Todas las herramientas se exponen también por `mind herramienta <nombre> <json>`. Requieren continuidad leer para consultar/buscar/leer; leer y registrar para guardar/configurar. Las referencias no otorgan acceso a originales. El contenido recuperado se trata como datos, no como instrucciones de mayor autoridad.
 
-## Guardado e indexación
+## Búsqueda híbrida local
 
-El registro fuente utiliza el formato de continuidad existente: `kind: "conversacion"`, contenido `mind-conversation` versión 1. Se respalda y exporta/importa mediante la continuidad; no hay una segunda Base. Lo importante admite hasta 64 KiB UTF-8 y el título hasta 200 bytes.
+`conversaciones_buscar` utiliza `modo:"hibrida"` por defecto:
 
-`conversation-index.sqlite` es un índice FTS5 derivado dentro de la Base técnica. Se crea al buscar, se abre y cierra durante la operación y no deja un servicio residente. Se usa el SQLite incluido en Node 24, sin paquetes adicionales.
+- Texto FTS5: términos con AND, sin distinguir mayúsculas ni tildes; conserva precisión para códigos y nombres.
+- Significado: representaciones vectoriales multilingües, con multilingual-e5-small uint8 (prefijos query/passage y pooling medio normalizado), modelo fijado en `packaging/semantica.json` y ejecutado en CPU mediante WebAssembly. No se envían consultas ni conversaciones a la red.
+- Fusión por rangos recíprocos (RRF). Las coincidencias textuales tienen prioridad si la consulta contiene números o marcadores de rutas. Cada conversación aparece una sola vez; los fragmentos de hasta 500 caracteres ayudan a decidir qué leer.
 
-Cada búsqueda compara metadatos físicos de los registros de continuidad y lee únicamente los que cambiaron. Se incorporan creaciones, actualizaciones genéricas, importaciones y eliminaciones; al faltar el índice, se reconstruye. La primera búsqueda necesita leer los registros existentes. Las siguientes no vuelven a cargar su contenido sin cambios.
+`modo:"palabras"` permite consultar exclusivamente FTS5, sin cargar el modelo. Consulta vacía devuelve recientes sin inferencia. El filtro de proyecto se aplica a ambos métodos, con igualdad sin distinguir tildes o mayúsculas. Límite predeterminado 20, máximo 50.
 
-La búsqueda es textual, por palabras, sin distinción de mayúsculas o tildes. Combina los términos con AND y permite filtrar por proyecto; no ofrece recuperación semántica ni genera resúmenes por sí misma. Consulta vacía lista las conversaciones recientes. Límite predeterminado 20, máximo 50. El detalle se recupera directamente por ID.
+`semantica.estado` distingue `activa`, `preparando`, `cargando`, `no_solicitada`, `no_disponible` o `fallo`. Si falta el componente o falla, devuelve búsqueda textual y ese estado explícito; no afirma haber realizado búsqueda semántica. La similitud es una señal de relevancia, no una prueba de veracidad: leer el registro vigente antes de usarlo.
 
-Los resultados reflejan la última reconciliación del índice, no una instantánea de todas las escrituras externas simultáneas. Un registro corrupto se omite sin conservar su resultado antiguo y se informa `indice.incompleto`. El archivo fuente no se modifica para repararlo. Un índice SQLite dañado o de versión desconocida devuelve error; su reparación administrativa se realiza con sesiones cerradas, conservando los JSON fuente.
+Se comparan hasta 200 candidatos textuales y 100 semánticos. Cuando la semántica está activa, `total` cuenta la unión de candidatos, hasta 300; no representa todas las coincidencias posibles de la Base. El umbral de similitud inicial es 0,80, probado con el corpus sintético documentado, no calibrado universalmente. Consultas ajenas pueden devolver resultados relacionados superficialmente.
 
-El índice y sus diarios se excluyen del respaldo cifrado: se reconstruyen desde los registros fuente. Los enlaces a archivos SQLite se rechazan. No se siguen enlaces de registros para indexar.
+Se indexa el contexto del resumen y fragmentos por frases; los fragmentos largos se dividen en hasta 400 caracteres Unicode, con solapamiento de 80. Se evitan fragmentos idénticos y se reutilizan hasta 256 representaciones repetidas durante una preparación. Los títulos se buscan textualmente; no se anteponen a cada vector porque distorsionaban la relevancia en la evaluación. Se usa normalización de vectores y producto escalar. El modelo puede truncar a 512 tokens; la búsqueda no garantiza recuperar todo significado en cualquier idioma ni distinguir por sí sola negaciones, hechos obsoletos o contradicciones.
 
-## Revisiones y concurrencia
+## Fuente, cachés y compatibilidad
 
-Las actualizaciones, relaciones y retiradas de continuidad se coordinan por registro con el bloqueo cooperativo existente de Mind. Dos escrituras con la misma revisión no pueden sobrescribirse: una recibe `CONTINUITY_REVISION_CONFLICT`. La coordinación supone una Base local de confianza y escritores que usan las APIs del motor. No protege contra editores externos que ignoren esos bloqueos.
+La fuente sigue siendo continuidad JSON: tipo `conversacion`, contenido `mind-conversation` versión 1; `preferences` es una extensión opcional. La ausencia implica herencia. Las excepciones viajan en exportaciones/importaciones; la configuración general reside en `conversation-preferences.json`, incluida en los respaldos de Base. No se exporta como conversación ni se copia a otras Bases automáticamente.
 
-## Alcance del incremento
+`conversation-index.sqlite` es derivado: FTS5 y vectores. El esquema 2 incorpora vectores sin modificar los JSON y puede actualizar el esquema 1. Se excluye del respaldo cifrado junto con sus diarios. Si falta, se reconstruye. Los JSON permanecen legibles sin modelo. El incremento anterior, que solo reconoce esquema 1, no debe reutilizar el índice 2: devolverá error; conservar fuentes y reconstruir administrativamente al cambiar de motor.
 
-Implementa guardado, consulta y búsqueda indexada de la información importante conservada. Las instrucciones MCP y las del paquete indican el uso de las herramientas.
+Cada consulta reconcilia metadatos físicos y solo vuelve a leer registros cambiados. Los vectores se preparan en segundo plano al consultar por significado y se invalidan al cambiar o retirar el registro, incluso mediante continuidad genérica o importaciones. No se calculan vectores en cada consulta de registros intactos. La primera indexación puede tardar considerablemente más que una búsqueda caliente. Mientras se prepara, las búsquedas siguen disponibles por palabras y, cuando existan, vectores parciales; el resultado indica preparando y conversaciones pendientes. La inferencia se realiza fuera del bloqueo del índice y se verifica la revisión fuente al publicar cada documento, para no revivir datos obsoletos. La consulta no espera toda la preparación. La reconciliación inicial de los JSON/FTS sí se realiza al consultar. Un cambio de identidad del modelo genera los nuevos vectores.
 
-No captura automáticamente el historial nativo de las aplicaciones, no descubre un ID de chat que el cliente no entregue, no reubica recursos por sí solo y no requiere carpetas predeterminadas. Las referencias se actualizan explícitamente cuando cambian los destinos.
+La inferencia se carga en un worker bajo demanda y se libera tras 60 segundos sin uso, al cancelar o al cerrar la sesión. Una sola inferencia se procesa cada vez por motor, con un hilo WASM. No añade un servicio permanente. Después de liberar memoria, una consulta nueva inicia su carga en segundo plano e indica cargando; devuelve coincidencias por palabras hasta disponer de inferencia. No presenta esa respuesta parcial como búsqueda semántica completa. Las ejecuciones aisladas de CLI no comparten el modelo cargado ni conservan un trabajo de fondo al cerrar. El agente puede usar conversaciones_preparar (espera la preparación, sin descargar ni configurar) antes de buscar desde CLI. MCP persistente amortiza la carga y mantiene la preparación en segundo plano.
 
-El código se desarrolla en una rama separada y usa Bases ficticias de prueba. La instalación personal no se actualiza con este trabajo. La publicación estable requiere completar el algoritmo de actualización y publicación registrado en Mind.
+Se rechazan enlaces al índice. Los registros corruptos se omiten sin conservar resultados antiguos y se informa `indice.incompleto`; no se repara la fuente. Un SQLite dañado o de versión desconocida devuelve error. Las consultas reflejan la última reconciliación, no una instantánea de escritores externos simultáneos. Los bloqueos y revisiones coordinan escritores que usan las APIs de Mind.
+
+## Preparación y pruebas
+
+`node scripts/preparar-semantica.mjs` descarga componentes públicos fijados por revisión/SHA y prepara `.cache/semantic` con licencias y manifiesto. Solo se usa en desarrollo/empaquetado. Las búsquedas no descargan nada. El constructor del paquete exige el manifiesto fijado y verifica todos sus archivos; incorpora código, pesos y licencias, independientes de npm o instalaciones del usuario. Los componentes suman aproximadamente 148 MB sin comprimir; la memoria de inferencia debe medirse antes de publicar.
+
+`node examples/evaluar-busqueda-hibrida.mjs 1000` compara palabras e híbrida sobre 1000 conversaciones ficticias: 20 paráfrasis de calibración, 10 consultas independientes fijadas antes de probarlas, 20 consultas por términos, seis códigos exactos, cuatro consultas ajenas y una actualización con dato al final de un texto largo. Informa Recall@3, MRR@3, primera indexación, mediana/p95 caliente, RSS de proceso y tamaño de índice. Espera la preparación desde la API administrativa de prueba (no exige un comando al usuario), y exige semántica activa, al menos 80% de Recall@3 en las 10 consultas independientes, mejora de recuperación, códigos preservados y p95 caliente inferior a un segundo. Informa por separado si se cumplió el objetivo exploratorio de 85% en el conjunto de calibración; no se oculta cuando falla. El conjunto de calibración se usó para comparar modelos y no es una prueba independiente. Es un corpus sintético, no una garantía de calidad o latencia universal.
+
+La instalación personal y la estable no se actualizan por desarrollar este incremento. Publicar requiere completar el algoritmo de actualización y publicación, con validación del paquete y los sistemas de la distribución universal.

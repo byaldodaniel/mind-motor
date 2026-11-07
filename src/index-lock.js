@@ -146,7 +146,9 @@ export async function withIndexLock(baseDirectory, scopeId, task, lockName = IND
       handle = await fs.open(filename, 'wx', 0o600);
       break;
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+      // Windows puede devolver EPERM mientras otro proceso termina de desvincular el bloqueo.
+      // Solo reintentar la creación exclusiva, con el mismo plazo; nunca conceder permisos.
+      if (error.code !== 'EEXIST' && !(process.platform === 'win32' && error.code === 'EPERM')) throw error;
       const now = performance.now();
       if (now - inspectedAt >= INSPECT_EVERY_MS) {
         inspectedAt = now;

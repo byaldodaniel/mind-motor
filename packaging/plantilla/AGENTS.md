@@ -84,3 +84,7 @@ Conserva la información importante elegida por el usuario con `conversacion_gua
   iniciadores y configuraciones). Son el programa y los datos técnicos del usuario.
 - No uses rutas, ids de carpeta ni nombres de agente como si fueran permisos.
 - Informa con exactitud lo que hiciste y lo que falló.
+
+## Conversaciones personalizables
+
+Antes de guardar consulta `conversacion_preferencias`. Predeterminado esencial: decisiones y motivos, correcciones vigentes, resultados y ubicaciones, pendientes y siguiente paso; actualizar ante cambios relevantes o al completar etapas. Detallado conserva contexto adicional; manual solo guarda por petición expresa (`solicitado:true`); personalizado sigue las reglas del usuario. `conversacion_configurar` cambia la general o una excepción por conversación solo cuando el usuario lo pida. `preferencias:null` restaura herencia. La búsqueda predeterminada de conversaciones es híbrida y local; comprobar `semantica.estado`, y leer la fuente por ID antes de usarla. El motor no captura el historial ni redacta resúmenes por sí mismo.

@@ -26,6 +26,7 @@ import {
 import {
   hashFile, scanTree, validateManifest, validUniversalTargets, verifyTree, describeProblems, MANIFEST_NAME,
 } from '../src/product-files.js';
+import { copySemanticBundle } from '../src/semantic-bundle.js';
 import { BASE_FORMAT_VERSION } from '../src/base-format.js';
 
 /** El manifiesto declara siempre la capacidad real del Motor que se empaqueta. */
@@ -236,6 +237,8 @@ async function copySharedFiles(stage) {
   for (const relative of tracked) {
     await copyRepositoryFile(relative, path.join(stage, 'Motor', ...relative.split('/')));
   }
+  const semanticConfig = JSON.parse(git(['show', 'HEAD:packaging/semantica.json']));
+  await copySemanticBundle(path.join(stage, 'Motor', '.cache', 'semantic'), { manifestSha256: semanticConfig.bundleManifestSha256 });
   for (const name of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'LEEME.md']) {
     await copyRepositoryFile(`packaging/plantilla/${name}`, path.join(stage, name));
   }

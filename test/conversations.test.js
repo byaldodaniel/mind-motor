@@ -48,48 +48,48 @@ test('FTS busca contenido y acentos, filtra proyecto y entrega extractos limitad
   const first = await saved(motor);
   await motor.saveConversation({ title: 'Otro ensayo', important: 'Café tostado.', project: 'Otro' });
   await motor.recordContinuity({ content: 'café verde no es conversación' });
-  const found = await motor.searchConversations({ query: 'CAFE verde', project: 'proyecto ambar' });
+  const found = await motor.searchConversations({ mode: 'palabras', query: 'CAFE verde', project: 'proyecto ambar' });
   assert.equal(found.total, 1);
   assert.equal(found.results[0].id, first.id);
   assert.match(found.results[0].excerpt, /café verde/);
   assert.equal(Object.hasOwn(found.results[0], 'important'), false);
-  assert.equal((await motor.searchConversations({ query: 'inexistente' })).total, 0);
-  assert.equal((await motor.searchConversations({ query: '' })).total, 2);
-  await assert.rejects(motor.searchConversations({ query: '"""' }), { code: 'INVALID_CONVERSATION_QUERY' });
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: 'inexistente' })).total, 0);
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: '' })).total, 2);
+  await assert.rejects(motor.searchConversations({ mode: 'palabras', query: '"""' }), { code: 'INVALID_CONVERSATION_QUERY' });
   // Operadores FTS se tratan como palabras, no como SQL ni sintaxis ejecutable.
-  assert.equal((await motor.searchConversations({ query: 'cafe OR inexistente' })).total, 0);
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: 'cafe OR inexistente' })).total, 0);
 });
 
 test('índice incremental entre instancias, cambios genéricos, importación y reconstrucción', async t => {
   const { motor, base } = await fixture(t);
   const first = await saved(motor, 'Código inicial NUBE.');
-  assert.equal((await motor.searchConversations({ query: 'nube' })).index.read, 1);
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: 'nube' })).index.read, 1);
   const other = await openMotor({ baseDirectory: base });
-  assert.equal((await other.searchConversations({ query: 'nube' })).index.read, 0);
+  assert.equal((await other.searchConversations({ mode: 'palabras', query: 'nube' })).index.read, 0);
   await other.saveConversation({ id: first.id, expectedRevision: 1, important: 'Código vigente SIERRA.' });
-  assert.equal((await motor.searchConversations({ query: 'nube' })).total, 0);
-  assert.equal((await motor.searchConversations({ query: 'sierra' })).total, 1);
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: 'nube' })).total, 0);
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: 'sierra' })).total, 1);
   const raw = await motor.getContinuity(first.id);
   await motor.updateContinuity(first.id, { content: { ...raw.content, important: 'Cambio genérico SOL.' } },
     { expectedRevision: raw.revision });
-  assert.equal((await other.searchConversations({ query: 'sol' })).total, 1);
+  assert.equal((await other.searchConversations({ mode: 'palabras', query: 'sol' })).total, 1);
   const pack = await motor.exportContinuity({ ids: [first.id] });
   const second = await fixture(t);
   await second.motor.importContinuity(pack);
-  assert.equal((await second.motor.searchConversations({ query: 'sol' })).total, 1);
+  assert.equal((await second.motor.searchConversations({ mode: 'palabras', query: 'sol' })).total, 1);
   await fs.unlink(path.join(base, CONVERSATION_INDEX));
-  assert.equal((await motor.searchConversations({ query: 'sol' })).total, 1);
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: 'sol' })).total, 1);
   await other.retireContinuity(first.id);
-  assert.equal((await motor.searchConversations({ query: 'sol' })).total, 0);
+  assert.equal((await motor.searchConversations({ mode: 'palabras', query: 'sol' })).total, 0);
 });
 
 test('registros corruptos no conservan resultados antiguos en el índice', async t => {
   const { motor, base } = await fixture(t);
   const item = await saved(motor, 'Marcador CAMPO.');
-  await motor.searchConversations({ query: 'campo' });
+  await motor.searchConversations({ mode: 'palabras', query: 'campo' });
   const source = path.join(base, 'continuity-' + item.id + '.json');
   await fs.writeFile(source, 'invalido');
-  const result = await motor.searchConversations({ query: 'campo' });
+  const result = await motor.searchConversations({ mode: 'palabras', query: 'campo' });
   assert.equal(result.total, 0);
   assert.equal(result.index.omitted, 1);
   await assert.rejects(motor.getConversation(item.id), { code: 'RECORD_CORRUPT' });
@@ -146,14 +146,14 @@ test('herramientas requieren continuidad y una referencia no concede lectura de 
   const f = await agentFixture(t);
   const session = await f.open();
   const call = f.agent(session, connection());
-  assert.equal((await call('conversaciones_buscar', { consulta: 'x' })).code, 'ACCESS_NOT_GRANTED');
+  assert.equal((await call('conversaciones_buscar', { modo: 'palabras', consulta: 'x' })).code, 'ACCESS_NOT_GRANTED');
   assert.equal((await call('conversacion_guardar', { titulo: 'x', importante: 'x' })).code, 'ACCESS_NOT_GRANTED');
   await session.policy.setContinuity(['leer','registrar'], { channel: 'administracion-local' });
   const created = await call('conversacion_guardar', { titulo: 'Brisa', importante: '23 unidades. Clave ABC.',
     referencias: [{ ubicacion: '/no-autorizado/resumen.md' }] });
   assert.equal(created.isError, false, created.text);
   const item = created.data.conversacion;
-  assert.equal((await call('conversaciones_buscar', { consulta: 'clave abc' })).data.total, 1);
+  assert.equal((await call('conversaciones_buscar', { modo: 'palabras', consulta: 'clave abc' })).data.total, 1);
   assert.equal((await call('conversacion_leer', { id: item.id })).data.conversacion.importante, item.importante);
   assert.equal((await session.motor.listAuthorizedFolders()).length, 0);
   await session.policy.setContinuity(['leer'], { channel: 'administracion-local' });
@@ -189,13 +189,13 @@ test('MCP real expone las herramientas, persiste entre procesos y recupera solo 
   const id = created.data.conversacion.id;
   assert.equal((await first.close()).code, 0);
   const second = start(); await second.initialize();
-  const found = await second.call('conversaciones_buscar', { consulta: 'sierra' });
+  const found = await second.call('conversaciones_buscar', { modo: 'palabras', consulta: 'sierra' });
   assert.equal(found.data.total, 1, found.text);
   assert.equal(found.data.conversaciones[0].id, id);
   assert.equal(Object.hasOwn(found.data.conversaciones[0], 'importante'), false);
   assert.equal((await second.call('conversacion_leer', { id })).data.conversacion.importante,
     'Confirmado: código SIERRA, 23 unidades.');
   assert.equal((await second.call('conversacion_guardar', { id, revision: 1, importante: 'Vigente: código MAR.' })).isError, false);
-  assert.equal((await second.call('conversaciones_buscar', { consulta: 'sierra' })).data.total, 0);
-  assert.equal((await second.call('conversaciones_buscar', { consulta: 'mar' })).data.total, 1);
+  assert.equal((await second.call('conversaciones_buscar', { modo: 'palabras', consulta: 'sierra' })).data.total, 0);
+  assert.equal((await second.call('conversaciones_buscar', { modo: 'palabras', consulta: 'mar' })).data.total, 1);
 });

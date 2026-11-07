@@ -221,7 +221,7 @@ movimiento ni eliminación. Detalles en
 
 ## Conversaciones como elementos
 
-Mind puede conservar una conversación con título, información importante y referencias a recursos en distintas ubicaciones. El agente usa `conversacion_guardar`, `conversaciones_buscar` y `conversacion_leer` para recordar sin cargar todo el historial. La búsqueda de contenido se indexa localmente y conserva los permisos de continuidad. Ver [Conversaciones](docs/CONVERSACIONES.md).
+Mind puede conservar una conversación con título, información importante y referencias a recursos en distintas ubicaciones. El agente usa `conversacion_guardar`, `conversaciones_buscar` y `conversacion_leer` para recordar sin cargar todo el historial. La conservación es personalizable: esencial predeterminado, detallado, manual o reglas propias, con excepciones por conversación. La búsqueda híbrida combina palabras y significado local; prepara los vectores en segundo plano y conserva los permisos de continuidad. Ver [Conversaciones](docs/CONVERSACIONES.md).
 
 ## Continuidad entre agentes — Función 05
 

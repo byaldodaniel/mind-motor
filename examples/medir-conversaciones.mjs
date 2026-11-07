@@ -16,13 +16,13 @@ try {
       project: 'Proyecto ' + (i % 10) });
   }
   const start = performance.now();
-  const cold = await motor.searchConversations({ query: 'clave42' });
+  const cold = await motor.searchConversations({ mode: 'palabras', query: 'clave42' });
   const coldMs = performance.now() - start;
   assert.equal(cold.total, 1);
   const samples = [];
   for (let i = 0; i < 20; i++) {
     const before = performance.now();
-    const found = await motor.searchConversations({ query: 'clave' + (i * 43) });
+    const found = await motor.searchConversations({ mode: 'palabras', query: 'clave' + (i * 43) });
     samples.push(performance.now() - before);
     assert.equal(found.total, 1);
     assert.equal(found.index.read, 0);
