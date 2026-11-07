@@ -160,3 +160,15 @@ Estas órdenes se registran mediante `src/commands/index.js`.
 ## Almacén de conversaciones y resultados
 
 La instalación crea `Conversaciones/` junto a `Base/` en la primera sesión. Es contenido del usuario: memorias importantes y resultados nuevos predeterminados. Se puede elegir otro almacén general, por tipo, por proyecto o por conversación mediante el agente. El manifiesto y las actualizaciones excluyen `Conversaciones/`; Base/Motor/Runtime mantienen sus protecciones. No se añade una carpeta Trabajo. La ubicación del historial nativo de cada cliente sigue bajo control de ese cliente.
+
+## Inicio automático en los agentes
+
+El primer uso del iniciador de una instalación prepara un bloque de instrucciones en los clientes detectados: Codex (`CODEX_HOME/AGENTS.md`, o su override activo), Claude Code (`~/.claude/CLAUDE.md`) y Antigravity (`~/.gemini/GEMINI.md`). Los clientes cargan esas reglas al iniciar conversaciones conforme a sus mecanismos propios. No se cambian configuraciones MCP globales, autenticación ni permisos de seguridad.
+
+El bloque ordena consultar `destinos_consultar` antes de trabajar; cuando MCP no está disponible utiliza el Node incluido y `Motor/bin/mind.js inicio` desde el proyecto abierto. La orden devuelve las instrucciones de Mind y su plan de destinos sin argumentos JSON. Las preferencias de proyecto se consultan cuando el agente conoce el proyecto; no se inventa un nombre por la carpeta.
+
+La preparación conserva texto fuera de su bloque, evita duplicados, respeta el override de Codex y actualiza solo su ruta al mover la instalación. Los archivos enlazados, especiales, excesivos o bloques ambiguos se dejan intactos y se informa estado parcial. `mind preparar` muestra el resultado por cliente. Los perfiles ausentes no se crean.
+
+Las pruebas y automatizaciones pueden usar `MIND_AGENT_STARTUP=0` para omitir escrituras globales; esta variable no concede acceso a originales. Las pruebas de Mind la fijan para aislar sus instalaciones ficticias. El arranque guía al agente; no garantiza obediencia a instrucciones que un administrador o un proyecto haya sustituido.
+
+Referencias del mecanismo: [Codex](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [Claude Code](https://code.claude.com/docs/en/memory), [Antigravity](https://antigravity.google/docs/rules-workflows).

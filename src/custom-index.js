@@ -297,15 +297,16 @@ export function createCustomIndexes({ session }) {
  * poco después de que cambie su carpeta, mientras la sesión está abierta. Las
  * escrituras del propio CSV no provocan otra actualización.
  */
-export function createCustomIndexExtension(session) {
-  const indexes = createCustomIndexes({ session });
+export function createCustomIndexExtension(session, {indexes=createCustomIndexes({session}),debounceMs=1500}={}) {
   const timers = new Map();
   let unsubscribe = null;
-  const DEBOUNCE_MS = 1500;
+  const pending = new Set();
+  let closed = false;
   return {
     async start() {
       unsubscribe = session.onChanges(async ({ folderId, changes }) => {
         for (const definition of await indexes.list()) {
+          if (closed) return;
           if (definition.update !== 'al_cambiar' || definition.source.folderId !== folderId || definition.problems.length > 0) continue;
           const own = definition.destination.folderId === folderId ? definition.destination.relativePath : null;
           const touched = [...changes.added, ...changes.modified, ...changes.removed].some((item) => item !== own);
@@ -313,17 +314,22 @@ export function createCustomIndexExtension(session) {
           clearTimeout(timers.get(definition.id));
           const timer = setTimeout(() => {
             timers.delete(definition.id);
-            indexes.regenerate(definition.id).catch((error) => session.log('aviso', 'No se pudo actualizar un índice personalizado', { indice: definition.id, codigo: error.code ?? null }));
-          }, DEBOUNCE_MS);
+            if (closed) return;
+            const task=indexes.regenerate(definition.id).catch((error) => session.log('aviso', 'No se pudo actualizar un índice personalizado', { indice: definition.id, codigo: error.code ?? null }));
+            pending.add(task);
+            task.finally(()=>pending.delete(task));
+          }, debounceMs);
           timer.unref?.();
           timers.set(definition.id, timer);
         }
       });
     },
     async close() {
+      closed = true;
       unsubscribe?.();
       for (const timer of timers.values()) clearTimeout(timer);
       timers.clear();
+      await Promise.allSettled([...pending]);
     },
   };
 }

@@ -19,10 +19,10 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
   const policy = {
     ...session.policy,
     async get(id) {
-      if (!active || reduced.has(id)) return session.policy.get(id);
+      if (reduced.has(id)) return session.policy.get(id);
       const generation = grants.get(id);
       const folder = await session.motor.getAuthorizedFolder(id);
-      if(!grants.has(id))return await isDestination(folder) ? session.policy.get(id) : null;
+      if(!grants.has(id))return !active || await isDestination(folder) ? session.policy.get(id) : null;
       if(!folder || folder.generation !== generation)return null;
       return { folderId: id, access: Object.fromEntries(ACCESS_LEVELS.map(x => [x, true])), channel: 'carpeta-abierta' };
     },
@@ -31,7 +31,7 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
       return session.policy.set(id, access, options);
     },
     async getContinuity() {
-      return active && grants.size > 0 ? { leer: true, registrar: true, channel: 'carpeta-abierta' } : session.policy.getContinuity();
+      return grants.size > 0 ? { leer: true, registrar: true, channel: 'carpeta-abierta' } : session.policy.getContinuity();
     },
   };
   const scopedSession = {
@@ -80,7 +80,7 @@ export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd()
           try {candidates=[await validateCandidateFolder(cwd,session.layout)];}catch{}
         }
         if(candidates.length>0 || userDataDirectory) {
-          active=true;ready=replace(candidates);await ready;
+          active=candidates.length>0;ready=replace(candidates);await ready;
         }
       }
     },

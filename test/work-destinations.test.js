@@ -110,3 +110,20 @@ test('un proyecto puede usar otro almacén autorizado fuera de la raíz abierta 
  await f.session.policy.set(external.id,['encontrar'],{channel:'administracion-local'});
  await assert.rejects(tools.call('crear',{ruta:'otro.txt',contenido:'No.',proyecto:'Brisa'},{}),{code:'ACCESS_NOT_GRANTED'});
 });
+
+test('el almacén predeterminado conserva el flujo manual fuera de un proyecto abierto',async t=>{
+ const f=await agentFixture(t);const layout={...f.layout,userDataDirectory:path.join(f.mind,'Conversaciones')};
+ const session=await f.open({layout});
+ const workspace=createWorkspaceAccess(session,{paths:[],cwd:f.mind});
+ const conn=connection({onElicit:()=>({action:'accept',content:{acceso:'completo'}})});
+ await workspace.initialize(conn);
+ assert.equal(workspace.active(),false);
+ await workspace.beforeCall('solicitar_acceso',{ruta:f.folder,acceso:'completo'});
+ const tools=createAgentTools({session:workspace.session,connection:conn});
+ const accepted=await tools.call('solicitar_acceso',{ruta:f.folder,acceso:'completo'},{});
+ assert.equal(accepted.estado,'autorizado');
+ const created=await tools.call('crear',{ruta:'otra.txt',contenido:'Dato ficticio.',destino:path.join(f.folder,'otra.txt')},{});
+ assert.equal(created.ruta_absoluta,path.join(f.folder,'otra.txt'));
+ const fallback=await tools.call('crear',{ruta:'predeterminado.txt',contenido:'Dato ficticio.'},{});
+ assert.equal(fallback.ruta_absoluta,path.join(layout.userDataDirectory,'predeterminado.txt'));
+});

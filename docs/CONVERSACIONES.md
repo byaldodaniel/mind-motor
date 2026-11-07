@@ -117,3 +117,7 @@ El registro separado conversation-results-<id>.json evita cambiar la revisión d
 Los destinos elegidos deben estar abiertos o autorizados con permisos vigentes. La carpeta predeterminada es una excepción positiva y específica dentro del producto; Base, Motor y Runtime siguen protegidos. No se admiten enlaces como almacén predeterminado. El manifiesto del programa no puede incluir Base ni Conversaciones, de modo que las actualizaciones preservan los archivos del usuario.
 
 La política e interfaz de herramientas son comunes a los agentes; cada cliente debe leerlas y aplicarlas. No se interceptan escrituras de otras herramientas ni se reubica el historial interno del agente. Una prueba de un cliente no demuestra cumplimiento universal. Ver evidencia de pruebas físicas y continuidad en `docs/evidencia/DESTINOS_FISICOS_2026-11-07.md`.
+
+## Conversaciones nuevas sin repetir el prompt de Mind
+
+La instalación prepara instrucciones globales de los clientes detectados en su primer uso. El siguiente chat carga ese bloque y consulta Mind; sin MCP usa `inicio` desde la carpeta actual. Esta orden no necesita JSON y devuelve instrucciones y destinos. El agente mantiene la selección por proyecto/conversación y las preferencias de conservación. La preparación se puede revisar con `preparar`; los chats que ya estaban abiertos no necesariamente recargan sus instrucciones.

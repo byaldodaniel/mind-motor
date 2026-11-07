@@ -101,3 +101,7 @@ Solo por indicación del usuario, usa `destinos_configurar` para elegir un almac
 Usa `crear` o `crear_carpeta` con proyecto/conversacion. Para otras herramientas resuelve la ubicación con `destino_resolver` (`preparar:true`) y crea allí el archivo real. Si imponen un temporal autorizado, usa `resultado_importar`: copia por flujo sin enlaces, conserva el origen y devuelve huella SHA-256. Registra con `resultado_registrar` los archivos creados directamente. Si creaste archivos antes de la primera memoria, regístralos cuando obtengas su ID. Al retomar, `conversacion_leer` incluye sus resultados. Comprueba la ubicación física antes de anunciar guardado.
 
 Esta política guía al agente. Mind no intercepta escrituras arbitrarias realizadas por otras aplicaciones ni cambia la ubicación del historial interno del cliente.
+
+## Arranque fuera de esta carpeta
+
+El iniciador prepara reglas globales de los clientes detectados en el primer uso. En un chat nuevo, consulta `destinos_consultar` antes de trabajar; si no hay MCP, ejecuta el Node incluido con `Motor/bin/mind.js inicio` desde la carpeta actual, sin cambiar de proyecto. La respuesta contiene las instrucciones y destinos que debes aplicar. No pidas al usuario pegar este prompt en cada conversación. `preparar` permite revisar el resultado por cliente; el programa conserva las reglas existentes.

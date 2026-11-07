@@ -5,6 +5,8 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
+// Las instalaciones ficticias nunca cambian el perfil real del ejecutor.
+process.env.MIND_AGENT_STARTUP = '0';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';

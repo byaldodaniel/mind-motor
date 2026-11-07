@@ -11,7 +11,7 @@ for (const [command, args] of [
   [process.platform === 'win32' ? 'python' : 'python3', ['-I', '-B', 'test/native_organizer_test.py']],
   [process.platform === 'win32' ? 'python' : 'python3', ['-I', '-B', 'test/native_result_copy_test.py']],
 ]) {
-  const result = spawnSync(command, args, { stdio: 'inherit', windowsHide: true });
+  const result = spawnSync(command, args, { stdio: 'inherit', windowsHide: true, env:{...process.env,MIND_AGENT_STARTUP:'0'} });
   if (result.error) console.error(result.error.message);
   // Se ejecutan todas las suites aunque una falle, para ver todos los diagnósticos.
   if (result.status !== 0) failed.push(args.at(-1));

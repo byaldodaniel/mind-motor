@@ -9,20 +9,11 @@ La carpeta `Base` conserva los índices y la continuidad de tus trabajos.
 1. **Extrae el ZIP de Mind** en una carpeta tuya. El mismo ZIP sirve para
    Windows x64, Mac Intel y Apple Silicon y Linux x64 y ARM64 con glibc.
    Mind trae los ejecutores de Node.js y Python y elige el de tu equipo.
-2. **Abre la carpeta Mind en tu agente** y pídele que use Mind. El iniciador
-   prepara automáticamente la conexión. Si lo abres desde la terminal,
-   puedes usar la orden de preparación de la tabla. En Claude Code, vuelve a
-   abrir la carpeta si ya estaba abierta antes de preparar la conexión.
-3. **Pídele lo que necesites**: buscar archivos, leer documentos, organizar carpetas o continuar tareas anteriores.
+2. **Abre la carpeta Mind en tu agente una primera vez.** El iniciador prepara su conexión y añade un bloque breve a las instrucciones globales de Codex, Claude Code y Antigravity que detecte en tu perfil. Conserva tus reglas anteriores. El agente puede ejecutarlo por ti; no necesitas editar configuraciones.
+3. **Empieza una conversación nueva.** El cliente carga sus instrucciones globales y el agente consulta Mind antes de trabajar. También funciona al abrir otros proyectos, mediante MCP cuando esté conectado o con el iniciador incluido.
+4. **Pídele lo que necesites.** Sin otra preferencia, los resultados y lo importante de las conversaciones se guardan en `Conversaciones/`, junto a `Base/`. Puedes elegir otro destino general, por tipo, por proyecto o por conversación.
 
-Si abres el agente sobre otro proyecto, pídele que use Mind en esa carpeta.
-El iniciador acepta `--carpeta` con la ruta absoluta del proyecto. El acceso
-completo de la carpeta abierta dura la sesión.
-
-| Sistema | Preparación desde la carpeta Mind | Ayuda |
-|---|---|---|
-| Windows (PowerShell) | `.\mind.cmd preparar` | `.\mind.cmd ayuda` |
-| macOS y Linux | `./mind preparar` | `./mind ayuda` |
+Los chats ya abiertos pueden necesitar una conversación o sesión nueva para cargar instrucciones. Si mueves la carpeta Mind, vuelve a abrir su iniciador para actualizar la ruta. El arranque no instala un servicio permanente ni modifica los permisos de seguridad del cliente. Las restricciones de tu organización o las instrucciones específicas de un proyecto pueden limitarlo.
 
 En Mac, macOS puede mostrar un aviso al abrir archivos descargados. Consulta
 el mensaje del sistema y confirma el origen de tu descarga antes de abrirlos.

@@ -23,6 +23,8 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs/promises';
+// Las instalaciones ficticias nunca cambian el perfil real del ejecutor.
+process.env.MIND_AGENT_STARTUP = '0';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -57,7 +59,9 @@ const HITO_A_TOOLS = ['estado', 'solicitar_acceso', 'retirar_acceso', 'buscar', 
   // Hito B: propiedades e índices personalizados.
   'propiedades', 'asignar_propiedades', 'indices_personalizados', 'crear_indice', 'actualizar_indice', 'modificar_indice', 'retirar_indice',
   'crear_respaldo', 'funciones', 'crear_funcion', 'modificar_funcion', 'retirar_funcion', 'ejecutar_funcion', 'activar_funcion',
-  'desactivar_funcion', 'historial_funcion'];
+  'desactivar_funcion', 'historial_funcion',
+ 'conversaciones_preparar','conversacion_preferencias','conversacion_configurar','conversacion_guardar','conversaciones_buscar','conversacion_leer',
+ 'destinos_consultar','destinos_configurar','destino_resolver','resultado_importar','resultado_registrar'];
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -135,6 +139,16 @@ async function launch({ clientInfo, onElicit = null } = {}) {
     clientInfo: clientInfo ?? { name: 'agente-de-prueba-A', version: '1.0' },
     onElicit,
   });
+  // Las operaciones antiguas del producto nombran explícitamente su carpeta
+  // de ensayo: ahora existe también el almacén predeterminado Conversaciones.
+  const call=client.call.bind(client);
+  client.call=(name,args={})=>{
+    const input={...args};
+    if(['leer','crear','editar','modificar','explorar','eliminados','mover','renombrar','crear_carpeta','borrar','asignar_propiedades','retirar_acceso','crear_indice'].includes(name))input.carpeta??=information;
+    if(name==='buscar')input.carpetas??=[information];
+    if(['crear','crear_carpeta'].includes(name))input.destino??=path.join(information,...input.ruta.split('/'));
+    return call(name,input);
+  };
   clients.push(client);
   return client;
 }
@@ -260,11 +274,11 @@ try {
   await step(7, 'Se genera su índice', SIMULATED, async () => {
     const status = await eventually(async () => {
       const value = (await session.call('estado')).data;
-      return value.carpetas[0]?.indice?.estado === 'vigente' ? value : null;
+      return value.carpetas.find(x=>x.ruta===information)?.indice?.estado === 'vigente' ? value : null;
     });
     check(status, 'El índice inicial no quedó vigente.');
-    check(status.carpetas[0].indice.archivos === 3, `Archivos indexados: ${status.carpetas[0].indice.archivos}`);
-    return status.carpetas[0].indice;
+    check(status.carpetas.find(x=>x.ruta===information).indice.archivos === 3, `Archivos indexados: ${status.carpetas.find(x=>x.ruta===information).indice.archivos}`);
+    return status.carpetas.find(x=>x.ruta===information).indice;
   });
 
   await step(8, 'El agente puede buscar y leer', SIMULATED, async () => {
@@ -362,7 +376,7 @@ try {
   await step(13, 'Organizar: crear carpetas, mover y renombrar sin reemplazar', SIMULATED, async () => {
     session = await launch({ onElicit: acceptAll, clientInfo: { name: 'agente-de-prueba-C', version: '3.0' } });
     await session.initialize();
-    folderB = (await session.call('estado')).data.carpetas[0].id;
+    folderB = (await session.call('estado')).data.carpetas.find(x=>x.ruta===information).id;
     check((await session.call('crear_carpeta', { ruta: 'Archivo' })).data.estado === 'creada', 'crear_carpeta');
     check((await session.call('crear_carpeta', { ruta: 'Archivo' })).data.error?.codigo === 'FILE_EXISTS', 'crear_carpeta no reemplaza');
     const moved = await session.call('mover', { desde: 'Proyectos/presupuesto-2026.md', hasta: 'Archivo/presupuesto-2026.md' });
@@ -496,7 +510,7 @@ try {
     session = await launch({ clientInfo: { name: 'agente-de-prueba-E', version: '1.0' } });
     await session.initialize();
     const status = (await session.call('estado')).data;
-    check(status.carpetas.length === 1 && status.carpetas[0].id === folderB, 'autorizaciones conservadas');
+    check(status.carpetas.length === 2 && status.carpetas.some(x=>x.id===folderB) && status.carpetas.some(x=>x.ruta===path.join(mind,'Conversaciones')), 'autorizaciones conservadas');
     check((await session.call('buscar', { propiedades: { estado: 'aprobado' } })).data.total === 1, 'propiedades conservadas');
     check((await session.call('continuidad_consultar', { texto: 'presupuesto' })).data.total === 1, 'continuidad conservada');
     check(JSON.stringify((await session.call('funciones')).data.funciones).includes('nota'), 'funciones conservadas');
@@ -513,11 +527,11 @@ try {
     const client = startMcp({ command: node, commandArgs: [path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project, baseEnv: isolatedEnv(), capabilities: {} });
     clients.push(client);
     await client.initialize();
-    check(!(await client.call('leer', { ruta: 'nota.txt' })).isError, 'Leer sin autorización adicional');
+    check(!(await client.call('leer', { carpeta:project,ruta: 'nota.txt' })).isError, 'Leer sin autorización adicional');
     check(!(await client.call('crear', { ruta: 'resultado.txt', contenido: 'Resultado ficticio' })).isError, 'Crear sin autorización adicional');
     check(!(await client.call('continuidad_registrar', { contenido: 'Prueba de carpeta abierta' })).isError, 'Continuidad sin autorización adicional');
     check(client.elicitations.length === 0, 'No debe pedir formularios de acceso');
-    check((await client.call('estado')).data.carpetas.length === 1, 'El ámbito es solo el proyecto abierto');
+    check((await client.call('estado')).data.carpetas.length === 2, 'El ámbito es el proyecto abierto y Conversaciones');
     check((await client.close()).code === 0, 'Cierre limpio');
     return { formularios: 0 };
   });
