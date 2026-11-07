@@ -43,6 +43,7 @@ const harness = 'pruebas-mind.zip';
 const harnessFile = path.join(output, harness);
 execFileSync('git', ['archive', '--format=zip', '--output', harnessFile, commit, 'package.json', 'src',
   'test/helpers/mcp-client.js', 'scripts/probar-paquete.mjs', 'scripts/producto-12-casos.mjs',
+  'scripts/probar-continuidad-nueva.mjs',
   'scripts/producto-actualizacion-automatica.mjs', 'scripts/producto-cuarentena-macos.mjs'], { cwd: root });
 
 const name = `Mind-${version}-universal.zip`;

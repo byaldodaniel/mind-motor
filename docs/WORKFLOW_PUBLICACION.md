@@ -8,29 +8,48 @@ o Linux x64 y ARM64 con glibc. El primer arranque prepara la conexión del agent
 
 El manifiesto enumera los cinco destinos en `targets`. Conserva `win32/x64`
 como identificador principal y los ejecutores de Windows en sus rutas previas
-para que la instalación pública 1.0.1 pueda recibir el mismo ZIP firmado.
+para que las instalaciones públicas anteriores reciban el mismo ZIP firmado.
 
 ## Preparar y validar
 
-1. Desde un commit limpio, ejecutar
+La comprobación de una entrega se centra en las funcionalidades de Mind y en la
+integridad del ZIP universal. Se ejecuta en un entorno disponible; el informe
+identifica ese entorno. La distribución incluye los cinco runtimes previstos
+en un mismo archivo, y su integridad se comprueba mediante el manifiesto.
+
+1. Desde un commit limpio, preparar el componente semántico fijado con
+   `node scripts/preparar-semantica.mjs` y ejecutar
    `node scripts/preparar-paridad.mjs <carpeta-nueva> --reproducibilidad`.
    Se necesita Git, Node 24 y Python 3.12 en Windows o `xz` en Linux/macOS.
    `MIND_COMPONENT_CACHE` puede indicar una caché de componentes existente.
-2. Guardar el ZIP de `candidatos/` y su SHA-256. `ensayo/` contiene una versión
-   superior para probar el actualizador. `matriz.json` referencia los mismos
-   dos ZIP en las cinco filas. La clave de producción permanece fuera de CI.
-3. Ejecutar `scripts/probar-paquete.mjs` sobre los mismos archivos y huellas en
-   los cinco destinos. Comprobar la extracción, el primer arranque, la conexión
-   por MCP, la lectura, la escritura y la actualización conservando Base.
-4. Probar también la actualización desde 1.0.1 Windows x64, con una Base de
-   prueba y el canal de ensayo firmado. Mantener datos reales fuera de CI.
-5. Confirmar el primer uso en ambos Mac tras la descarga normal con Gatekeeper
-   activo, y probar el programador nativo con la sesión de Mind cerrada.
-   Documentar la arquitectura y el entorno Linux ensayados.
+2. Conservar el único ZIP de entrega de `candidatos/` y su SHA-256. Comprobar
+   que las dos construcciones reproducibles coinciden y que el manifiesto
+   declara los cinco destinos, con componentes, licencias y huellas correctas.
+   `ensayo/` contiene una versión superior ficticia para probar el actualizador;
+   no es otra entrega para los usuarios. `matriz.json` conserva la relación de
+   destinos y referencia el mismo ZIP y SHA-256 en todas sus filas.
+3. Ejecutar una vez `scripts/probar-paquete.mjs` sobre ese ZIP y el ZIP de
+   actualización de ensayo, con las huellas exactas. Comprobar extracción,
+   primer uso, conexión MCP, lectura, escritura, continuidad, destinos físicos,
+   traslado de conversaciones y actualización conservando la Base.
+4. Comprobar la actualización desde la estable anterior sobre una instalación
+   ficticia, preservando Base, permisos, funciones y archivos del usuario.
+   Conservar los informes con commit, huella del ZIP, entorno y resultado.
+5. Revisar las funcionalidades afectadas y cualquier incidencia concreta que
+   revelen las comprobaciones. El criterio de preparación de esta entrega no
+   exige repetir la batería en cada sistema operativo ni una matriz de cinco
+   ejecuciones nativas.
 
-La matriz privada manual consume la cuota de `mind-motor`. Los ejecutores
-estándar de `mind-updates` sirven para la validación gratuita de un borrador.
-Sus informes deben identificar el commit y la huella del mismo ZIP universal.
+El flujo privado `.github/workflows/paquetes.yml` construye el ZIP universal y
+lo comprueba en un único entorno funcional Ubuntu 24.04. El flujo de núcleo usa
+el mismo criterio de un solo entorno. Las comprobaciones locales pueden usar el
+entorno disponible, conservando la misma identidad del artefacto. Un bloqueo de
+cuota o facturación de GitHub se registra como una limitación del servicio de CI;
+las comprobaciones funcionales locales y la preparación del ZIP pueden continuar.
+
+Los informes históricos por sistema se conservan como evidencia de su momento.
+No constituyen un requisito adicional para la entrega actual. La clave de
+producción permanece fuera de CI.
 
 ## Publicar después de la revisión
 

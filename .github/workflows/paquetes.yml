@@ -12,7 +12,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.22.1
-      - run: node scripts/preparar-paridad.mjs dist
+      - name: Preparar componente semántico fijado
+        run: node scripts/preparar-semantica.mjs
+      - name: Construir y comprobar reproducibilidad del ZIP universal
+        run: node scripts/preparar-paridad.mjs dist --reproducibilidad
       - uses: actions/upload-artifact@v4
         with:
           name: mind-universal-para-validar
@@ -25,19 +28,11 @@ jobs:
           if-no-files-found: error
   probar:
     needs: construir
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: windows-2025, target: win32-x64 }
-          - { os: macos-15, target: darwin-arm64 }
-          - { os: macos-15-intel, target: darwin-x64 }
-          - { os: ubuntu-24.04, target: linux-x64 }
-          - { os: ubuntu-24.04-arm, target: linux-arm64 }
-    runs-on: ${{ matrix.os }}
+    # Un entorno ejecuta las pruebas de funcionalidad sobre el ZIP universal.
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
-      MIND_TARGET: ${{ matrix.target }}
+      MIND_TARGET: linux-x64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,7 +46,7 @@ jobs:
           name: mind-universal-para-validar
           path: dist
       - run: npm test
-      - name: Probar los mismos archivos en el destino nativo
+      - name: Comprobar funcionalidades e integridad del ZIP universal
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -59,11 +54,14 @@ jobs:
           $actual = node -p "process.platform + '-' + process.arch"
           if ($actual -ne $env:MIND_TARGET) { throw 'El ejecutor no corresponde al destino' }
           $matrix = Get-Content dist/matriz.json -Raw | ConvertFrom-Json
+          $archives = @($matrix.paquetes | ForEach-Object { $_.paquete.name + '|' + $_.paquete.sha256 } | Select-Object -Unique)
+          $upgrades = @($matrix.paquetes | ForEach-Object { $_.actualizacion.name + '|' + $_.actualizacion.sha256 } | Select-Object -Unique)
+          if ($archives.Count -ne 1 -or $upgrades.Count -ne 1) { throw 'Los destinos deben compartir el mismo ZIP y huella' }
           $row = $matrix.paquetes | Where-Object plataforma -eq $env:MIND_TARGET
           node scripts/probar-paquete.mjs "dist/candidatos/$($row.paquete.name)" "dist/ensayo/$($row.actualizacion.name)" $row.paquete.sha256 $row.actualizacion.sha256 dist/informes
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: informe-${{ matrix.target }}
+          name: informe-funcional-universal
           path: dist/informes/*.json
           if-no-files-found: warn

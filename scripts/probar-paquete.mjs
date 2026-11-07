@@ -45,6 +45,10 @@ try {
   report.commit = manifest.builtFrom;
   const { nodeExecutable: node } = productRuntime(mind, manifest);
 
+  const newUser = run(node, './probar-continuidad-nueva.mjs', ['--mind', mind, '--informe', path.join(temporary, 'usuario-nuevo.json')]);
+  const newUserReport = await readReport('usuario-nuevo.json');
+  report.usuario_nuevo = newUserReport;
+
   const auto = run(node, './producto-actualizacion-automatica.mjs', [mind, path.resolve(update), path.join(temporary, 'auto.json')]);
   const autoReport = await readReport('auto.json');
   report.actualizacion_automatica = {
@@ -70,7 +74,7 @@ try {
     report.primera_apertura_grafica = 'pendiente de comprobación independiente';
   }
 
-  if (!auto || !product || !allRequired || !quarantine) throw new Error(`Pruebas de producto incompletas en ${platform}.`);
+  if (!newUser || newUserReport.resultado !== 'superado' || !auto || !product || !allRequired || !quarantine) throw new Error(`Pruebas de producto incompletas en ${platform}.`);
   report.resultado = 'superado';
 } finally {
   await fs.mkdir(reportDir, { recursive: true });
