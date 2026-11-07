@@ -149,13 +149,15 @@ test('herramientas requieren continuidad y una referencia no concede lectura de 
   assert.equal((await call('conversaciones_buscar', { modo: 'palabras', consulta: 'x' })).code, 'ACCESS_NOT_GRANTED');
   assert.equal((await call('conversacion_guardar', { titulo: 'x', importante: 'x' })).code, 'ACCESS_NOT_GRANTED');
   await session.policy.setContinuity(['leer','registrar'], { channel: 'administracion-local' });
+  const work = await session.motor.authorizeFolder(f.folder);
+  await session.policy.set(work.id,['encontrar','leer','escribir','organizar'],{channel:'administracion-local'});
   const created = await call('conversacion_guardar', { titulo: 'Brisa', importante: '23 unidades. Clave ABC.',
     referencias: [{ ubicacion: '/no-autorizado/resumen.md' }] });
   assert.equal(created.isError, false, created.text);
   const item = created.data.conversacion;
   assert.equal((await call('conversaciones_buscar', { modo: 'palabras', consulta: 'clave abc' })).data.total, 1);
   assert.equal((await call('conversacion_leer', { id: item.id })).data.conversacion.importante, item.importante);
-  assert.equal((await session.motor.listAuthorizedFolders()).length, 0);
+  assert.equal((await session.motor.listAuthorizedFolders()).length, 1);
   await session.policy.setContinuity(['leer'], { channel: 'administracion-local' });
   assert.equal((await call('conversacion_guardar', { id: item.id, revision: 1, importante: 'tarde' })).code, 'ACCESS_NOT_GRANTED');
   assert.equal((await call('conversacion_leer', { id: item.id })).isError, false);

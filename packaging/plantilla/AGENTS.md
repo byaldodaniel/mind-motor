@@ -88,3 +88,7 @@ Conserva la información importante elegida por el usuario con `conversacion_gua
 ## Conversaciones personalizables
 
 Antes de guardar consulta `conversacion_preferencias`. Predeterminado esencial: decisiones y motivos, correcciones vigentes, resultados y ubicaciones, pendientes y siguiente paso; actualizar ante cambios relevantes o al completar etapas. Detallado conserva contexto adicional; manual solo guarda por petición expresa (`solicitado:true`); personalizado sigue las reglas del usuario. `conversacion_configurar` cambia la general o una excepción por conversación solo cuando el usuario lo pida. `preferencias:null` restaura herencia. La búsqueda predeterminada de conversaciones es híbrida y local; comprobar `semantica.estado`, y leer la fuente por ID antes de usarla. El motor no captura el historial ni redacta resúmenes por sí mismo.
+
+## Ubicación de la memoria de conversaciones
+
+`conversacion_guardar` escribe el resumen importante en un .md real. Usa `destino` si el usuario elige un archivo; `conversacion_configurar` admite `preferencias.carpeta_destino` para nuevos archivos. Sin indicación, conserva el archivo previo o usa `Conversaciones` dentro de la única carpeta de trabajo con lectura y escritura. Informa la ruta que devuelve `archivo`. `pendiente_archivo` no significa guardado completo. Los recursos multimedia mantienen sus destinos propios. No necesitas copiar el historial nativo: conserva lo importante según las preferencias y las indicaciones del usuario.

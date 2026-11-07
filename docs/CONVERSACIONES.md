@@ -84,3 +84,22 @@ Se rechazan enlaces al índice. Los registros corruptos se omiten sin conservar 
 `node examples/evaluar-busqueda-hibrida.mjs 1000` compara palabras e híbrida sobre 1000 conversaciones ficticias: 20 paráfrasis de calibración, 10 consultas independientes fijadas antes de probarlas, 20 consultas por términos, seis códigos exactos, cuatro consultas ajenas y una actualización con dato al final de un texto largo. Informa Recall@3, MRR@3, primera indexación, mediana/p95 caliente, RSS de proceso y tamaño de índice. Espera la preparación desde la API administrativa de prueba (no exige un comando al usuario), y exige semántica activa, al menos 80% de Recall@3 en las 10 consultas independientes, mejora de recuperación, códigos preservados y p95 caliente inferior a un segundo. Informa por separado si se cumplió el objetivo exploratorio de 85% en el conjunto de calibración; no se oculta cuando falla. El conjunto de calibración se usó para comparar modelos y no es una prueba independiente. Es un corpus sintético, no una garantía de calidad o latencia universal.
 
 La instalación personal y la estable no se actualizan por desarrollar este incremento. Publicar requiere completar el algoritmo de actualización y publicación, con validación del paquete y los sistemas de la distribución universal.
+
+## Archivo de memoria y destino predeterminado
+
+Cada llamada correcta a conversacion_guardar escribe la información importante en un Markdown real y conserva su ruta en el elemento indexado (campo archivo). El agente redacta lo importante conforme a las preferencias. El historial nativo completo no forma parte de este requisito.
+
+- destino: archivo .md absoluto elegido por el usuario para esa conversación.
+- preferencias.carpeta_destino: carpeta absoluta preferida para archivos de conversaciones nuevas, configurable general o por conversación junto con el modo de conservación.
+- Si no se indica destino, una conversación existente conserva su archivo.
+- Para una conversación nueva sin preferencia, se usa Conversaciones/conversacion-<uuid>.md dentro de la única carpeta abierta/autorizada con lectura y escritura. Se crean los directorios necesarios con las operaciones seguras de Mind. Si no hay una carpeta inequívoca, se solicita indicar destino en lugar de elegir una ubicación arbitraria.
+
+Ejemplo: conversacion_guardar con titulo, importante y destino igual a la ruta del .md que el usuario desea en su Escritorio. Los otros recursos pueden mantenerse en ubicaciones independientes mediante referencias.
+
+Al retomar con otro agente o sesión, conversaciones_buscar y conversacion_leer recuperan el mismo ID, contenido vigente y archivo. Actualizar con id y revision modifica ese mismo Markdown. Elegir otro destino explícitamente crea el nuevo archivo y conserva el anterior; no borra archivos ni interpreta la ruta como permiso.
+
+Los destinos deben estar en carpetas autorizadas/abiertas. Se reutilizan las herramientas de creación, modificación por versión y organización. Un archivo ajeno existente o una edición externa del Markdown provoca CONVERSATION_FILE_CONFLICT antes de cambiar la memoria. Debe revisarse esa edición con el usuario; no se sobrescribe automáticamente ni se sincroniza con el índice de contenido.
+
+La escritura del JSON de continuidad y del Markdown son dos operaciones: si falla el archivo después de guardar el elemento, la respuesta es pendiente_archivo, incluye ID, ruta e incidencia y no se anuncia guardado completo. El agente debe resolver esa incidencia antes de afirmar que se guardó en la ubicación elegida. La API interna saveConversation conserva su uso como núcleo de almacenamiento; la escritura del archivo se aplica en la herramienta de agente, donde están los permisos sobre originales.
+
+Prueba específica: node --test test/conversation-destinations.test.js. Comprueba carpeta predeterminada, archivo elegido, preferencia persistente, continuidad de ID/archivo con otra sesión, corrección de acuerdo, conflicto con edición externa, archivo ajeno intacto, modo manual sin crear carpetas y destino fuera de permisos rechazado.

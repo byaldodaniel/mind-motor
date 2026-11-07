@@ -15,13 +15,14 @@ const GUIDANCE = {
 };
 export function retention(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).some(k => !['mode','rules'].includes(k))
+      || Object.keys(value).some(k => !['mode','rules','directory'].includes(k))
       || !RETENTION_MODES.includes(value.mode) || typeof value.rules !== 'string'
       || !value.rules.isWellFormed() || value.rules.includes('\0') || Buffer.byteLength(value.rules) > 4096
       || (value.mode === 'personalizado' && !value.rules.trim())) {
     throw new MotorError('INVALID_CONVERSATION_PREFERENCES', 'Indica modo válido y reglas de hasta 4096 bytes; personalizado requiere reglas.');
   }
-  return { mode: value.mode, rules: value.rules };
+  if (value.directory !== undefined && (typeof value.directory !== 'string' || !path.isAbsolute(value.directory) || value.directory.includes('\0') || value.directory.length > 4096)) throw new MotorError('INVALID_CONVERSATION_PREFERENCES','carpeta_destino debe ser una ruta absoluta.');
+  return { mode: value.mode, rules: value.rules, ...(value.directory === undefined ? {} : {directory:value.directory}) };
 }
 export const describeRetention = value => ({ ...value, automatic: value.mode !== 'manual',
   guidance: GUIDANCE[value.mode], maxContentBytes: 64 * 1024 });

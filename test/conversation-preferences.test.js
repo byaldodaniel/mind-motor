@@ -75,6 +75,8 @@ test('MCP aplica permisos, manual y excepciones sin cambiar contenido', async t 
   const call = f.agent(session, connection());
   assert.equal((await call('conversacion_preferencias')).code, 'ACCESS_NOT_GRANTED');
   await session.policy.setContinuity(['leer','registrar'], { channel: 'administracion-local' });
+  const work = await session.motor.authorizeFolder(f.folder);
+  await session.policy.set(work.id,['encontrar','leer','escribir','organizar'],{channel:'administracion-local'});
   assert.equal((await call('conversacion_preferencias')).data.efectiva.modo, 'esencial');
   assert.equal((await call('conversacion_configurar', { revision: 0, preferencias: { modo: 'manual' } })).isError, false);
   assert.equal((await call('conversacion_guardar', { titulo: 'No guardar', importante: 'No.' })).code, 'CONVERSATION_MANUAL_ONLY');

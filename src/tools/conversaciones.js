@@ -1,3 +1,4 @@
+import { prepareConversationFile } from '../conversation-file.js';
 import { RETENTION_MODES } from '../conversation-preferences.js';
 import { MotorError } from '../errors.js';
 import { only, schema, text, integer, referencesIn } from './helpers.js';
@@ -6,25 +7,27 @@ function output(value) {
   return { id: value.id, revision: value.revision, creado: value.createdAt,
     actualizado: value.updatedAt, titulo: value.title, importante: value.important,
     proyecto: value.project, agente: value.agent, id_externo: value.externalId,
+    archivo: value.file ?? null,
     preferencias: value.preferences ? preferenceOut(value.preferences) : null,
     referencias: value.references.map(ref => ({
       ...(ref.entry ? { registro: ref.entry } : { ubicacion: ref.locator }),
       ...(ref.relation ? { relacion: ref.relation } : {}),
     })) };
 }
-const preferenceSchema = schema({ modo: { type: 'string', enum: RETENTION_MODES }, reglas: { type: 'string' } }, ['modo']);
+const preferenceSchema = schema({ modo: { type: 'string', enum: RETENTION_MODES }, reglas: { type: 'string' }, carpeta_destino: {type:'string',description:'Carpeta absoluta preferida para archivos .md nuevos, dentro de una ubicación autorizada.'} }, ['modo']);
 const preferenceIn = value => {
   if (value === null) return null;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new MotorError('INVALID_ARGUMENTS', 'Preferencias no válidas.');
-  only(value, ['modo','reglas']);
-  return { mode: value.modo, rules: value.reglas ?? '' };
+  only(value, ['modo','reglas','carpeta_destino']);
+  return { mode: value.modo, rules: value.reglas ?? '', ...(value.carpeta_destino === undefined ? {} : {directory:value.carpeta_destino}) };
 };
-const preferenceOut = value => ({ modo: value.mode, reglas: value.rules });
+const preferenceOut = value => ({ modo: value.mode, reglas: value.rules, ...(value.directory === undefined ? {} : {carpeta_destino:value.directory}) });
 const preferenceResult = value => ({ revision: value.revision, revision_conversacion: value.conversationRevision,
   general: preferenceOut(value.global), excepcion: value.override ? preferenceOut(value.override) : null,
   heredada: value.inherited, efectiva: { ...preferenceOut(value.effective), automatica: value.effective.automatic,
     indicaciones: value.effective.guidance, contenido_max_bytes: value.effective.maxContentBytes } });
 const fields = {
+  destino: {type:'string',description:'Archivo .md absoluto elegido por el usuario. Omitir conserva el anterior o usa el destino predeterminado de Mind.'},
   solicitado: { type: 'boolean', description: 'true solo si el usuario pidió este guardado expresamente. Obligatorio en modo manual. No acredita identidad.' },
   preferencias: preferenceSchema,
   id: { type: 'string', description: 'ID estable de Mind. Omitir para crear; conservarlo al retomar.' },
@@ -79,7 +82,8 @@ export function createConversationTools({ session }) {
         description: 'Antes de guardar consulta conversacion_preferencias. Registra una conversación como elemento o actualiza su información importante. Nueva: titulo e importante. Actualizar: id y revision leída. No exige carpeta ni copia el historial. Requiere continuidad leer y registrar.',
         inputSchema: schema(fields),
         annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false } },
-      async handler(args, { requireContinuity, source }) {
+      async handler(args, context) {
+        const {requireContinuity,source} = context;
         only(args, Object.keys(fields));
         await requireContinuity('leer', 'registrar');
         const input = { source };
@@ -96,7 +100,15 @@ export function createConversationTools({ session }) {
           }
           input.references = referencesIn(args.referencias);
         }
+        const before = args.id === undefined ? null : await motor.getConversation(args.id);
+        const policy = await motor.getConversationPreferences(args.id);
+        if ((policy.effective.mode === 'manual' || args.preferencias?.modo === 'manual') && args.solicitado !== true) throw new MotorError('CONVERSATION_MANUAL_ONLY','El usuario eligió guardar solo cuando lo indique.');
+        const file = await prepareConversationFile({motor,before,destination:args.destino,
+          directory:args.preferencias?.carpeta_destino ?? policy.effective.directory,context});
+        input.file = file.target;
         const value = await motor.saveConversation(input);
+        try { await file.write(value); }
+        catch(error) { return {estado:'pendiente_archivo',conversacion:output(value),archivo:{estado:'pendiente',ruta:file.target,codigo:error.code ?? 'WRITE_FAILED'},nota:'El elemento quedó en continuidad, pero el archivo no pudo actualizarse. No afirmar guardado completo.'}; }
         return { estado: args.id === undefined ? 'registrada' : 'actualizada', conversacion: output(value) };
       },
     },

@@ -34,6 +34,7 @@ function content(input) {
     important: text(input.important, 'important', { max: 64 * 1024 }),
     project: text(input.project, 'project', { nullable: true }),
     agent: text(input.agent, 'agent', { nullable: true }),
+    ...(input.file === undefined ? {} : { file: text(input.file, 'file', {max:4096}) }),
     externalId: text(input.externalId, 'externalId', { nullable: true, max: 512 }),
     ...(input.preferences == null ? {} : { preferences: retention(input.preferences) }),
   };
@@ -123,7 +124,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
   }
 
   async function saveConversationUnlocked(input) {
-    const allowed = ['id', 'expectedRevision', 'title', 'important', 'project', 'agent', 'externalId', 'references', 'source', 'preferences', 'explicit'];
+    const allowed = ['id', 'expectedRevision', 'title', 'important', 'project', 'agent', 'externalId', 'references', 'source', 'preferences', 'explicit', 'file'];
     if (!input || typeof input !== 'object' || Array.isArray(input)
         || Object.keys(input).some(key => !allowed.includes(key))) fail('INVALID_CONVERSATION', 'Campos de conversación no válidos.');
     if (input.explicit !== undefined && typeof input.explicit !== 'boolean') fail('INVALID_CONVERSATION', 'explicit debe ser booleano.');
@@ -148,7 +149,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     }
     // La lectura-modificación del JSON se coordina en continuidad, incluyendo
     // las escrituras hechas por las herramientas genéricas de continuidad.
-    const next = content(Object.fromEntries(['title', 'important', 'project', 'agent', 'externalId', 'preferences']
+    const next = content(Object.fromEntries(['title', 'important', 'project', 'agent', 'externalId', 'preferences', 'file']
       .map(key => [key, Object.hasOwn(input, key) ? input[key] : before[key]])));
     const entry = await continuity.updateContinuity(input.id, {
       content: next, ...(input.references !== undefined ? { references: input.references } : {}),
