@@ -35,7 +35,22 @@ Evidencia local externa al repositorio: Borradores/2026-11-07 - Cierre destinos 
 
 La copia usa bloques de 1 MiB y no carga el archivo binario entero en JavaScript. Esto acota el búfer de copia; no se presenta como una reducción medida de toda la memoria del motor. La optimización adicional del modelo semántico no está implementada en este cambio. Las mediciones de búsqueda y memoria del modelo permanecen documentadas en BUSQUEDA_HIBRIDA_2026-11-07.md.
 
-Antigravity abierto y detectado con Gemini 3.8 Flash High: la lectura por accesibilidad funciona. La captura devuelve window capture timed out, y el clic coordinate input geometry is unavailable. Intento de establecer el valor no dejó texto visible en accesibilidad. No se envió la prueba. El usuario aclaró que no pulsaba Escape; avisos anteriores de Escape no deben atribuirse como hecho a su acción. No se valida con esto la nueva versión en Gemini.
+El control automatizado inicial de Antigravity falló (captura timeout y clic sin geometría). El usuario aclaró que no pulsaba Escape; no atribuirle esos avisos como hecho. Después el usuario pegó manualmente el mensaje de prueba en Antigravity y compartió su informe. Esta ejecución posterior sí produjo resultados comprobables.
+
+## Continuidad Codex → Gemini en Antigravity
+
+El informe compartido por el usuario indica uso de bin/mind.js del checkout de desarrollo, con la misma Base y carpeta de ensayo, por consola. Recuperó sin recibir el acuerdo en el prompt: 31 cajas para lunes, fecha exacta sin especificar, pendiente confirmar transportista; mismo ID 2ae40fba-b960-4217-b06b-ea77b4548b92. Resolvió Brisa con excepción de proyecto y Aurora con herencia general.
+
+Comprobación independiente posterior en disco:
+- Brisa cambiado/antigravity-verificacion.md existe como archivo regular de 289 bytes, con el acuerdo vigente.
+- Brisa cambiado/antigravity-verificacion.svg existe como archivo regular de 1049 bytes, con el acuerdo vigente.
+- El registro de resultados pasó de seis a ocho: mantiene las seis entradas anteriores e incorpora ambas rutas con los tamaños reales.
+- La memoria permanece en revisión 3 y updatedAt 2026-11-07T20:34:26.513Z, anterior a ambas creaciones. El contenido vigente y su archivo siguen presentes.
+- La política permanece en revisión 2: una excepción de Brisa, configuración general intacta y ninguna excepción de Aurora.
+
+El informe registra cuatro intentos iniciales de CLI con INVALID_ARGUMENTS por las comillas de JSON en PowerShell. Se resolvieron con --%, tras lo cual reporta las operaciones correctas. Es fricción real del uso por consola; no se corrigió el parser en este cambio.
+
+Alcance: prueba asistida manualmente de Gemini en Antigravity utilizando la CLI de desarrollo y una Base compartida con Codex. No valida carga automática por MCP, selección sin instrucciones iniciales ni el paquete distribuido. No se midió latencia de búsqueda en esta ejecución ni se probaron imágenes generadas por un modelo visual o videos.
 
 Claude Code no queda validado con este incremento; la prueba previa del proveedor devolvió 403 oauth_not_allowed_for_organization. No se cambiaron cuentas ni autenticación para evitarlo.
 
