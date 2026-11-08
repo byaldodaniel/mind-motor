@@ -90,7 +90,7 @@ export async function verifyPackageDescriptor({ root, publicKey, expectedRelease
   const manifest = await readManifestFile(root);
   if (!manifest) throw fail('PACKAGE_DESCRIPTOR_INVALID', 'Falta el manifiesto de la entrega.');
   const release = requireRelease(manifest, descriptor);
-  const checked = await verifyTree(root, manifest, { allowUserState });
+  const checked = await verifyTree(root, manifest, { allowUserState, ignoreBytecode: allowUserState });
   if (!checked.ok) throw fail('UPDATE_PACKAGE_ALTERED', 'Los archivos del paquete no coinciden con su manifiesto firmado.');
   return { manifest, release, manifestSha256: descriptor.manifestSha256 };
 }

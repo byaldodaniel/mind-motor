@@ -130,7 +130,7 @@ async function recoveryWorker(work,pythonExecutable){
   await fs.cp(pyRoot,path.join(worker,'Python'),{recursive:true});
 }
 // Exact manifest bytes from previously verified public deliveries; a self-described tree is not provenance.
-const HISTORICAL_MANIFESTS = new Set(["ec878e961a38f83def1c9c8e09052410929a2147f9602060dd62f02fed357e8a","48a7b34364d85c525520ed29fea9e6f0329e349def9903b614c99c8bf0aae1a4", "eb438167fd9e9f51af42f4de156f12761a4e6336cd02da8bb9397ca419ed11c2", "c1ec1412d99902819e22a4bc17307f638cccd19386c22966b56290aec230b641"]);
+const HISTORICAL_MANIFESTS = new Set(["ec878e961a38f83def1c9c8e09052410929a2147f9602060dd62f02fed357e8a","48a7b34364d85c525520ed29fea9e6f0329e349def9903b614c99c8bf0aae1a4", "eb438167fd9e9f51af42f4de156f12761a4e6336cd02da8bb9397ca419ed11c2", "c1ec1412d99902819e22a4bc17307f638cccd19386c22966b56290aec230b641", "dfb3a0d0f94f9e373f9691002db3c79cd9fc3e4696ff011eee9d2b18982dbffe"]);
 async function cleanupObsolete(root,j){
   const live=new Set(groups(j.incomingManifest));live.add('.mcp.json');
   for(const op of j.operations){
@@ -159,11 +159,11 @@ async function cleanLegacy(root){
     }
     const m=await readManifestFile(packageRoot).catch(()=>null);
     if(!m||!HISTORICAL_MANIFESTS.has(await hashFile(productPaths(packageRoot,m).manifestFile))){preserved.push(name);continue;}
-    const verified=await verifyTree(packageRoot,m).catch(()=>({ok:false}));
+    const verified=await verifyTree(packageRoot,m,{ignoreBytecode:true}).catch(()=>({ok:false}));
     if(!verified.ok){preserved.push(name);continue;}
     if(staging){
       const prefix=path.relative(candidate,packageRoot).split(path.sep).join('/')+'/';
-      if((await scanTree(candidate)).some(e=>!e.path.startsWith(prefix))){preserved.push(name);continue;}
+      if((await scanTree(candidate)).some(e=>!e.path.startsWith(prefix)&&!/(?:^|\/)__pycache__\/[^/]+\.pyc$/iu.test(e.path))){preserved.push(name);continue;}
       const lock=path.join(root,'.mind-actualizacion.lock');
       if(await has(lock)&&!(await recoverAbandonedOwnerFile(lock))){preserved.push(name);continue;}
     }
@@ -280,7 +280,7 @@ export async function runUpdateTransaction(options,h){
       if(keep.has(item))continue;const live=resolve(root,item);if(!(await has(live)))continue;
       const stat=await fs.lstat(live);
       if(stat.isDirectory()){
-        const check=await verifyTree(root,current,{prefix:item});
+        const check=await verifyTree(root,current,{prefix:item,ignoreBytecode:true});
         if(check.problems.some(p=>p.problem==='sobrante'))throw error('UPDATE_UNMANAGED_CONTENT',`Hay archivos ajenos en ${item}; se conservan.`);
       }
       await durableMove(root,journalFile,j,live,path.join(work,'recuperacion',...item.split('/')),testing,{copy:stat.isFile()});
