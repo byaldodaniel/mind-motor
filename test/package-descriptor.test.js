@@ -44,3 +44,14 @@ test('revisión esperada no coincide y firma falsa se rechazan', async t => {
   await assert.rejects(verifyPackageDescriptor({ root: f.root, publicKey: f.key, expectedRelease: { packageRevision: 2 } }), { code: 'UPDATE_RELEASE_MISMATCH' });
   assert.throws(() => verifySignedPackageDescriptor({ ...f.envelope, signature: Buffer.alloc(64).toString('base64') }, f.key), { code: 'PACKAGE_SIGNATURE_INVALID' });
 });
+
+test('fuente ya abierta admite solo estado de usuario explicito; programa ajeno sigue rechazado', async t => {
+  const f = await fixture(t);
+  for (const relative of ['.mcp.json', 'Conversaciones/memoria.md', 'Sistema/Base/config.json', 'Sistema/Estado/sesiones/registro.json', 'Sistema/Actualizaciones/estado.json']) {
+    const file = path.join(f.root, relative); await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, '{}');
+  }
+  await assert.rejects(verifyPackageDescriptor({ root: f.root, publicKey: f.key }));
+  await verifyPackageDescriptor({ root: f.root, publicKey: f.key, allowUserState: true });
+  await fs.writeFile(path.join(f.root, 'Sistema/Programa/Motor/bin/inyectado.js'), 'extra');
+  await assert.rejects(verifyPackageDescriptor({ root: f.root, publicKey: f.key, allowUserState: true }), { code: 'UPDATE_PACKAGE_ALTERED' });
+});

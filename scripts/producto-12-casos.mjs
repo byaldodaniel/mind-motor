@@ -29,8 +29,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startMcp } from '../test/helpers/mcp-client.js';
-import { readManifestFile, verifyTree, describeProblems, supportsProductTarget } from '../src/product-files.js';
-import { productRuntime } from '../src/layout.js';
+import { readManifestFile, comparePackageVersions, verifyTree, describeProblems, supportsProductTarget } from '../src/product-files.js';
+import { productPaths, productRuntime } from '../src/layout.js';
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -121,13 +121,14 @@ function isolatedEnv() {
     if (!/^(path|node_options|node_path|pythonpath|pythonhome|pythonstartup|mind_base|mind_python)$/iu.test(key)) env[key] = value;
   }
   env[windows ? 'Path' : 'PATH'] = emptyBin;
+  env.MIND_UPDATE_RESTART = '1';
   return env;
 }
 
 function launchCommand(command) {
   return windows
-    ? run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" ${command}"`], { env: isolatedEnv(), verbatim: true })
-    : run(path.join(mind, 'mind'), [command], { env: isolatedEnv() });
+    ? run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(productPaths(mind, manifest).launcherDirectory, 'mind.cmd')}" ${command}"`], { env: isolatedEnv(), verbatim: true })
+    : run(path.join(productPaths(mind, manifest).launcherDirectory, 'mind'), [command], { env: isolatedEnv() });
 }
 
 /** Lanza el servidor tal como lo haría el agente a partir del .mcp.json de Mind. */
@@ -181,8 +182,8 @@ const SIMULATED = 'cliente MCP de prueba (simulación del agente y del usuario)'
 const PACKAGE = 'carpeta extraída';
 
 let information = path.join(temporary, 'Información ficticia');
-const base = path.join(mind, 'Base');
-let manifest = args.includes('--solo-conversaciones') ? await readManifestFile(mind) : null;
+let manifest = await readManifestFile(mind);
+const base = productPaths(mind, manifest).baseDirectory;
 let session = null;
 let baseId = null;
 
@@ -264,7 +265,7 @@ try {
   });
 
   await step(6, 'Se autoriza una carpeta ficticia (decisión del usuario)', SIMULATED, async () => {
-    const inside = await session.call('solicitar_acceso', { ruta: path.join(mind, 'Motor'), acceso: 'leer' });
+    const inside = await session.call('solicitar_acceso', { ruta: productPaths(mind, manifest).motorDirectory, acceso: 'leer' });
     check(inside.data?.error?.codigo === 'FOLDER_OVERLAPS_INTERNAL', 'Una carpeta dentro de Mind no debía poder autorizarse.');
     const before = session.elicitations.length;
     const granted = await session.call('solicitar_acceso', { ruta: information, acceso: 'completo', motivo: 'Prueba de producto' });
@@ -368,7 +369,7 @@ try {
   });
 
   // ---------------------------------------------------------------- Hito B
-  const packageModule = (relative) => import(pathToFileURL(path.join(mind, 'Motor', ...relative.split('/'))).href);
+  const packageModule = (relative) => import(pathToFileURL(path.join(productPaths(mind, manifest).motorDirectory, ...relative.split('/'))).href);
   const scripted = (...replies) => ({
     lines: [], write(line) { this.lines.push(line); }, ask: async () => replies.shift() ?? '', secret: async () => replies.shift() ?? '',
     yes: async () => replies.shift() === 's', close() {},
@@ -452,8 +453,8 @@ try {
 
   await step(20, 'Funciones fuera de sesión: mind programadas con el iniciador', PACKAGE, async () => {
     const result = windows
-      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" programadas"`], { env: isolatedEnv(), verbatim: true })
-      : await run(path.join(mind, 'mind'), ['programadas'], { env: isolatedEnv() });
+      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(productPaths(mind, manifest).launcherDirectory, 'mind.cmd')}" programadas"`], { env: isolatedEnv(), verbatim: true })
+      : await run(path.join(productPaths(mind, manifest).launcherDirectory, 'mind'), ['programadas'], { env: isolatedEnv() });
     check(result.code === 0, `Código ${result.code}: ${result.stderr}`);
     return JSON.parse(result.stdout);
   });
@@ -507,7 +508,7 @@ try {
     const testBase=path.join(temporary,'Base de conversaciones');
     const node=productRuntime(mind,manifest).nodeExecutable;
     const open=async name=>{
-      const client=startMcp({command:node,commandArgs:[path.join(mind,'Motor','bin','mind.js'),'mcp','--base',testBase,'--carpeta',workspace],cwd:workspace,baseEnv:isolatedEnv(),capabilities:{},clientInfo:{name,version:'ensayo'}});
+      const client=startMcp({command:node,commandArgs:[productPaths(mind,manifest).entrypoint,'mcp','--base',testBase,'--carpeta',workspace],cwd:workspace,baseEnv:isolatedEnv(),capabilities:{},clientInfo:{name,version:'ensayo'}});
       clients.push(client);await client.initialize();return client;
     };
     const first=await open('continuidad-paquete-A');
@@ -556,11 +557,12 @@ try {
   await step(23, 'Actualización del Motor conservando la Base', PACKAGE, async () => {
     if (!updateArgument) return { pending: 'no se indicó --actualizacion <paquete nuevo>' };
     const { updateMind } = await packageModule('src/commands/actualizar.js');
-    const before = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8')).mindVersion;
+    const before = await readManifestFile(mind);
     const result = await updateMind({ root: mind, source: path.resolve(updateArgument), baseDirectory: base, confirm: async () => true });
     check(result.status === 'actualizada', JSON.stringify(result));
-    const after = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8')).mindVersion;
-    check(after !== before, `versión ${before} → ${after}`);
+    const after = await readManifestFile(mind);
+    manifest = after;
+    check(comparePackageVersions(after,before)>0, `revision ${before.packageRevision} -> ${after.packageRevision}`);
     session = await launch({ clientInfo: { name: 'agente-de-prueba-E', version: '1.0' } });
     await session.initialize();
     const status = (await session.call('estado')).data;
@@ -571,7 +573,7 @@ try {
     check((await session.call('indices_personalizados')).data.total === 1, 'índices personalizados conservados');
     const exit = await session.close();
     check(exit.code === 0, `Código de salida ${exit.code}`);
-    return { desde: before, hasta: after, anterior: path.basename(result.backup ?? '') };
+    return { desde: before.mindVersion, hasta: after.mindVersion, desdeRevision: before.packageRevision, hastaRevision: after.packageRevision, limpiezaPendiente: result.cleanupPending === true };
   });
   await step(24, 'Carpeta abierta: leer, crear y continuidad sin formularios', SIMULATED, async () => {
     let project = path.join(temporary, 'Proyecto abierto ñ');
@@ -579,7 +581,7 @@ try {
     project = await fs.realpath(project);
     await fs.writeFile(path.join(project, 'nota.txt'), 'Información ficticia del proyecto');
     const { nodeExecutable: node } = productRuntime(mind, manifest);
-    const client = startMcp({ command: node, commandArgs: [path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project, baseEnv: isolatedEnv(), capabilities: {} });
+    const client = startMcp({ command: node, commandArgs: [productPaths(mind, manifest).entrypoint, 'mcp'], cwd: project, baseEnv: isolatedEnv(), capabilities: {} });
     clients.push(client);
     await client.initialize();
     check(!(await client.call('leer', { carpeta:project,ruta: 'nota.txt' })).isError, 'Leer sin autorización adicional');
@@ -603,7 +605,7 @@ const summary = {
   commit: manifest?.builtFrom ?? null,
   plataforma: `${process.platform}-${process.arch}`,
   node_que_ejecuta_la_prueba: process.execPath,
-  manifiesto_sha256: manifest ? createHash('sha256').update(await fs.readFile(path.join(mind, 'mind-producto.json'))).digest('hex') : null,
+  manifiesto_sha256: manifest ? createHash('sha256').update(await fs.readFile(productPaths(mind, manifest).manifestFile)).digest('hex') : null,
   superados: results.filter((item) => item.resultado === 'superado').length,
   fallidos: results.filter((item) => item.resultado === 'fallido').length,
   pendientes: results.filter((item) => item.resultado === 'pendiente').length,

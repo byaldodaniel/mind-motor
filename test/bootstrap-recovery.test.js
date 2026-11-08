@@ -136,3 +136,21 @@ test('stable bootstrap executes the snapshot runner when Motor and manifest are 
   assert.equal(result.pid, child.pid);
   assert.deepEqual(result.args, ['mcp', '--fixture']);
 });
+
+test('a module-load race reports INSTALLATION_BUSY while a preparation lease is present', async t => {
+  const f = await fixture(t);
+  await f.ready();
+  await f.journal('prepared');
+  await assert.rejects(bootstrap({ systemDirectory: f.system, importProgram: async () => {
+    await fs.writeFile(path.join(f.system, 'Actualizaciones', 'preparacion.lock'), '{}');
+    throw Object.assign(new Error('concurrent module move'), { code: 'ERR_MODULE_NOT_FOUND' });
+  } }), { code: 'INSTALLATION_BUSY' });
+});
+
+test('a missing module outside an update preserves its original diagnosis', async t => {
+  const f = await fixture(t);
+  await f.ready();
+  await assert.rejects(bootstrap({ systemDirectory: f.system, importProgram: async () => {
+    throw Object.assign(new Error('missing module'), { code: 'ERR_MODULE_NOT_FOUND' });
+  } }), { code: 'ERR_MODULE_NOT_FOUND' });
+});

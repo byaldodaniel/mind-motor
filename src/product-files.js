@@ -221,11 +221,12 @@ async function mapLimit(items, limit, task) {
  * Con allowExtra=false, cualquier archivo que el manifiesto no declare es una diferencia.
  * @returns {Promise<{ ok: boolean, files: number, links: number, problems: Array<{ path: string, problem: string }> }>}
  */
-export async function verifyTree(root, manifest, { prefix = '', allowExtra = false } = {}) {
+export async function verifyTree(root, manifest, { prefix = '', allowExtra = false, allowUserState = false } = {}) {
   const within = (relative) => prefix === '' || relative === prefix || relative.startsWith(`${prefix}/`);
   const expectedFiles = Object.entries(manifest.files).filter(([relative]) => within(relative));
   const expectedLinks = Object.entries(manifest.links ?? {}).filter(([relative]) => within(relative));
-  const actual = new Map((await scanTree(root, prefix)).map((entry) => [entry.path, entry]));
+  const userState = relative => relative === '.mcp.json' || ['Conversaciones', 'Sistema/Base', 'Sistema/Estado', 'Sistema/Actualizaciones'].some(directory => relative.startsWith(directory + '/'));
+  const actual = new Map((await scanTree(root, prefix)).filter(entry => !(allowUserState && prefix === '' && entry.type === 'file' && userState(entry.path))).map((entry) => [entry.path, entry]));
   if (prefix === '') {
     actual.delete(manifestRelativePath(manifest));
     // El descriptor se verifica con su propia firma y huella del manifiesto.

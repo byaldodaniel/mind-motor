@@ -73,7 +73,7 @@ export function verifySignedPackageDescriptor(envelope, publicKey) {
 }
 
 /** The caller supplies a previously trusted key; never load the trust anchor from this package. */
-export async function verifyPackageDescriptor({ root, publicKey, expectedRelease }) {
+export async function verifyPackageDescriptor({ root, publicKey, expectedRelease, allowUserState = false }) {
   const descriptorFile = path.join(root, ...PACKAGE_DESCRIPTOR_PATH.split('/'));
   const manifestFile = path.join(root, 'Sistema', 'mind-producto.json');
   for (const file of [descriptorFile, manifestFile]) {
@@ -90,7 +90,7 @@ export async function verifyPackageDescriptor({ root, publicKey, expectedRelease
   const manifest = await readManifestFile(root);
   if (!manifest) throw fail('PACKAGE_DESCRIPTOR_INVALID', 'Falta el manifiesto de la entrega.');
   const release = requireRelease(manifest, descriptor);
-  const checked = await verifyTree(root, manifest);
+  const checked = await verifyTree(root, manifest, { allowUserState });
   if (!checked.ok) throw fail('UPDATE_PACKAGE_ALTERED', 'Los archivos del paquete no coinciden con su manifiesto firmado.');
   return { manifest, release, manifestSha256: descriptor.manifestSha256 };
 }

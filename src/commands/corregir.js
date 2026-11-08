@@ -23,7 +23,7 @@ export async function correctInstallation({target,source,baseDirectory,verifyIns
   ];
   for(const file of channels){try{key=JSON.parse(await fs.readFile(file,'utf8')).publicKey;if(key)break;}catch(e){if(e.code!=='ENOENT')throw e;}}
   if(!key)throw new MotorError('UPDATE_TRUST_MISSING','No se encontró la clave de confianza de la copia existente.');
-  const checked=await verifyPackageDescriptor({root:source,publicKey:key});
+  const checked=await verifyPackageDescriptor({root:source,publicKey:key,allowUserState:true});
   const sourceRuntime=productRuntime(source,manifest);
   const result=await updateMind({root:target,source,baseDirectory:baseDirectory??(current?productPaths(target,current).baseDirectory:undefined),
     pythonExecutable:sourceRuntime.pythonExecutable,expectedRelease:checked.release,expectedManifestSha256:checked.manifestSha256,

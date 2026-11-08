@@ -75,10 +75,23 @@ async function bootstrap({ systemDirectory = __dirname, runRecovery = executeRec
       throw makeError('UPDATE_RECOVERY_BLOCKED', 'La sustitución sigue incompleta; se conserva la recuperación.');
     }
   }
-  const entry = checkedPath(root, path.join(system, 'Programa', 'Motor', 'bin', 'mind.js'));
-  checkedPath(root, path.join(system, 'mind-producto.json'));
-  // Normal startup imports the program into this process, not another Node per chat.
-  return importProgram(entry);
+  try {
+    const entry = checkedPath(root, path.join(system, 'Programa', 'Motor', 'bin', 'mind.js'));
+    checkedPath(root, path.join(system, 'mind-producto.json'));
+    // Normal startup imports the program into this process, not another Node per chat.
+    return await importProgram(entry);
+  } catch (error) {
+    if (['ERR_MODULE_NOT_FOUND', 'ENOENT'].includes(error.code)) {
+      const current = readJournal(root, system);
+      let preparing = false;
+      try { fs.lstatSync(path.join(system, 'Actualizaciones', 'preparacion.lock')); preparing = true; }
+      catch (probeError) { if (probeError.code !== 'ENOENT') throw probeError; }
+      if (preparing || current && MUTATING_PHASES.has(current.phase)) {
+        throw makeError('INSTALLATION_BUSY', 'Mind está cambiando el programa; vuelve a iniciar cuando termine la actualización.');
+      }
+    }
+    throw error;
+  }
 }
 
 module.exports = { bootstrap, readJournal };

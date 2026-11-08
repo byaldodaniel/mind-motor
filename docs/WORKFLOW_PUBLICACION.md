@@ -11,7 +11,7 @@ Mind conserva la versión pública **1.0.3**. La entrega original corresponde a 
 5. La prueba real de actualización `scripts/producto-actualizacion-automatica.mjs` acepta una copia layout 2 y un paquete de la misma versión pública con revisión superior. El transporte HTTPS del ensayo y su firma de canal usan una clave efímera. El paquete de ensayo se construye con revisión técnica superior mediante `--revision-paquete`, con clave de prueba; nunca se firma un ensayo de revisión superior con la clave de producción ni se publica. Las pruebas de migración legacy usan la orden `corregir`, no el actualizador antiguo.
 6. Ejecutar la batería funcional una vez en el entorno disponible, identificándolo en el informe. Verificar composición e integridad de todos los destinos del ZIP; no exigir cinco ejecuciones nativas como condición genérica de entrega. Ejecutar compatibilidad específica cuando un cambio o fallo concreto lo justifique.
 
-El flujo histórico `preparar-paridad.mjs` no prepara esta corrección: espera el layout y nombres anteriores y eleva la versión pública del ensayo. En esta entrega se usa la construcción directa anterior, con verificación reproducible y ensayos por revisión separados del candidato final. No presentar el flujo histórico como aprobado para layout 2.
+El flujo de CI `preparar-paridad.mjs` construye revisiones 1 y 2 de la misma versión con una clave efímera: conserva solo su clave pública y elimina la privada. Esos ZIP son ensayos, no candidatos publicables. `probar-paquete.mjs --clave-ensayo <clave pública>` verifica sus descriptores antes de ejecutar el runtime incluido. La entrega final se construye directamente con la clave de producción protegida y se verifica sin la opción de ensayo.
 
 ## Transición de las copias existentes
 

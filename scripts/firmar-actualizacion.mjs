@@ -12,12 +12,19 @@ import { verifyPackageDescriptor, releaseOf } from '../src/package-descriptor.js
 import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2), verifyOnly = args[0] === '--verificar';
+let testPublicKeyFile;
+const testAt = args.indexOf('--clave-ensayo');
+if (testAt >= 0) {
+  if (!verifyOnly || testAt !== 3 || args.length !== 5 || !args[testAt + 1]) throw new Error('--clave-ensayo solo se admite en la verificacion de artefactos ficticios.');
+  testPublicKeyFile = args[testAt + 1]; args.splice(testAt, 2);
+}
 const [version, keyFile, directory, output] = verifyOnly ? [args[1], null, args[2]] : args;
 if (!isVersion(version) || version.includes('-') || !directory || (!verifyOnly && (!keyFile || !output))) {
   throw new Error('Usa <versión> <clave.pem> <paquetes> <stable.json> o --verificar <versión> <paquetes>.');
 }
 const root = fileURLToPath(new URL('..', import.meta.url));
 const config = JSON.parse(await fs.readFile(path.join(root, 'src', 'update-channel.json'), 'utf8'));
+const trustedPublicKey = testPublicKeyFile ? await fs.readFile(testPublicKeyFile, 'utf8') : config.publicKey;
 const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 const publication = JSON.parse(await fs.readFile(path.join(root, 'packaging', 'publicacion.json'), 'utf8'));
 if (publication.version !== 1 || publication.paquete !== 'universal' || !validUniversalTargets(publication.plataformas)) throw new Error('La publicación no describe un paquete universal completo.');
@@ -36,7 +43,7 @@ try {
   const release = releaseOf(manifest);
   if (release.layoutVersion !== 2 || release.updateProtocolVersion !== 2 || release.packageRevision < 1) throw new Error('La entrega requiere revisión, layout y actualizador corregidos.');
   if (name !== `Mind-${version}-universal-r${release.packageRevision}.zip`) throw new Error('El nombre del ZIP no identifica la revisión del paquete.');
-  const signed = await verifyPackageDescriptor({ root: installation, publicKey: config.publicKey, expectedRelease: release });
+  const signed = await verifyPackageDescriptor({ root: installation, publicKey: trustedPublicKey, expectedRelease: release });
   manifestSha256 = signed.manifestSha256;
   if (extracted.some(entry => entry.type === 'symlink')) throw new Error('El ZIP universal no puede depender de enlaces simbólicos.');
   const paths = productPaths(installation, manifest);
@@ -58,7 +65,7 @@ const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 2, 
   packages: [{ platform: 'win32', arch: 'x64', targets: publication.plataformas,
     url: `https://github.com/${config.repository}/releases/download/v${version}/${encodeURIComponent(name)}`,
     bytes, sha256: await hashFile(file) }] }));
-if (verifyOnly) process.stdout.write(`Mind ${version}, revisión ${manifest.packageRevision}: ZIP universal firmado y verificado.\n`);
+if (verifyOnly) process.stdout.write(`Mind ${version}, revisión ${manifest.packageRevision}: ZIP universal firmado y verificado${testPublicKeyFile ? ' con clave de ensayo (no publicable)' : ''}.\n`);
 else {
   const key = createPrivateKey(await fs.readFile(keyFile));
   if (key.asymmetricKeyType !== 'ed25519' || createPublicKey(key).export({ type: 'spki', format: 'pem' }) !== config.publicKey) throw new Error('La clave no corresponde al canal de confianza.');

@@ -130,7 +130,7 @@ async function recoveryWorker(work,pythonExecutable){
   await fs.cp(pyRoot,path.join(worker,'Python'),{recursive:true});
 }
 // Exact manifest bytes from previously verified public deliveries; a self-described tree is not provenance.
-const HISTORICAL_MANIFESTS = new Set(["48a7b34364d85c525520ed29fea9e6f0329e349def9903b614c99c8bf0aae1a4", "eb438167fd9e9f51af42f4de156f12761a4e6336cd02da8bb9397ca419ed11c2", "c1ec1412d99902819e22a4bc17307f638cccd19386c22966b56290aec230b641"]);
+const HISTORICAL_MANIFESTS = new Set(["ec878e961a38f83def1c9c8e09052410929a2147f9602060dd62f02fed357e8a","48a7b34364d85c525520ed29fea9e6f0329e349def9903b614c99c8bf0aae1a4", "eb438167fd9e9f51af42f4de156f12761a4e6336cd02da8bb9397ca419ed11c2", "c1ec1412d99902819e22a4bc17307f638cccd19386c22966b56290aec230b641"]);
 async function cleanupObsolete(root,j){
   const live=new Set(groups(j.incomingManifest));live.add('.mcp.json');
   for(const op of j.operations){
