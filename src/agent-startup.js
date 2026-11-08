@@ -3,13 +3,16 @@ import path from 'node:path';
 import os from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {MotorError} from './errors.js';
+import {productPaths} from './layout.js';
 
 const BEGIN='<!-- mind-startup:begin -->', END='<!-- mind-startup:end -->';
 const shellQuote=value=>"'"+value.replaceAll("'","'\\''")+"'";
-export function startupInstructions(root,runtime,platform=process.platform) {
+export function startupInstructions(root,runtime,platform=process.platform,manifest) {
+  const modern = manifest ?? (runtime.nodeExecutable.includes(path.join('Sistema','Componentes')) ? {layoutVersion:2} : null);
+  const entrypoint = productPaths(root,modern).agentEntrypoint;
   const command=platform==='win32'
-    ? '& '+[runtime.nodeExecutable,path.join(root,'Motor','bin','mind.js')].map(value=>"'"+value.replaceAll("'","''")+"'").join(' ')+' inicio'
-    : [runtime.nodeExecutable,path.join(root,'Motor','bin','mind.js')].map(shellQuote).join(' ')+' inicio';
+    ? '& '+[runtime.nodeExecutable,entrypoint].map(value=>"'"+value.replaceAll("'","''")+"'").join(' ')+' inicio'
+    : [runtime.nodeExecutable,entrypoint].map(shellQuote).join(' ')+' inicio';
   return BEGIN+'\n## Mind: inicio de conversaciones\n\n'
     +'Antes de responder la primera solicitud sustantiva de cada conversación, consulta Mind. Si tienes sus herramientas conectadas, llama destinos_consultar (con proyecto/conversacion cuando corresponda) y aplica su política antes de crear archivos.\n'
     +'Si no tienes las herramientas, ejecuta este iniciador desde la carpeta de trabajo actual, sin cambiar de proyecto:\n\n'
@@ -45,11 +48,11 @@ async function install(file,block) {
   }finally{await fs.rm(temporary,{force:true});}
 }
 /** Anfitrión de instalación; nunca se expone como herramienta de agente. */
-export async function prepareAgentStartup({root,runtime,home=os.homedir(),env=process.env,platform=process.platform}={}) {
+export async function prepareAgentStartup({root,runtime,manifest,home=os.homedir(),env=process.env,platform=process.platform}={}) {
   if(!root || env.MIND_AGENT_STARTUP==='0')return {estado:'omitido',clientes:[]};
   const codexHome=env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home,'.codex');
   const candidates=[['Codex',codexHome,'AGENTS.md'],['Claude Code',path.join(home,'.claude'),'CLAUDE.md'],['Antigravity',path.join(home,'.gemini'),'GEMINI.md']];
-  const block=startupInstructions(root,runtime,platform), clients=[];
+  const block=startupInstructions(root,runtime,platform,manifest), clients=[];
   for(const [name,directory,defaultFile] of candidates) {
     try {
       const folder=await fs.lstat(directory).catch(error=>{if(error.code==='ENOENT')return null;throw error;});

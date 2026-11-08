@@ -1,40 +1,33 @@
-# Mind 1.0 como producto portable
+# Mind 1.0.3 como producto portable universal
 
-Publicación 1.0.0: Windows x64 exclusivamente. Las referencias a otros sistemas
-describen capacidades del desarrollo y no plataformas publicadas en esta entrega.
-La carpeta abierta por el cliente/iniciador permite trabajar sin otra autorización
-de acceso durante la sesión. El iniciador comprueba e instala actualizaciones
-estables firmadas cuando no hay sesiones activas. Véase WORKFLOW_PUBLICACION.md
-en el repositorio de desarrollo.
-
-
-**Mind es un motor que permite a los agentes de IA trabajar la información del
-usuario, a su manera.** El usuario dirige, los agentes interpretan y ejecutan,
-Mind aporta las capacidades técnicas, y los archivos del usuario conservan la
-información original.
+Mind permite a los agentes trabajar la información del usuario a su manera. La entrega correctiva mantiene la versión pública 1.0.3 y se identifica técnicamente como revisión 1.
 
 ## La carpeta es el producto
 
-```
-Mind/
-  mind (macOS, Linux) o mind.cmd       iniciador (sin instalar nada)
-  Autorizar Mind.command / .cmd        consola de autorización con doble clic (macOS, Windows)
-  mind-producto.json                   manifiesto: versión, plataforma y SHA-256 de cada archivo
-  AGENTS.md, CLAUDE.md, GEMINI.md      instrucciones de reconocimiento para agentes
-  LEEME.md, LICENCIA.txt, LICENCIAS/   guía de primer uso y licencias
-  .mcp.json                            servidor MCP "mind" del proyecto para Claude Code (rutas relativas)
-  Motor/                               código del Motor; se sustituye al actualizar
-  Runtime/node, Runtime/python         runtimes incluidos (Node.js 24, CPython 3.12)
-  Base/                                datos persistentes; se crea en el primer uso
+```text
+My Mind/
+  LEEME.md
+  AGENTS.md, CLAUDE.md, GEMINI.md, .mcp.json (según cliente)
+  Conversaciones/
+  Sistema/
+    mind, mind.cmd y entradas de autorización
+    Programa/Motor/
+    Componentes/Node/<destino>/
+    Componentes/Python/<destino>/
+    Componentes/Semantica/
+    Base/
+    Estado/
+    Licencias/
+    Actualizaciones/
+    mind-producto.json
+    entrega-firmada.json
 ```
 
-Motor y Base son independientes. La Base no forma parte del paquete: actualizar
-sustituye `Motor/` y `Runtime/` y nunca toca `Base/`. Una Base creada por una
-versión posterior no se abre con un Motor anterior (`BASE_TOO_NEW`): no se modifica.
+El ZIP único incluye los cinco destinos y sus ejecutores listos al extraer, sin descargas adicionales. La Base se crea al primer uso y nunca forma parte del paquete. Los resultados se guardan en Conversaciones salvo destino elegido. Las Bases externas conservan su ubicación; el formato de datos no cambia en esta corrección.
 
-Ninguna carpeta autorizada puede contener la carpeta de Mind ni estar dentro de
-ella. Así ningún agente puede modificar los iniciadores, los runtimes ni la Base
-mediante Mind.
+El programa y los componentes sustituibles están separados de los datos persistentes. La actualización verifica la entrega firmada, reutiliza componentes iguales y conserva recuperación únicamente durante la operación. Tras confirmar se eliminan temporales y código anterior: el usuario tiene una instalación vigente, sin histórico de paquetes.
+
+Las copias antiguas se actualizan desde el paquete corregido mediante su agente, manteniendo su ruta y datos. My Mind es el nombre por defecto de nuevas descargas. Véase CIERRE_1_0_3.md en desarrollo para la transición y WORKFLOW_PUBLICACION.md para el artefacto y pruebas.
 
 ## Experiencia de uso
 

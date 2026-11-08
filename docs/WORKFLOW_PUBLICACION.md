@@ -1,63 +1,34 @@
-# Entrega de la carpeta universal de Mind
+# Entrega correctiva universal de Mind 1.0.3
 
-El repositorio privado `byaldodaniel/mind-motor` contiene el desarrollo.
-`byaldodaniel/mind-updates` distribuye un solo `Mind-<versión>-universal.zip`.
-El archivo se extrae a una carpeta `Mind/` con un único `Motor/`. Los iniciadores
-usan el Node y el Python incluidos para Windows x64, Mac Intel y Apple Silicon
-o Linux x64 y ARM64 con glibc. El primer arranque prepara la conexión del agente.
+Mind conserva la versión pública **1.0.3**. La entrega original corresponde a la revisión técnica 0; esta corrección usa revisión 1, layout 2 y protocolo de actualización 2. Se distribuye un único ZIP actual, `Mind-1.0.3-universal-r1.zip`, con raíz `My Mind/` y los cinco destinos declarados. Las copias anteriores se conservan como evidencia; no se sobrescriben sus bytes ni respaldos.
 
-El manifiesto enumera los cinco destinos en `targets`. Conserva `win32/x64`
-como identificador principal y los ejecutores de Windows en sus rutas previas
-para que las instalaciones públicas anteriores reciban el mismo ZIP firmado.
+## Preparación y pruebas
 
-## Preparar y validar
+1. Recuperar en Mind la ficha existente de 1.0.3 y la política `mind-publicacion-versiones`. Registrar la revisión, commit, alcance, recuperación y evidencias dentro de esa misma ficha. Comprobar o completar el respaldo remoto verificado de la entrega original antes de publicar.
+2. Trabajar en rama y PR, sin modificar la instalación personal. Ejecutar las pruebas de sesiones/PID, actualización, firmas, transacciones y layout sobre datos ficticios. Distinguir sesiones activas, abandonadas y no verificables; nunca cerrar procesos ajenos por un PID guardado.
+3. Construir desde el commit limpio comprobado con `scripts/construir-paquetes.mjs`, `--clave-publicacion <clave privada protegida>` y salida nueva. La firma del descriptor se incorpora durante la construcción y autentica los bytes del manifiesto. Dos construcciones finales con los mismos insumos deben ser idénticas. La clave privada no entra en el repositorio, ZIP, informes ni CI.
+4. Validar el único ZIP final con `scripts/firmar-actualizacion.mjs --verificar 1.0.3 <candidatos>`. Comprobar raíz, revisión, composición, licencias, permisos, presupuesto, firma y huellas. El ZIP lleva `Sistema/entrega-firmada.json`; una candidata sin ese descriptor firmado no es publicable.
+5. La prueba real de actualización `scripts/producto-actualizacion-automatica.mjs` acepta una copia layout 2 y un paquete de la misma versión pública con revisión superior. El transporte HTTPS del ensayo y su firma de canal usan una clave efímera. El paquete de ensayo se construye con revisión técnica superior mediante `--revision-paquete`, con clave de prueba; nunca se firma un ensayo de revisión superior con la clave de producción ni se publica. Las pruebas de migración legacy usan la orden `corregir`, no el actualizador antiguo.
+6. Ejecutar la batería funcional una vez en el entorno disponible, identificándolo en el informe. Verificar composición e integridad de todos los destinos del ZIP; no exigir cinco ejecuciones nativas como condición genérica de entrega. Ejecutar compatibilidad específica cuando un cambio o fallo concreto lo justifique.
 
-La comprobación de una entrega se centra en las funcionalidades de Mind y en la
-integridad del ZIP universal. Se ejecuta en un entorno disponible; el informe
-identifica ese entorno. La distribución incluye los cinco runtimes previstos
-en un mismo archivo, y su integridad se comprueba mediante el manifiesto.
+El flujo histórico `preparar-paridad.mjs` no prepara esta corrección: espera el layout y nombres anteriores y eleva la versión pública del ensayo. En esta entrega se usa la construcción directa anterior, con verificación reproducible y ensayos por revisión separados del candidato final. No presentar el flujo histórico como aprobado para layout 2.
 
-1. Desde un commit limpio, preparar el componente semántico fijado con
-   `node scripts/preparar-semantica.mjs` y ejecutar
-   `node scripts/preparar-paridad.mjs <carpeta-nueva> --reproducibilidad`.
-   Se necesita Git, Node 24 y Python 3.12 en Windows o `xz` en Linux/macOS.
-   `MIND_COMPONENT_CACHE` puede indicar una caché de componentes existente.
-2. Conservar el único ZIP de entrega de `candidatos/` y su SHA-256. Comprobar
-   que las dos construcciones reproducibles coinciden y que el manifiesto
-   declara los cinco destinos, con componentes, licencias y huellas correctas.
-   `ensayo/` contiene una versión superior ficticia para probar el actualizador;
-   no es otra entrega para los usuarios. `matriz.json` conserva la relación de
-   destinos y referencia el mismo ZIP y SHA-256 en todas sus filas.
-3. Ejecutar una vez `scripts/probar-paquete.mjs` sobre ese ZIP y el ZIP de
-   actualización de ensayo, con las huellas exactas. Comprobar extracción,
-   primer uso, conexión MCP, lectura, escritura, continuidad, destinos físicos,
-   traslado de conversaciones y actualización conservando la Base.
-4. Comprobar la actualización desde la estable anterior sobre una instalación
-   ficticia, preservando Base, permisos, funciones y archivos del usuario.
-   Conservar los informes con commit, huella del ZIP, entorno y resultado.
-5. Revisar las funcionalidades afectadas y cualquier incidencia concreta que
-   revelen las comprobaciones. El criterio de preparación de esta entrega no
-   exige repetir la batería en cada sistema operativo ni una matriz de cinco
-   ejecuciones nativas.
+## Transición de las copias existentes
 
-El flujo privado `.github/workflows/paquetes.yml` construye el ZIP universal y
-lo comprueba en un único entorno funcional Ubuntu 24.04. El flujo de núcleo usa
-el mismo criterio de un solo entorno. Las comprobaciones locales pueden usar el
-entorno disponible, conservando la misma identidad del artefacto. Un bloqueo de
-cuota o facturación de GitHub se registra como una limitación del servicio de CI;
-las comprobaciones funcionales locales y la preparación del ZIP pueden continuar.
+Los clientes ya distribuidos no saben comparar revisiones de la misma versión y algunos confunden PID reutilizados con sesiones activas. Tampoco pueden reiniciar correctamente un paquete que cambie las rutas del programa. No basta sustituir el ZIP de una URL para corregirlos.
 
-Los informes históricos por sistema se conservan como evidencia de su momento.
-No constituyen un requisito adicional para la entrega actual. La clave de
-producción permanece fuera de CI.
+La transición se realiza una vez mediante el agente: descarga el ZIP correctivo oficial, verifica su descriptor con la clave pública ya confiada en la copia anterior y comprueba el manifiesto y todos sus archivos **antes de ejecutar código nuevo**. Para esa verificación previa puede usar el runtime y las primitivas criptográficas de la copia anterior. Un hash incluido en el propio ZIP no sustituye esta autenticación. No obtener la clave de confianza del paquete que se está comprobando.
 
-## Publicar después de la revisión
+Después ejecuta el código corregido desde el paquete extraído fuera de la copia objetivo, mediante `mind corregir <copia existente> --paquete <carpeta nueva>`. El reparador prepara la transacción y espera las sesiones reales; una sesión no verificable requiere resolver su identidad, no borrarla por antigüedad. Mantiene la ruta anterior, los datos y las reglas ajenas. El nombre My Mind es el predeterminado para nuevas extracciones, no una orden de renombrar instalaciones existentes.
 
-1. Revisar los informes del ZIP que se va a distribuir. Etiquetar el commit
-   probado y firmar con `node scripts/firmar-actualizacion.mjs <versión> <clave.pem> <candidatos> <stable.json>`.
-2. Preparar un borrador con el ZIP universal, `SHA256SUMS`, `stable.json` y notas.
-   La aprobación de Aldo habilita su publicación inicial.
-3. Verificar la descarga, promover la entrega a estable y comprobar el canal
-   firmado. El sitio ofrece el mismo enlace en todos los sistemas.
-4. Si aparece un fallo, restaurar el canal anterior mientras se prepara un
-   parche superior para las instalaciones ya actualizadas.
+La migración y las siguientes actualizaciones conservan un diario durable. Se comprueban interrupciones en cada fase, recuperación, reutilización de componentes iguales y ausencia de acumulación tras actualizaciones sucesivas. Una limpieza pendiente se informa expresamente y se reintenta; no se descarta una recuperación necesaria ni se llama fallo de instalación a una actualización ya confirmada.
+
+## Canal y publicación
+
+El canal firmado usa `format: mind-update`, `version: 2`, versión pública, revisión técnica, layout, protocolo y SHA-256 del manifiesto, con un único paquete universal. Los clientes antiguos rechazan el protocolo nuevo antes de intentar una sustitución incompatible. Los corregidos comparan versión y revisión y rechazan otro manifiesto con la misma identidad.
+
+El canal principal sigue siendo el origen configurado y firmado. Distinguir DNS, permisos del proceso, HTTP, tiempo agotado, firma, compatibilidad y sesiones. Los reintentos son acotados y persistidos; una copia mantiene una operación y reutiliza su descarga preparada. No ampliar permisos ni configurar el cliente manualmente para resolver una restricción del entorno.
+
+Para la publicación final, generar `stable.json` desde el ZIP definitivo con el firmador y la clave de producción. Preparar borrador con ZIP, sumas, canal y notas; revisar el candidato concreto y aplicar las autorizaciones vigentes. Promover solo cuando los pasos previos de la política estén verificados. Actualizar el sitio y comprobar desde las direcciones públicas que descarga, firma, hash, versión y revisión corresponden al mismo artefacto.
+
+Una restauración del canal no revierte equipos ya actualizados. Conservar los artefactos y registrar el incidente; la recuperación de esta entrega mantiene la versión pública decidida por Aldo y requiere una revisión correctiva explícita. Cerrar la ficha solo después de publicación, sitio, comprobación pública y continuidad verificados.

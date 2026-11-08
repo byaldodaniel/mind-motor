@@ -23,6 +23,9 @@ import { safeRelativePath, resolveLinkTarget, compareBytes } from './archive.js'
  */
 
 export const MANIFEST_NAME = 'mind-producto.json';
+export const MANIFEST_RELATIVE_PATH = 'Sistema/mind-producto.json';
+export const PACKAGE_DESCRIPTOR_PATH = 'Sistema/entrega-firmada.json';
+export const manifestRelativePath = manifest => (manifest?.layoutVersion ?? 1) >= 2 ? MANIFEST_RELATIVE_PATH : MANIFEST_NAME;
 export const PLATFORMS = Object.freeze(['win32', 'darwin', 'linux']);
 export const ARCHITECTURES = Object.freeze(['x64', 'arm64']);
 export const UNIVERSAL_TARGETS = Object.freeze(['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64']);
@@ -63,6 +66,13 @@ export function compareVersions(a, b) {
   return 0;
 }
 
+/** La revisión permite corregir un paquete conservando el número público de Mind. */
+export function comparePackageVersions(a, b) {
+  const order = compareVersions(a.mindVersion, b.mindVersion);
+  if (order) return order;
+  return Math.sign((a.packageRevision ?? 0) - (b.packageRevision ?? 0));
+}
+
 export const isVersion = (value) => typeof value === 'string' && VERSION.test(value);
 
 // La edición universal conserva win32/x64 como identificador de compatibilidad
@@ -99,6 +109,11 @@ export function validateManifest(data) {
   if (data.baseFormatVersion !== undefined && (!Number.isSafeInteger(data.baseFormatVersion) || data.baseFormatVersion < 1)) {
     throw invalid('El manifiesto indica un formato de Base no válido.');
   }
+  for (const field of ['packageRevision', 'layoutVersion', 'updateProtocolVersion']) {
+    if (data[field] !== undefined && (!Number.isSafeInteger(data[field]) || data[field] < (field === 'packageRevision' ? 0 : 1))) throw invalid(`Campo ${field} no válido.`);
+  }
+  if (data.layoutVersion !== undefined && ![1, 2].includes(data.layoutVersion)) throw invalid('Layout de paquete no admitido.');
+  if ((data.layoutVersion ?? 1) >= 2 && ((data.updateProtocolVersion ?? 1) < 2 || !Number.isSafeInteger(data.packageRevision))) throw invalid('El layout 2 requiere protocolo 2 y revisión de paquete.');
   if (!data.files || typeof data.files !== 'object' || Array.isArray(data.files)) throw invalid('El manifiesto no contiene la lista de archivos.');
   const links = data.links ?? {};
   if (typeof links !== 'object' || Array.isArray(links)) throw invalid('Los enlaces del manifiesto no son válidos.');
@@ -106,7 +121,7 @@ export function validateManifest(data) {
   const folded = new Set();
   const check = (relative) => {
     if (safeRelativePath(relative) !== relative) throw invalid(`Ruta no válida en el manifiesto: ${String(relative).slice(0, 200)}`);
-    if (['base','conversaciones'].includes(topLevel(relative)) || relative === MANIFEST_NAME) throw invalid(`El paquete no puede contener ${relative}.`);
+    if (['base','conversaciones'].includes(topLevel(relative)) || /^(?:Sistema\/(?:Base|Estado|Actualizaciones))(?:\/|$)/iu.test(relative) || [MANIFEST_NAME, MANIFEST_RELATIVE_PATH, PACKAGE_DESCRIPTOR_PATH].some(reserved=>reserved.toLowerCase()===relative.toLowerCase())) throw invalid(`El paquete no puede contener ${relative}.`);
     const key = relative.normalize('NFC').toLowerCase();
     if (folded.has(key)) throw invalid(`Rutas repetidas (o que difieren solo en mayúsculas): ${relative}`);
     folded.add(key);
@@ -118,7 +133,7 @@ export function validateManifest(data) {
   for (const [relative, target] of Object.entries(links)) {
     check(relative);
     const resolved = resolveLinkTarget(relative, target);
-    if (!resolved || ['base','conversaciones'].includes(topLevel(resolved))) throw invalid(`Enlace no válido en el manifiesto: ${relative}`);
+    if (!resolved || ['base','conversaciones'].includes(topLevel(resolved)) || /^Sistema\/(?:Base|Estado|Actualizaciones)(?:\/|$)/iu.test(resolved)) throw invalid(`Enlace no válido en el manifiesto: ${relative}`);
   }
   // Ningún archivo puede quedar «dentro» de otro archivo o de un enlace.
   const leaves = new Set([...Object.keys(data.files), ...Object.keys(links)]);
@@ -139,20 +154,18 @@ export function validateManifest(data) {
 
 /** Lee y valida <root>/mind-producto.json; null si no existe. */
 export async function readManifestFile(root) {
-  let text;
-  try {
-    text = await fsp.readFile(path.join(root, MANIFEST_NAME), 'utf8');
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
+  for (const relative of [MANIFEST_RELATIVE_PATH, MANIFEST_NAME]) {
+    let text;
+    try { text = await fsp.readFile(path.join(root, ...relative.split('/')), 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    let data;
+    try { data = JSON.parse(text); }
+    catch (cause) { throw new MotorError('PRODUCT_MANIFEST_INVALID', 'El manifiesto del paquete de Mind no es JSON válido.', { cause }); }
+    const manifest = validateManifest(data);
+    if (manifestRelativePath(manifest) !== relative) throw invalid('El manifiesto no está en la ubicación de su layout.');
+    return manifest;
   }
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch (cause) {
-    throw new MotorError('PRODUCT_MANIFEST_INVALID', 'El manifiesto del paquete de Mind no es JSON válido.', { cause });
-  }
-  return validateManifest(data);
+  return null;
 }
 
 /** SHA-256 hexadecimal de un archivo, leído por flujo. */
@@ -213,7 +226,11 @@ export async function verifyTree(root, manifest, { prefix = '', allowExtra = fal
   const expectedFiles = Object.entries(manifest.files).filter(([relative]) => within(relative));
   const expectedLinks = Object.entries(manifest.links ?? {}).filter(([relative]) => within(relative));
   const actual = new Map((await scanTree(root, prefix)).map((entry) => [entry.path, entry]));
-  if (prefix === '') actual.delete(MANIFEST_NAME);
+  if (prefix === '') {
+    actual.delete(manifestRelativePath(manifest));
+    // El descriptor se verifica con su propia firma y huella del manifiesto.
+    if ((manifest.layoutVersion ?? 1) >= 2 && actual.get(PACKAGE_DESCRIPTOR_PATH)?.type === 'file') actual.delete(PACKAGE_DESCRIPTOR_PATH);
+  }
   const problems = [];
   const hashes = await mapLimit(expectedFiles, 8, async ([relative, hash]) => {
     const entry = actual.get(relative);

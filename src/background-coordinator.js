@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { identifyCurrentProcess, inspectProcessOwners } from './process-identity.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readJson, writeJson, removeJson } from './storage.js';
@@ -9,15 +10,17 @@ import { MotorError } from './errors.js';
  * The short interprocess lock serializes acquisition/release; the durable
  * record also distinguishes sessions living in the same process.
  */
-export function createBackgroundLease(baseDirectory, sessionId) {
+export function createBackgroundLease(baseDirectory, sessionId, { pythonExecutable, ownerInspector = inspectProcessOwners } = {}) {
   const filename = path.join(baseDirectory, 'background-owner.json');
   const token = randomUUID();
   let owned = false;
   let owner = null;
-  const locked = (task) => withIndexLock(baseDirectory, 'owner', task, 'background');
+  let lastInspected = null;
+  let lastInspectionAt = 0;
+  const locked = (task) => withIndexLock(baseDirectory, 'owner', task, 'background', { pythonExecutable, ownerInspector });
 
   function validate(record) {
-    if (!record || record.format !== 'mind-background-owner' || record.version !== 1
+    if (!record || record.format !== 'mind-background-owner' || ![1, 2].includes(record.version)
         || !Number.isSafeInteger(record.pid) || record.pid < 1
         || typeof record.host !== 'string' || typeof record.sessionId !== 'string'
         || typeof record.token !== 'string') {
@@ -32,9 +35,18 @@ export function createBackgroundLease(baseDirectory, sessionId) {
       return locked(async () => {
         const stored = await readJson(filename);
         owner = stored ? validate(stored.data) : null;
-        if (owner && (owner.host !== os.hostname() || processAlive(owner.pid))) return false;
-        owner = { format: 'mind-background-owner', version: 1, token, sessionId,
-          pid: process.pid, host: os.hostname(), startedAt: new Date().toISOString() };
+        if (owner) {
+          const key = JSON.stringify(owner);
+          if (lastInspected === key && Date.now() - lastInspectionAt < 30_000 && processAlive(owner.pid)) return false;
+          const [inspection] = await ownerInspector([owner], { pythonExecutable });
+          if (inspection.state !== 'stale') {
+            lastInspected = key;
+            lastInspectionAt = Date.now();
+            return false;
+          }
+        }
+        owner = { format: 'mind-background-owner', version: 2, token, sessionId,
+          ...await identifyCurrentProcess({ pythonExecutable }), startedAt: new Date().toISOString() };
         await writeJson(filename, owner);
         owned = true;
         return true;

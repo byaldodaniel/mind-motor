@@ -68,31 +68,35 @@ export async function releaseQuarantine(layout, {
   if (platform !== 'darwin' || !layout?.product || !layout.root || !layout.manifest) return { status: 'no-aplica' };
   const root = layout.root;
   try {
-    const { directory: runtime, nodeExecutable, pythonExecutable } = productRuntime(root, layout.manifest, platform);
-    const relative = (file) => path.relative(root, file).split(path.sep).join('/');
-    const options = { root, platformFiles: [nodeExecutable, pythonExecutable].map(relative), find, xattr, run };
-    if (!(await quarantined(runtime, options))) return { status: 'sin-cuarentena' };
-    let manifest;
-    let result;
-    try {
-      manifest = validateManifest(layout.manifest);
-      result = await verifyTree(root, manifest, { prefix: relative(runtime) });
-    } catch (error) {
-      result = { ok: false, files: 0, problems: [{ path: 'mind-producto.json', problem: String(error?.message ?? error) }] };
+    const runtime = productRuntime(root, layout.manifest, platform);
+    const relative = file => path.relative(root,file).split(path.sep).join('/');
+    const directories = runtime.directories ?? [runtime.directory];
+    let files = 0, links = 0, removed = false;
+    for (const directory of directories) {
+      const platformFiles = [runtime.nodeExecutable,runtime.pythonExecutable]
+        .filter(file=>file===directory || file.startsWith(directory+path.sep)).map(relative);
+      const options = {root,platformFiles,find,xattr,run};
+      if (!(await quarantined(directory,options))) continue;
+      let result;
+      try {
+        const manifest = validateManifest(layout.manifest);
+        result = await verifyTree(root,manifest,{prefix:relative(directory)});
+      } catch(error) { result={ok:false,files:0,problems:[{path:relative(directory),problem:String(error?.message??error)}]}; }
+      if(!result.ok || result.files===0) {
+        const aviso=`Mind no retiró la cuarentena: los archivos incluidos no coinciden con su manifiesto (${describeProblems(result.problems)||'sin archivos verificables'}). Vuelve a extraer My Mind.`;
+        log('error',aviso,{diferencias:result.problems.length});
+        return {status:'no-coincide',aviso,problemas:result.problems};
+      }
+      const removal=await run(xattr,['-dr',QUARANTINE_ATTRIBUTE,directory]);
+      if(await quarantined(directory,options)) {
+        const aviso=`Mind verificó el ejecutor activo pero no pudo retirar su cuarentena (${(removal.stderr||`código ${removal.code}`).trim().slice(0,200)}).`;
+        log('error',aviso);return {status:'error',aviso};
+      }
+      files+=result.files;links+=result.links;removed=true;
     }
-    if (!result.ok || result.files === 0) {
-      const aviso = `Mind no retiró la cuarentena de macOS de su carpeta Runtime: sus archivos no coinciden con mind-producto.json (${describeProblems(result.problems) || 'sin archivos verificables'}). macOS puede impedir que se ejecute el intérprete incluido. Vuelve a descargar Mind y extráelo de nuevo.`;
-      log('error', aviso, { diferencias: result.problems.length });
-      return { status: 'no-coincide', aviso, problemas: result.problems };
-    }
-    const removal = await run(xattr, ['-dr', QUARANTINE_ATTRIBUTE, runtime]);
-    if (await quarantined(runtime, options)) {
-      const aviso = `Mind verificó el runtime activo pero no pudo retirar la cuarentena de macOS (${(removal.stderr || `código ${removal.code}`).trim().slice(0, 200)}).`;
-      log('error', aviso);
-      return { status: 'error', aviso };
-    }
-    log('info', 'Cuarentena de macOS retirada de Runtime tras verificar sus hashes', { archivos: result.files, enlaces: result.links });
-    return { status: 'retirada', archivos: result.files };
+    if(!removed)return {status:'sin-cuarentena'};
+    log('info','Cuarentena retirada solo de los componentes del destino activo tras verificar sus hashes',{archivos:files,enlaces:links});
+    return {status:'retirada',archivos:files};
   } catch (error) {
     const aviso = `Mind no pudo comprobar la cuarentena de macOS: ${String(error?.message ?? error).slice(0, 200)}`;
     log('error', aviso);

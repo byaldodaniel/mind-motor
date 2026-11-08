@@ -384,6 +384,15 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       }
       const continuity = await policy.getContinuity();
       const pending = await session.requests.list();
+      let updateStatus = null;
+      if (session.layout.product && session.layout.root) {
+        try {
+          const { readUpdateState } = await import('./update-state.js');
+          const state = await readUpdateState(session.layout.root);
+          if (state) updateStatus = { fase: state.phase, version: state.release?.mindVersion, revision: state.release?.packageRevision,
+            ultimaComprobacion: state.lastCheckedAt, siguienteIntento: state.nextCheckAt, motivo: state.reason, codigo: state.code, tipo: state.kind };
+        } catch (error) { updateStatus = { fase: 'estado-no-verificable', codigo: error.code ?? 'UPDATE_STATE_INVALID' }; }
+      }
       return {
         mind: {
           motor: session.motorVersion, base: motor.baseDirectory, producto: session.layout.product,
@@ -393,6 +402,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
           coordinacion: session.backgroundStatus?.() ?? null },
         recursos: await motor.resourceStatus(),
         procesos: processDiagnostics(),
+        actualizacion: updateStatus,
         consentimiento: consent.channel() === 'formulario-del-cliente'
           ? 'Tu cliente muestra formularios de autorización al usuario.'
           : 'Tu cliente no admite formularios: las solicitudes quedan pendientes y el usuario las aprueba con "mind autorizar" en la carpeta de Mind.',
