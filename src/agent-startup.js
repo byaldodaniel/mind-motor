@@ -4,6 +4,7 @@ import os from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {MotorError} from './errors.js';
 import {productPaths} from './layout.js';
+import {updateManagedClientConnections} from './client-connections.js';
 
 const BEGIN='<!-- mind-startup:begin -->', END='<!-- mind-startup:end -->';
 const shellQuote=value=>"'"+value.replaceAll("'","'\\''")+"'";
@@ -67,5 +68,6 @@ export async function prepareAgentStartup({root,runtime,manifest,home=os.homedir
       clients.push({cliente:name,archivo:file,estado:await install(file,block)});
     } catch(error) {clients.push({cliente:name,estado:'pendiente',codigo:error.code??'STARTUP_RULE_FAILED',mensaje:error.message});}
   }
-  return {estado:clients.some(x=>x.estado==='pendiente')?'parcial':clients.length?'preparado':'sin_clientes',clientes:clients};
+  const connections=await updateManagedClientConnections({root,runtime,manifest,home,env,platform});
+  return {estado:[...clients,...connections].some(x=>x.estado==='pendiente')?'parcial':clients.length||connections.length?'preparado':'sin_clientes',clientes:clients,conexiones:connections};
 }

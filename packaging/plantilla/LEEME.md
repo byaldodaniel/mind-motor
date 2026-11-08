@@ -46,8 +46,7 @@ Sin conexión continúa con la versión instalada. Los archivos personales y la 
 se conservan. La recuperación se mantiene solo durante la transacción; después
 de comprobar la nueva instalación se eliminan sus temporales. My Mind no acumula versiones anteriores.
 
-Para actualizar manualmente, cierra los agentes y usa el iniciador de la
-instalación con `actualizar` y la ruta del ZIP de Mind.
+Si ya tienes una copia anterior, pídele a tu agente aplicar esta entrega corregida a esa copia conservando tus datos. El agente usa el paquete nuevo verificado y mantiene tu ruta; no necesitas configurar conexiones ni guardar versiones anteriores. Las sesiones que estén trabajando terminan normalmente antes de sustituir el programa.
 
 ## Alcance y datos
 

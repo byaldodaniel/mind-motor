@@ -267,6 +267,10 @@ export async function runUpdateTransaction(options,h){
       const old=previousMcp.data,entry=old.mcpServers?.mind;
       const owned=entry&&typeof entry.command==='string'&&Array.isArray(entry.args)&&/^(?:Motor[\\/]|Sistema[\\/]Programa[\\/]Motor[\\/])/u.test(entry.args[0]??'');
       const next=owned?{...entry,command:path.relative(root,productRuntime(root,incoming).nodeExecutable).split(path.sep).join('/'),args:[path.relative(root,productPaths(root,incoming).agentEntrypoint).split(path.sep).join('/'),...entry.args.slice(1)]}:entry;
+      if(next&&baseTarget!==baseDirectory)for(let i=0;i<next.args.length-1;i++)if(next.args[i]==='--base'){
+        const previous=next.args[i+1];
+        if(path.isAbsolute(previous)&&await fs.realpath(previous).catch(()=>null)===baseDirectory)next.args[i+1]=baseTarget;
+      }
       const merged={...old,mcpServers:{...(old.mcpServers??{}),...(next?{mind:next}:{})}};
       stagedMcp=path.join(work,'configuracion','.mcp.json');await fs.mkdir(path.dirname(stagedMcp),{recursive:true});await writeJson(stagedMcp,merged);
     }
@@ -296,8 +300,8 @@ export async function runUpdateTransaction(options,h){
     j.phase='committed';await writeJson(journalFile,j);committed=true;await testing.afterPhase?.('committed');
     let preservedLegacy=[];
     try{await cleanupObsolete(root,j);preservedLegacy=await cleanLegacy(root);await safeRemove(root,work);await fs.rm(journalFile);}
-    catch(e){j.phase='cleanup-pending';j.cleanupError=e.code;await writeJson(journalFile,j);return {status:'actualizada',...summary,cleanupPending:true,baseDirectory:baseTarget};}
-    return {status:'actualizada',...summary,cleanupPending:false,baseDirectory:baseTarget,reusedComponents:keep.size,preservedLegacy};
+    catch(e){j.phase='cleanup-pending';j.cleanupError=e.code;await writeJson(journalFile,j);return {status:'actualizada',...summary,cleanupPending:true,baseDirectory:baseTarget,baseMigration:baseTarget!==baseDirectory?{from:baseDirectory,to:baseTarget}:null};}
+    return {status:'actualizada',...summary,cleanupPending:false,baseDirectory:baseTarget,baseMigration:baseTarget!==baseDirectory?{from:baseDirectory,to:baseTarget}:null,reusedComponents:keep.size,preservedLegacy};
   }catch(e){
     if(j&&!committed&&j.phase!=='prepared'){
       try{await rollback(root,journalFile,j);await safeRemove(root,work);await fs.rm(journalFile);}catch(failure){throw Object.assign(error('UPDATE_ROLLBACK_FAILED',`Se conserva la recuperación: ${failure.message}`),{cause:e});}

@@ -31,7 +31,7 @@ export async function correctInstallation({target,source,baseDirectory,verifyIns
   if(result.status==='actualizada'||result.status==='al-dia'){
     const installed=await readManifestFile(target),paths=productPaths(target,installed),runtime=productRuntime(target,installed);
     result.configuration=await new Promise(resolve=>{
-      const child=spawn(runtime.nodeExecutable,[paths.entrypoint,'preparar'],{cwd:target,windowsHide:true,env:{...process.env,MIND_UPDATE_RESTART:'1',MIND_AGENT_STARTUP:process.env.MIND_AGENT_STARTUP??'1'},stdio:['ignore','pipe','pipe']});
+      const child=spawn(runtime.nodeExecutable,[paths.entrypoint,'preparar'],{cwd:target,windowsHide:true,env:{...process.env,MIND_UPDATE_RESTART:'1',MIND_AGENT_STARTUP:process.env.MIND_AGENT_STARTUP??'1',...(result.baseMigration?{MIND_BASE_MIGRATED_FROM:result.baseMigration.from,MIND_BASE_MIGRATED_TO:result.baseMigration.to}:{})},stdio:['ignore','pipe','pipe']});
       let stderr='';let stdout='';child.stderr.on('data',b=>{stderr=(stderr+b).slice(-4096);});child.stdout.on('data',b=>{stdout=(stdout+b).slice(-4096);});
       const timer=setTimeout(()=>child.kill(),30000);child.on('error',e=>{clearTimeout(timer);resolve({status:'pendiente',reason:e.message});});
       child.on('exit',code=>{clearTimeout(timer);resolve({status:code===0?'actualizada':'pendiente',details:code===0?stdout:stderr});});

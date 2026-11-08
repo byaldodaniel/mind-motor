@@ -83,7 +83,10 @@ export async function resolveLayout({ base, env = process.env } = {}) {
   const { motorDirectory, manifest, root } = await productInstallation();
   const product = root !== null;
   const paths = product ? productPaths(root, manifest) : null;
-  let baseDirectory = base ?? env.MIND_BASE ?? paths?.baseDirectory ?? null;
+  let defaultBaseDirectory=paths?.baseDirectory;
+  // A legacy external Base alias or an explicitly retained Base remains usable.
+  if(product&&(manifest.layoutVersion??1)>=2&&!base&&!env.MIND_BASE&&!(await exists(defaultBaseDirectory))&&await exists(path.join(root,'Base')))defaultBaseDirectory=path.join(root,'Base');
+  let baseDirectory = base ?? env.MIND_BASE ?? defaultBaseDirectory ?? null;
   if (baseDirectory === null) throw new MotorError('BASE_REQUIRED', 'En desarrollo indica la Base con --base <ruta-absoluta> o MIND_BASE.');
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) throw new MotorError('INVALID_BASE', 'La ruta de la Base debe ser absoluta.');
   baseDirectory = path.normalize(baseDirectory);

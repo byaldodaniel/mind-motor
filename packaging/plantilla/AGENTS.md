@@ -34,6 +34,12 @@ El usuario descargó y extrajo el ZIP de Mind. **NUNCA le pidas al usuario que c
 3. **Registro automático en segundo plano (opcional y silencioso):**
    Si tu cliente necesita registrar MCP y puedes hacerlo desde el agente, ejecuta `Sistema/mind.cmd preparar` en Windows o `./Sistema/mind preparar` en macOS/Linux y usa la entrada `mind` del `.mcp.json` generado, resolviendo las rutas desde esta carpeta. Puedes seguir usando el iniciador por consola mientras tanto.
 
+## Aplicar la corrección 1.0.3 a una copia ya instalada
+
+Cuando el usuario solicite actualizar una copia anterior, aplica esta entrega con el código nuevo desde fuera de esa copia; no invoques el actualizador antiguo. Mantén la ruta existente y sus datos. Antes de ejecutar código de la entrega nueva, verifica el descriptor `Sistema/entrega-firmada.json` con la clave pública ya fijada en la instalación anterior y su Node de confianza: firma Ed25519, identidad, SHA-256 exacto del manifiesto y archivos declarados. No uses una clave nueva del propio paquete como ancla ni importes su verificador antes de acreditar su autenticidad.
+
+Después ejecuta el iniciador de la entrega nueva con `corregir <ruta-de-la-copia-existente> --paquete <ruta-de-la-entrega-verificada>`. La orden conserva Base, resultados, destinos y opciones de conexión; actualiza solo entradas administradas que pertenecen a esa instalación. Si devuelve pendiente por sesiones activas o no verificables, conserva esa operación y explica la causa. No cierres procesos ajenos ni borres registros por su PID o antigüedad. La misma orden retoma la preparación después del cierre seguro de las sesiones reales. No pidas al usuario copiar comandos ni editar configuración.
+
 ## Conversaciones como elementos
 
 Conserva la información importante elegida por el usuario con `conversacion_guardar`: título, información importante y referencias opcionales a recursos. No exige carpeta única ni historial completo. Mantén el mismo ID de Mind; al actualizar, usa la revisión leída. Para recordar, busca con `conversaciones_buscar` y lee solo los elementos pertinentes con `conversacion_leer`. Los recursos y destinos siguen la elección y los permisos del usuario. Una referencia o un ID nativo declarado no concede acceso a archivos.
