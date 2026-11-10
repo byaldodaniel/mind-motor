@@ -23,12 +23,14 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs/promises';
+// Las instalaciones ficticias nunca cambian el perfil real del ejecutor.
+process.env.MIND_AGENT_STARTUP = '0';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startMcp } from '../test/helpers/mcp-client.js';
-import { readManifestFile, verifyTree, describeProblems, supportsProductTarget } from '../src/product-files.js';
-import { productRuntime } from '../src/layout.js';
+import { readManifestFile, comparePackageVersions, verifyTree, describeProblems, supportsProductTarget } from '../src/product-files.js';
+import { productPaths, productRuntime } from '../src/layout.js';
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -57,13 +59,16 @@ const HITO_A_TOOLS = ['estado', 'solicitar_acceso', 'retirar_acceso', 'buscar', 
   // Hito B: propiedades e índices personalizados.
   'propiedades', 'asignar_propiedades', 'indices_personalizados', 'crear_indice', 'actualizar_indice', 'modificar_indice', 'retirar_indice',
   'crear_respaldo', 'funciones', 'crear_funcion', 'modificar_funcion', 'retirar_funcion', 'ejecutar_funcion', 'activar_funcion',
-  'desactivar_funcion', 'historial_funcion'];
+  'desactivar_funcion', 'historial_funcion',
+ 'conversaciones_preparar','conversacion_preferencias','conversacion_configurar','conversacion_guardar','conversaciones_buscar','conversacion_leer',
+ 'destinos_consultar','destinos_configurar','destino_resolver','resultado_importar','resultado_registrar','conversacion_trasladar'];
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
 }
 
 async function step(number, name, kind, task) {
+  if(args.includes('--solo-conversaciones') && number!==25)return;
   const started = Date.now();
   try {
     const detail = await task();
@@ -116,13 +121,14 @@ function isolatedEnv() {
     if (!/^(path|node_options|node_path|pythonpath|pythonhome|pythonstartup|mind_base|mind_python)$/iu.test(key)) env[key] = value;
   }
   env[windows ? 'Path' : 'PATH'] = emptyBin;
+  env.MIND_UPDATE_RESTART = '1';
   return env;
 }
 
 function launchCommand(command) {
   return windows
-    ? run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" ${command}"`], { env: isolatedEnv(), verbatim: true })
-    : run(path.join(mind, 'mind'), [command], { env: isolatedEnv() });
+    ? run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(productPaths(mind, manifest).launcherDirectory, 'mind.cmd')}" ${command}"`], { env: isolatedEnv(), verbatim: true })
+    : run(path.join(productPaths(mind, manifest).launcherDirectory, 'mind'), [command], { env: isolatedEnv() });
 }
 
 /** Lanza el servidor tal como lo haría el agente a partir del .mcp.json de Mind. */
@@ -135,6 +141,16 @@ async function launch({ clientInfo, onElicit = null } = {}) {
     clientInfo: clientInfo ?? { name: 'agente-de-prueba-A', version: '1.0' },
     onElicit,
   });
+  // Las operaciones antiguas del producto nombran explícitamente su carpeta
+  // de ensayo: ahora existe también el almacén predeterminado Conversaciones.
+  const call=client.call.bind(client);
+  client.call=(name,args={})=>{
+    const input={...args};
+    if(['leer','crear','editar','modificar','explorar','eliminados','mover','renombrar','crear_carpeta','borrar','asignar_propiedades','retirar_acceso','crear_indice','papelera','restaurar','vaciar_papelera'].includes(name))input.carpeta??=information;
+    if(name==='buscar')input.carpetas??=[information];
+    if(['crear','crear_carpeta'].includes(name))input.destino??=path.join(information,...input.ruta.split('/'));
+    return call(name,input);
+  };
   clients.push(client);
   return client;
 }
@@ -165,14 +181,15 @@ const names = (result) => (result.data?.resultados ?? []).map((item) => item.rut
 const SIMULATED = 'cliente MCP de prueba (simulación del agente y del usuario)';
 const PACKAGE = 'carpeta extraída';
 
-const information = path.join(temporary, 'Información ficticia');
-const base = path.join(mind, 'Base');
-let manifest = null;
+let information = path.join(temporary, 'Información ficticia');
+let manifest = await readManifestFile(mind);
+const base = productPaths(mind, manifest).baseDirectory;
 let session = null;
 let baseId = null;
 
 try {
   await fs.mkdir(path.join(information, 'Proyectos'), { recursive: true });
+  information = await fs.realpath(information); // Windows puede usar un TEMP con nombre 8.3.
   await fs.writeFile(path.join(information, 'Proyectos', 'presupuesto-2026.md'), '# Presupuesto ficticio\nTotal aprobado: 4.250 EUR\n');
   await fs.writeFile(path.join(information, 'Proyectos', 'acta.txt'), 'Acta ficticia\nPendiente: revisar\n');
   await fs.writeFile(path.join(information, 'antiguo.txt'), 'Se eliminará con Mind cerrado\n');
@@ -248,7 +265,7 @@ try {
   });
 
   await step(6, 'Se autoriza una carpeta ficticia (decisión del usuario)', SIMULATED, async () => {
-    const inside = await session.call('solicitar_acceso', { ruta: path.join(mind, 'Motor'), acceso: 'leer' });
+    const inside = await session.call('solicitar_acceso', { ruta: productPaths(mind, manifest).motorDirectory, acceso: 'leer' });
     check(inside.data?.error?.codigo === 'FOLDER_OVERLAPS_INTERNAL', 'Una carpeta dentro de Mind no debía poder autorizarse.');
     const before = session.elicitations.length;
     const granted = await session.call('solicitar_acceso', { ruta: information, acceso: 'completo', motivo: 'Prueba de producto' });
@@ -260,11 +277,11 @@ try {
   await step(7, 'Se genera su índice', SIMULATED, async () => {
     const status = await eventually(async () => {
       const value = (await session.call('estado')).data;
-      return value.carpetas[0]?.indice?.estado === 'vigente' ? value : null;
+      return value.carpetas.find(x=>x.ruta===information)?.indice?.estado === 'vigente' ? value : null;
     });
     check(status, 'El índice inicial no quedó vigente.');
-    check(status.carpetas[0].indice.archivos === 3, `Archivos indexados: ${status.carpetas[0].indice.archivos}`);
-    return status.carpetas[0].indice;
+    check(status.carpetas.find(x=>x.ruta===information).indice.archivos === 3, `Archivos indexados: ${status.carpetas.find(x=>x.ruta===information).indice.archivos}`);
+    return status.carpetas.find(x=>x.ruta===information).indice;
   });
 
   await step(8, 'El agente puede buscar y leer', SIMULATED, async () => {
@@ -295,7 +312,7 @@ try {
 
   await step(10, 'Puede registrar continuidad', SIMULATED, async () => {
     const registered = await session.call('solicitar_acceso', { continuidad: ['leer', 'registrar'] });
-    check(registered.data.estado === 'autorizado', JSON.stringify(registered.data));
+    check(['autorizado','ya-autorizado'].includes(registered.data.estado), JSON.stringify(registered.data));
     const decision = await session.call('continuidad_registrar', {
       tipo: 'decisión', contenido: 'El total aprobado del presupuesto 2026 es 4.250 EUR',
       referencias: [{ ubicacion: 'Proyectos/presupuesto-2026.md', relacion: 'fuente' }],
@@ -352,7 +369,7 @@ try {
   });
 
   // ---------------------------------------------------------------- Hito B
-  const packageModule = (relative) => import(pathToFileURL(path.join(mind, 'Motor', ...relative.split('/'))).href);
+  const packageModule = (relative) => import(pathToFileURL(path.join(productPaths(mind, manifest).motorDirectory, ...relative.split('/'))).href);
   const scripted = (...replies) => ({
     lines: [], write(line) { this.lines.push(line); }, ask: async () => replies.shift() ?? '', secret: async () => replies.shift() ?? '',
     yes: async () => replies.shift() === 's', close() {},
@@ -362,7 +379,7 @@ try {
   await step(13, 'Organizar: crear carpetas, mover y renombrar sin reemplazar', SIMULATED, async () => {
     session = await launch({ onElicit: acceptAll, clientInfo: { name: 'agente-de-prueba-C', version: '3.0' } });
     await session.initialize();
-    folderB = (await session.call('estado')).data.carpetas[0].id;
+    folderB = (await session.call('estado')).data.carpetas.find(x=>x.ruta===information).id;
     check((await session.call('crear_carpeta', { ruta: 'Archivo' })).data.estado === 'creada', 'crear_carpeta');
     check((await session.call('crear_carpeta', { ruta: 'Archivo' })).data.error?.codigo === 'FILE_EXISTS', 'crear_carpeta no reemplaza');
     const moved = await session.call('mover', { desde: 'Proyectos/presupuesto-2026.md', hasta: 'Archivo/presupuesto-2026.md' });
@@ -436,8 +453,8 @@ try {
 
   await step(20, 'Funciones fuera de sesión: mind programadas con el iniciador', PACKAGE, async () => {
     const result = windows
-      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(mind, 'mind.cmd')}" programadas"`], { env: isolatedEnv(), verbatim: true })
-      : await run(path.join(mind, 'mind'), ['programadas'], { env: isolatedEnv() });
+      ? await run(process.env.ComSpec ?? 'C:\\Windows\\System32\\cmd.exe', ['/d', '/s', '/c', `""${path.join(productPaths(mind, manifest).launcherDirectory, 'mind.cmd')}" programadas"`], { env: isolatedEnv(), verbatim: true })
+      : await run(path.join(productPaths(mind, manifest).launcherDirectory, 'mind'), ['programadas'], { env: isolatedEnv() });
     check(result.code === 0, `Código ${result.code}: ${result.stderr}`);
     return JSON.parse(result.stdout);
   });
@@ -485,48 +502,100 @@ try {
     }
   });
 
+  await step(25, 'Conversaciones, destinos físicos y búsqueda semántica del paquete', SIMULATED, async () => {
+    let workspace=path.join(temporary,'Conversaciones ficticias');
+    await fs.mkdir(workspace);workspace=await fs.realpath(workspace);
+    const testBase=path.join(temporary,'Base de conversaciones');
+    const node=productRuntime(mind,manifest).nodeExecutable;
+    const open=async name=>{
+      const client=startMcp({command:node,commandArgs:[productPaths(mind,manifest).entrypoint,'mcp','--base',testBase,'--carpeta',workspace],cwd:workspace,baseEnv:isolatedEnv(),capabilities:{},clientInfo:{name,version:'ensayo'}});
+      clients.push(client);await client.initialize();return client;
+    };
+    const first=await open('continuidad-paquete-A');
+    const folder=path.join(workspace,'Almacen'),images=path.join(workspace,'Imagenes');
+    check(!(await first.call('destinos_configurar',{revision:0,destinos:{carpeta:folder,tipos:{imagenes:images}}})).isError,'Configurar destinos físicos');
+    const saved=await first.call('conversacion_guardar',{titulo:'Brisa del paquete',proyecto:'Brisa del paquete',importante:'Acuerdo: 23 cajas para el viernes. Pendiente confirmar transportista.'});
+    check(saved.data.estado==='registrada',JSON.stringify(saved.data));
+    const item=saved.data.conversacion;
+    check(path.dirname(item.archivo)===folder,'Memoria física en destino elegido');
+    const created=await first.call('crear',{ruta:'informe.md',contenido:'Resultado ficticio.',conversacion:item.id});
+    check(created.data.ruta_absoluta===path.join(folder,'informe.md'),'Informe en almacén físico');
+    const svg=await first.call('crear',{ruta:'dibujo.svg',contenido:'<svg xmlns="http://www.w3.org/2000/svg"/>',conversacion:item.id});
+    check(svg.data.ruta_absoluta===path.join(images,'dibujo.svg'),'Imagen en almacén por tipo');
+    const bytes=Buffer.from([0,255,127,42,0,13,10]);const origin=path.join(workspace,'origen.png');await fs.writeFile(origin,bytes);
+    const copied=await first.call('resultado_importar',{origen:origin,nombre:'resultado.png',conversacion:item.id});
+    check(copied.data.sha256===createHash('sha256').update(bytes).digest('hex'),'Integridad binaria importada');
+    check((await fs.readFile(path.join(images,'resultado.png'))).equals(bytes),'Copia física íntegra');
+    check((await first.close()).code===0,'Primer cliente cerrado');
+    const second=await open('continuidad-paquete-B');
+    const read=await second.call('conversacion_leer',{id:item.id});
+    check(read.data.conversacion.resultados.length===3,'Resultados recuperados en otra sesión');
+    const updated=await second.call('conversacion_guardar',{id:item.id,revision:read.data.conversacion.revision,importante:'Acuerdo vigente: 31 cajas para el lunes. Pendiente confirmar transportista.'});
+    check(updated.data.estado==='actualizada'&&updated.data.conversacion.archivo===item.archivo,'Mismo ID y archivo al continuar');
+    check((await fs.readFile(item.archivo,'utf8')).includes('31 cajas para el lunes'),'Memoria física vigente');
+    const prepared=await second.call('conversaciones_preparar',{});
+    check(prepared.data.estado==='preparada',JSON.stringify(prepared.data));
+    const found=await second.call('conversaciones_buscar',{consulta:'cajas',proyecto:'Brisa del paquete',modo:'hibrida'});
+    check(found.data.semantica.estado==='activa'&&found.data.conversaciones.some(x=>x.id===item.id),'Inferencia local activa y conversación recuperada');
+    const oldMemory=await fs.readFile(item.archivo);
+    const relocated=await second.call('conversacion_trasladar',{id:item.id,revision:updated.data.conversacion.revision,destino:path.join(workspace,'Traslado')});
+    check(relocated.data.estado==='trasladada','Traslado integral del paquete');
+    const renamed=await second.call('mover',{carpeta:workspace,desde:'Traslado',hasta:'Continuacion'});
+    check(renamed.data.estado==='movido'&&renamed.data.continuidad.estado==='actualizada','Rutas de conversación actualizadas al renombrar');
+    const current=(await second.call('conversacion_leer',{id:item.id})).data.conversacion;
+    check(current.archivo.startsWith(path.join(workspace,'Continuacion')+path.sep),'Memoria en la carpeta nueva');
+    check(current.resultados.length===3&&current.resultados.every(x=>x.archivo.startsWith(path.join(workspace,'Continuacion')+path.sep)),'Todos los archivos vinculados trasladados');
+    const binary=current.resultados.find(x=>x.archivo.endsWith('resultado.png'));
+    check((await fs.readFile(binary.archivo)).equals(bytes),'Imagen íntegra después de copiar y renombrar');
+    const continued=await second.call('conversacion_guardar',{id:item.id,revision:current.revision,importante:'Acuerdo vigente: 31 cajas para el lunes. Pendiente confirmar transportista. Trabajo continuado tras traslado.'});
+    check(continued.data.estado==='actualizada'&&continued.data.conversacion.archivo===current.archivo,'Continuar sin recrear la ruta anterior');
+    check((await fs.readFile(item.archivo)).equals(oldMemory),'La recuperación de origen permanece intacta');
+    check((await second.close()).code===0,'Segundo cliente cerrado');
+    return {memoria:'esencial',resultados:3,semantica:'activa',motor:'runtimes incluidos',clientes:'dos clientes MCP simulados',traslado:'memoria y tres resultados, seguido de renombrado y continuación'};
+  });
+
   await step(23, 'Actualización del Motor conservando la Base', PACKAGE, async () => {
     if (!updateArgument) return { pending: 'no se indicó --actualizacion <paquete nuevo>' };
     const { updateMind } = await packageModule('src/commands/actualizar.js');
-    const before = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8')).mindVersion;
+    const before = await readManifestFile(mind);
     const result = await updateMind({ root: mind, source: path.resolve(updateArgument), baseDirectory: base, confirm: async () => true });
     check(result.status === 'actualizada', JSON.stringify(result));
-    const after = JSON.parse(await fs.readFile(path.join(mind, 'mind-producto.json'), 'utf8')).mindVersion;
-    check(after !== before, `versión ${before} → ${after}`);
+    const after = await readManifestFile(mind);
+    manifest = after;
+    check(comparePackageVersions(after,before)>0, `revision ${before.packageRevision} -> ${after.packageRevision}`);
     session = await launch({ clientInfo: { name: 'agente-de-prueba-E', version: '1.0' } });
     await session.initialize();
     const status = (await session.call('estado')).data;
-    check(status.carpetas.length === 1 && status.carpetas[0].id === folderB, 'autorizaciones conservadas');
+    check(status.carpetas.length === 2 && status.carpetas.some(x=>x.id===folderB) && status.carpetas.some(x=>x.ruta===path.join(mind,'Conversaciones')), 'autorizaciones conservadas');
     check((await session.call('buscar', { propiedades: { estado: 'aprobado' } })).data.total === 1, 'propiedades conservadas');
     check((await session.call('continuidad_consultar', { texto: 'presupuesto' })).data.total === 1, 'continuidad conservada');
     check(JSON.stringify((await session.call('funciones')).data.funciones).includes('nota'), 'funciones conservadas');
     check((await session.call('indices_personalizados')).data.total === 1, 'índices personalizados conservados');
     const exit = await session.close();
     check(exit.code === 0, `Código de salida ${exit.code}`);
-    return { desde: before, hasta: after, anterior: path.basename(result.backup ?? '') };
+    return { desde: before.mindVersion, hasta: after.mindVersion, desdeRevision: before.packageRevision, hastaRevision: after.packageRevision, limpiezaPendiente: result.cleanupPending === true };
   });
   await step(24, 'Carpeta abierta: leer, crear y continuidad sin formularios', SIMULATED, async () => {
-    const project = path.join(temporary, 'Proyecto abierto ñ');
+    let project = path.join(temporary, 'Proyecto abierto ñ');
     await fs.mkdir(project);
+    project = await fs.realpath(project);
     await fs.writeFile(path.join(project, 'nota.txt'), 'Información ficticia del proyecto');
     const { nodeExecutable: node } = productRuntime(mind, manifest);
-    const client = startMcp({ command: node, commandArgs: [path.join(mind, 'Motor', 'bin', 'mind.js'), 'mcp'], cwd: project, baseEnv: isolatedEnv(), capabilities: {} });
+    const client = startMcp({ command: node, commandArgs: [productPaths(mind, manifest).entrypoint, 'mcp'], cwd: project, baseEnv: isolatedEnv(), capabilities: {} });
     clients.push(client);
     await client.initialize();
-    check(!(await client.call('leer', { ruta: 'nota.txt' })).isError, 'Leer sin autorización adicional');
+    check(!(await client.call('leer', { carpeta:project,ruta: 'nota.txt' })).isError, 'Leer sin autorización adicional');
     check(!(await client.call('crear', { ruta: 'resultado.txt', contenido: 'Resultado ficticio' })).isError, 'Crear sin autorización adicional');
     check(!(await client.call('continuidad_registrar', { contenido: 'Prueba de carpeta abierta' })).isError, 'Continuidad sin autorización adicional');
     check(client.elicitations.length === 0, 'No debe pedir formularios de acceso');
-    check((await client.call('estado')).data.carpetas.length === 1, 'El ámbito es solo el proyecto abierto');
+    check((await client.call('estado')).data.carpetas.length === 2, 'El ámbito es el proyecto abierto y Conversaciones');
     check((await client.close()).code === 0, 'Cierre limpio');
     return { formularios: 0 };
   });
 } finally {
-  for (const client of clients) {
-    client.child.stdin.end();
-    if (client.child.exitCode === null) client.child.kill();
-  }
-  await fs.rm(temporary, { recursive: true, force: true });
+  await Promise.allSettled(clients.map(client=>client.close()));
+  check(path.dirname(temporary)===os.tmpdir() && path.basename(temporary).startsWith('mind-producto-'),'Temporal fuera del ensayo');
+  await fs.rm(temporary, { recursive: true, force: true, maxRetries:3, retryDelay:100 });
 }
 
 const summary = {
@@ -536,7 +605,7 @@ const summary = {
   commit: manifest?.builtFrom ?? null,
   plataforma: `${process.platform}-${process.arch}`,
   node_que_ejecuta_la_prueba: process.execPath,
-  manifiesto_sha256: manifest ? createHash('sha256').update(await fs.readFile(path.join(mind, 'mind-producto.json'))).digest('hex') : null,
+  manifiesto_sha256: manifest ? createHash('sha256').update(await fs.readFile(productPaths(mind, manifest).manifestFile)).digest('hex') : null,
   superados: results.filter((item) => item.resultado === 'superado').length,
   fallidos: results.filter((item) => item.resultado === 'fallido').length,
   pendientes: results.filter((item) => item.resultado === 'pendiente').length,

@@ -1,5 +1,5 @@
 import { MotorError } from './errors.js';
-import { resolveLayout } from './layout.js';
+import { resolveLayout, productInstallation, productRuntime } from './layout.js';
 import { MOTOR_VERSION } from './version.js';
 import { COMMANDS } from './commands/index.js';
 
@@ -10,7 +10,8 @@ const USAGE = `Mind ${MOTOR_VERSION}
 Uso: mind <orden> [opciones]
 
 Para el usuario:
-  preparar                   Prepara la conexión del agente en la carpeta portable.
+  preparar                   Prepara la conexión y el inicio automático en los agentes detectados.
+  inicio                     Lee instrucciones y destinos al iniciar una conversación.
   estado                     Resumen de la Base, las carpetas y sus permisos.
   autorizar [ruta]           Revisa y aprueba solicitudes de agentes; con una ruta,
                              autoriza esa carpeta (pregunta qué permisos conceder).
@@ -115,17 +116,22 @@ async function runTool(session, name, args) {
 export async function main(args) {
   try {
     const { options, command, parameters } = parse(args);
-    options.autoWorkspace = ['estado', 'herramienta'].includes(command);
-    if (!['version', '--version', 'actualizar'].includes(command)) {
+    options.autoWorkspace = ['estado', 'herramienta', 'inicio'].includes(command);
+    if (!['version', '--version', 'actualizar', 'corregir'].includes(command)) {
       const { prepareProductMcp } = await import('./product-mcp.js');
       try {
         const result = await prepareProductMcp();
-        if (command === 'preparar') {
-          print(result === 'personalizada'
-            ? 'Se conservó la conexión de Mind personalizada en .mcp.json.'
-            : 'Abre esta carpeta en tu agente para empezar a usar Mind.');
-          return 0;
+        const installation = await productInstallation();
+        let startup = {estado:'no_aplica',clientes:[]};
+        if (installation.root) {
+          const { prepareAgentStartup } = await import('./agent-startup.js');
+          startup = await prepareAgentStartup({root:installation.root,runtime:productRuntime(installation.root,installation.manifest)});
         }
+        if (command === 'preparar') {
+          print({conexion:result,inicio:startup,indicacion:'Las instrucciones se cargan en conversaciones nuevas de los clientes detectados.'});
+          return startup.estado === 'parcial' ? 1 : 0;
+        }
+        if (startup.estado === 'parcial') process.stderr.write('Aviso: algún cliente no pudo preparar el inicio de Mind; ejecuta preparar para consultar la incidencia.\\n');
       } catch (error) {
         if (command === 'preparar') throw error;
         process.stderr.write(`Aviso al preparar la conexión de Mind: ${error.message}\n`);
@@ -145,6 +151,8 @@ export async function main(args) {
         print({
           mind: layout?.manifest?.mindVersion ?? MOTOR_VERSION,
           motor: MOTOR_VERSION,
+          revision: layout?.manifest?.packageRevision ?? 0,
+          estructura: layout?.manifest?.layoutVersion ?? 1,
           node: process.versions.node,
           plataforma: `${process.platform}-${process.arch}`,
           producto: layout?.product ?? false,
@@ -155,6 +163,13 @@ export async function main(args) {
         const { runMcpSession } = await import('./mcp-session.js');
         return await runMcpSession({ layout: await resolveLayout({ base: options.base }), parameters, workspacePaths: options.workspacePaths });
       }
+      case 'inicio':
+        return await withSession(options, async (session) => {
+          const result = await runTool(session,'destinos_consultar',{});
+          const { AGENT_INSTRUCTIONS } = await import('./agent-tools.js');
+          print({mind:MOTOR_VERSION,instrucciones:AGENT_INSTRUCTIONS,destinos:result.value});
+          return result.isError ? 1 : 0;
+        });
       case 'estado':
         return await withSession(options, async (session) => {
           const result = await runTool(session, 'estado', {});

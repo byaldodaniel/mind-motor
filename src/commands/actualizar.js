@@ -1,4 +1,4 @@
-import { lockInstallation } from '../installation-lock.js';
+import { runUpdateTransaction } from '../update-transaction.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -11,30 +11,14 @@ import { BASE_MARKER } from '../base-format.js';
 import { liveSessions } from '../session.js';
 import { requireInteractive, createPrompter } from '../console.js';
 import { readArchive, extractEntries, compareBytes } from '../archive.js';
-import { productRuntime } from '../layout.js';
+import { productRuntime, productPaths } from '../layout.js';
 import {
   MANIFEST_NAME, readManifestFile, verifyTree, describeProblems, compareVersions, supportsProductTarget,
 } from '../product-files.js';
 
-/**
- * `mind actualizar <paquete.zip|.tar.gz|carpeta> [--forzar]`
- *
- * Sustituye Motor/, Runtime/, iniciadores, configuraciones y documentación
- * por los de un paquete nuevo y nunca toca Base/:
- *
- * 1. exige que no haya sesiones de Mind vivas sobre la Base;
- * 2. prepara al lado (dentro de la carpeta de Mind) una copia del paquete y
- *    verifica su manifiesto y el SHA-256 de cada archivo;
- * 3. exige que el paquete admita este equipo, rechaza bajar de versión salvo
- *    --forzar y comprueba que el Motor nuevo admite el formato de la Base;
- * 4. tras la confirmación del usuario, renombra lo anterior a
- *    .anterior-<versión>/ y coloca lo nuevo; comprueba que el Mind nuevo
- *    arranca (`mind version`) y, si algo falla, vuelve atrás.
- *
- * Todos los módulos necesarios se importan antes de sustituir Motor/: después
- * no se carga ningún archivo del Motor anterior.
+/** Actualización verificada con diario durable, espera de sesiones y recuperación solo temporal.
+ * Nunca sustituye los datos persistentes ni conserva revisiones anteriores tras confirmar.
  */
-
 /** Carpetas que pertenecen por completo al paquete y se sustituyen enteras. */
 export const OWNED_DIRECTORIES = Object.freeze(['Motor', 'Runtime', 'LICENCIAS']);
 const LOCK_NAME = '.mind-actualizacion.lock';
@@ -155,7 +139,7 @@ async function copyVerified(sourceFile, destination, expected) {
 }
 
 /** Copia del paquete en la carpeta de preparación, ya verificada. Devuelve { tree, manifest }. */
-async function prepare(source, staging, report) {
+export async function prepare(source, staging, report) {
   const info = await fsp.stat(source).catch(() => null);
   if (!info) throw fail('UPDATE_SOURCE_NOT_FOUND', `No se encuentra el paquete: ${source}`);
   const tree = path.join(staging, 'paquete');
@@ -186,7 +170,12 @@ async function prepare(source, staging, report) {
     if (problems.length > 0) {
       throw fail('UPDATE_PACKAGE_ALTERED', `El paquete no coincide con su manifiesto: ${describeProblems(problems)}.`);
     }
-    await fsp.copyFile(path.join(source, MANIFEST_NAME), path.join(tree, MANIFEST_NAME));
+    const mf = productPaths(source, manifest).manifestFile;
+    await fsp.mkdir(path.dirname(productPaths(tree, manifest).manifestFile), { recursive: true });
+    await fsp.copyFile(mf, productPaths(tree, manifest).manifestFile);
+    if (manifest.layoutVersion === 2) {
+      await fsp.copyFile(path.join(source, 'Sistema', 'entrega-firmada.json'), path.join(tree, 'Sistema', 'entrega-firmada.json')).catch(error => { if(error.code !== 'ENOENT') throw error; });
+    }
     return { tree, manifest };
   }
   report('Extrayendo y verificando el paquete…');
@@ -194,9 +183,9 @@ async function prepare(source, staging, report) {
   await extractEntries(readArchive(source), extracted);
   // El paquete trae una carpeta raíz Mind-<versión>-<plataforma>-<arquitectura>/.
   let root = extracted;
-  if (!(await exists(path.join(extracted, MANIFEST_NAME)))) {
+  if (!(await readManifestFile(extracted))) {
     const names = await fsp.readdir(extracted);
-    if (names.length !== 1 || !(await exists(path.join(extracted, names[0], MANIFEST_NAME)))) {
+    if (names.length !== 1 || !(await readManifestFile(path.join(extracted, names[0])))) {
       throw fail('UPDATE_PACKAGE_INVALID', 'El archivo no contiene un paquete de Mind (falta mind-producto.json).');
     }
     root = path.join(extracted, names[0]);
@@ -211,7 +200,7 @@ async function prepare(source, staging, report) {
 /** Formato de Base que admite el Motor nuevo: del manifiesto o, si falta, leído (sin ejecutarlo) de su base-format.js. */
 async function supportedBaseFormat(tree, manifest) {
   if (Number.isSafeInteger(manifest.baseFormatVersion)) return manifest.baseFormatVersion;
-  const text = await fsp.readFile(path.join(tree, 'Motor', 'src', 'base-format.js'), 'utf8').catch(() => '');
+  const text = await fsp.readFile(path.join(productPaths(tree, manifest).motorDirectory, 'src', 'base-format.js'), 'utf8').catch(() => '');
   const match = /export const BASE_FORMAT_VERSION\s*=\s*(\d+)\s*;/u.exec(text);
   if (!match) throw fail('UPDATE_BASE_UNKNOWN', 'No se puede comprobar qué formato de Base admite el paquete nuevo; no se actualiza.');
   return Number(match[1]);
@@ -230,60 +219,6 @@ async function baseFormat(baseDirectory) {
   return data.version;
 }
 
-async function requireNoSessions(baseDirectory, root) {
-  const baseSessions = await liveSessions(baseDirectory);
-  const installationSessions = await liveSessions(path.join(root, '.mind-producto'));
-  const live = [...new Map([...baseSessions.live, ...installationSessions.live].map(entry => [entry.id, entry])).values()];
-  const stale = [...baseSessions.stale, ...installationSessions.stale];
-  if (live.length > 0) {
-    throw fail('MIND_IN_USE', `Hay ${live.length} sesión(es) de Mind abiertas (agentes u órdenes en otra ventana). Ciérralas y vuelve a intentarlo.${stale.length > 0 ? ' Si un agente se cerró de forma abrupta, "mind reparar" limpia las sesiones abandonadas.' : ''}`);
-  }
-}
-
-/** Bloqueo de la carpeta de Mind durante la actualización; recupera el de un proceso que ya terminó. */
-async function lock(root) {
-  const file = path.join(root, LOCK_NAME);
-  const content = `${JSON.stringify({ pid: process.pid, host: os.hostname(), startedAt: new Date().toISOString() })}\n`;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      await fsp.writeFile(file, content, { flag: 'wx', mode: 0o600 });
-      return () => fsp.rm(file, { force: true });
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      let data = {};
-      try {
-        data = JSON.parse(await fsp.readFile(file, 'utf8'));
-      } catch {
-        // Ilegible: se trata como abandonado.
-      }
-      let alive = data.host !== os.hostname();
-      if (!alive && Number.isSafeInteger(data.pid)) {
-        try {
-          process.kill(data.pid, 0);
-          alive = true;
-        } catch (failure) {
-          alive = failure.code === 'EPERM';
-        }
-      }
-      if (alive) throw fail('UPDATE_IN_PROGRESS', 'Ya hay una actualización de Mind en curso en esta carpeta.');
-      await fsp.rm(file, { force: true });
-    }
-  }
-  throw fail('UPDATE_IN_PROGRESS', 'No se pudo bloquear la carpeta de Mind para actualizar.');
-}
-
-async function uniqueDirectory(root, name) {
-  for (let index = 1; ; index += 1) {
-    const candidate = path.join(root, index === 1 ? name : `${name}-${index}`);
-    try {
-      await fsp.mkdir(candidate);
-      return candidate;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-    }
-  }
-}
-
 /** Comprobación tras sustituir: el Mind nuevo arranca con su propio Node y declara la versión esperada. */
 export function smokeTest(root, manifest) {
   const { nodeExecutable } = productRuntime(root, manifest);
@@ -291,7 +226,7 @@ export function smokeTest(root, manifest) {
     const env = { ...process.env, NODE_OPTIONS: '' };
     delete env.MIND_BASE;
     delete env.MIND_PYTHON;
-    const child = spawn(nodeExecutable, [path.join(root, 'Motor', 'bin', 'mind.js'), 'version'], {
+    const child = spawn(nodeExecutable, [path.join(productPaths(root, manifest).motorDirectory, 'bin', 'mind.js'), 'version'], {
       cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
     let output = '';
@@ -319,118 +254,6 @@ export function smokeTest(root, manifest) {
   });
 }
 
-/**
- * Actualiza la carpeta de Mind `root` con el paquete `source`.
- *
- * @param {object} options
- * @param {string} options.root Carpeta de Mind instalada (con mind-producto.json).
- * @param {string} options.source Paquete .zip/.tar.gz o carpeta extraída.
- * @param {string} options.baseDirectory Base cuyas sesiones y formato se comprueban (no se modifica).
- * @param {(summary: object) => Promise<boolean> | boolean} options.confirm Confirmación del usuario.
- * @param {boolean} [options.force] Permite bajar de versión.
- * @param {(line: string) => void} [options.report]
- * @param {(root: string, manifest: object) => Promise<unknown>} [options.verifyInstalled]
- * @param {{ rename?: Function, platform?: string, afterMove?: Function }} [options.testing] Solo para pruebas.
- */
-async function updateMindUnlocked({
-  root, source, baseDirectory, confirm, force = false, report = () => {}, verifyInstalled = smokeTest, testing = {},
-}) {
-  const current = await readManifestFile(root);
-  if (!current) throw fail('NOT_PRODUCT', '"mind actualizar" solo funciona en la carpeta de Mind del paquete (con mind-producto.json).');
-  const sourcePath = path.resolve(source);
-  if (inside(root, sourcePath) || inside(sourcePath, root)) {
-    throw fail('UPDATE_SOURCE_INVALID', 'El paquete nuevo debe estar fuera de la carpeta de Mind que se actualiza.');
-  }
-  // --base admite ubicaciones personalizadas: ninguna puede quedar entre los
-  // elementos que se apartan o sustituyen, tampoco a través de un enlace.
-  await protectBase(root, baseDirectory, [...managedItems(current), MANIFEST_NAME]);
-  await requireNoSessions(baseDirectory, root);
-  const unlock = await lock(root);
-  const staging = await fsp.mkdtemp(path.join(root, STAGING_PREFIX));
-  const moves = { aside: [], placed: [] };
-  let backup = null;
-  let restoreSignals = null;
-  const move = (from, to) => moveEntry(from, to, { rename: testing.rename, platform: testing.platform });
-  try {
-    const { tree, manifest: incoming } = await prepare(sourcePath, staging, report);
-    await protectBase(root, baseDirectory, [...managedItems(current, incoming), MANIFEST_NAME]);
-    const { platform, arch } = current.targets ? process : current;
-    if (!supportsProductTarget(current, platform, arch) || !supportsProductTarget(incoming, platform, arch)) {
-      throw fail('UPDATE_PLATFORM_MISMATCH', `El paquete no admite ${platform}-${arch}, el destino de esta instalación.`);
-    }
-    const order = compareVersions(incoming.mindVersion, current.mindVersion);
-    if (order < 0 && !force) {
-      throw fail('UPDATE_DOWNGRADE', `El paquete (${incoming.mindVersion}) es anterior a la versión instalada (${current.mindVersion}). Usa --forzar si de verdad quieres volver a esa versión.`);
-    }
-    const supported = await supportedBaseFormat(tree, incoming);
-    const stored = await baseFormat(baseDirectory);
-    if (stored !== null && stored > supported) {
-      throw fail('UPDATE_BASE_INCOMPATIBLE', `La Base usa el formato ${stored} y el Mind ${incoming.mindVersion} solo admite hasta el ${supported}. No se actualiza: la Base no se modifica.`);
-    }
-    const backupName = `.anterior-${current.mindVersion.replace(/[^0-9A-Za-z.+-]/gu, '_')}`;
-    const summary = {
-      from: current.mindVersion, to: incoming.mindVersion, platform: `${platform}-${arch}`,
-      files: Object.keys(incoming.files).length, downgrade: order < 0, reinstall: order === 0,
-      base: stored === null ? 'sin crear' : `formato ${stored}`, supportedBase: supported, backup: backupName,
-    };
-    if (!(await confirm(summary))) return { status: 'cancelada', ...summary };
-    await requireNoSessions(baseDirectory, root);
-
-    // Sustitución: un Ctrl+C a mitad dejaría la carpeta incompleta, así que se pospone.
-    const deferred = () => {};
-    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, deferred);
-    restoreSignals = () => {
-      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.removeListener(signal, deferred);
-    };
-    backup = await uniqueDirectory(root, backupName);
-    const items = [...managedItems(current, incoming), MANIFEST_NAME];
-    for (const item of items) {
-      const live = native(root, item);
-      if (!(await exists(live))) continue;
-      const aside = native(backup, item);
-      await fsp.mkdir(path.dirname(aside), { recursive: true });
-      await move(live, aside);
-      moves.aside.push({ live, aside });
-      await testing.afterMove?.('aside', item);
-    }
-    for (const item of items) {
-      const fresh = native(tree, item);
-      if (!(await exists(fresh))) continue;
-      const live = native(root, item);
-      await fsp.mkdir(path.dirname(live), { recursive: true });
-      await move(fresh, live);
-      moves.placed.push({ live, fresh });
-      await testing.afterMove?.('placed', item);
-    }
-    report('Comprobando que el Mind nuevo arranca…');
-    await verifyInstalled(root, incoming);
-    restoreSignals();
-    restoreSignals = null;
-    return { status: 'actualizada', ...summary, backup: path.basename(backup) };
-  } catch (error) {
-    if (moves.aside.length > 0 || moves.placed.length > 0) {
-      const problems = [];
-      for (const { live, fresh } of moves.placed.reverse()) {
-        await move(live, fresh).catch((failure) => problems.push(`${live}: ${failure.message}`));
-      }
-      for (const { live, aside } of moves.aside.reverse()) {
-        await fsp.mkdir(path.dirname(live), { recursive: true }).catch(() => {});
-        await move(aside, live).catch((failure) => problems.push(`${live}: ${failure.message}`));
-      }
-      if (problems.length > 0) {
-        throw fail('UPDATE_ROLLBACK_FAILED', `La actualización falló (${error.message}) y no se pudo restaurar todo. Lo anterior sigue en ${backup}. Detalles: ${problems.slice(0, 3).join('; ')}`, { cause: error });
-      }
-      error.message = `${error.message} Se restauró la versión anterior.`;
-    }
-    if (backup && (await emptyTree(backup))) await fsp.rm(backup, { recursive: true, force: true });
-    throw error;
-  } finally {
-    restoreSignals?.();
-    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {});
-    await unlock();
-  }
-}
-
 function describeSummary(summary) {
   const lines = [
     `Actualización de Mind: ${summary.from} → ${summary.to} (${summary.platform}).`,
@@ -438,8 +261,8 @@ function describeSummary(summary) {
   ];
   if (summary.downgrade) lines.push('Atención: el paquete es una versión ANTERIOR a la instalada (--forzar).');
   if (summary.reinstall) lines.push('Es la misma versión: se reinstalará.');
-  lines.push('Se sustituyen Motor/, Runtime/, iniciadores, configuraciones de agentes y documentación.');
-  lines.push(`Lo actual se conserva en ${summary.backup}/. La Base (${summary.base}) no se modifica.`);
+  lines.push('Se actualizan el programa, los componentes que cambiaron y las entradas administradas de Mind.');
+  lines.push(`La Base (${summary.base}) se conserva. La recuperación temporal se retira tras verificar la entrega.`);
   return lines;
 }
 
@@ -471,7 +294,7 @@ export async function run({ parameters, layout, print }) {
     if (result.status === 'cancelada') {
       print('No se actualizó nada.');
     } else {
-      print(`Listo: Mind ${result.to}. La versión anterior queda en ${result.backup}/ (puedes borrarla cuando compruebes que todo funciona).`);
+      print(result.status === 'pendiente' ? 'Actualización preparada; espera el cierre seguro de las sesiones.' : `Listo: Mind ${result.to}. ${result.cleanupPending ? 'Limpieza pendiente; se retomará sin acumular otra instalación.' : 'Una sola instalación vigente; temporales retirados.'}`);
     }
   } finally {
     prompt.close();
@@ -481,7 +304,5 @@ export async function run({ parameters, layout, print }) {
 
 
 export async function updateMind(options) {
-  const release = await lockInstallation(options.root);
-  try { return await updateMindUnlocked(options); }
-  finally { await release(); }
+  return runUpdateTransaction(options, { prepare, protectBase, supportedBaseFormat, baseFormat, smokeTest, moveEntry });
 }

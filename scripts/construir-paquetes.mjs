@@ -24,8 +24,9 @@ import {
   readArchive, extractEntries, writeTarGz, writeZip, compareBytes, normalizedMode, resolveLinkTarget, safeRelativePath,
 } from '../src/archive.js';
 import {
-  hashFile, scanTree, validateManifest, validUniversalTargets, verifyTree, describeProblems, MANIFEST_NAME,
+  hashFile, scanTree, validateManifest, validUniversalTargets, verifyTree, describeProblems, MANIFEST_NAME, MANIFEST_RELATIVE_PATH, manifestRelativePath,
 } from '../src/product-files.js';
+import { copySemanticBundle } from '../src/semantic-bundle.js';
 import { BASE_FORMAT_VERSION } from '../src/base-format.js';
 
 /** El manifiesto declara siempre la capacidad real del Motor que se empaqueta. */
@@ -45,7 +46,7 @@ export const TARGETS = Object.freeze({
 });
 
 /** Archivos del Motor que viajan en el paquete (solo los versionados en git). */
-const MOTOR_PATHS = ['bin', 'src', 'package.json', 'LICENSE', 'docs/PRODUCTO.md', 'docs/CONTROL_RECURSOS.md'];
+const MOTOR_PATHS = ['bin', 'src', 'package.json', 'LICENSE', 'docs/PRODUCTO.md', 'docs/CONTROL_RECURSOS.md', 'docs/CIERRE_1_0_3.md'];
 
 function fail(message) {
   throw new Error(message);
@@ -115,9 +116,9 @@ with lzma.open(sys.argv[1], "rb") as source:
 }
 
 /** Node.js: solo el ejecutable y su licencia (sin npm ni cabeceras). */
-async function extractNode(file, runtime, target) {
+async function extractNode(file, runtime, target, direct = false) {
   const keep = target.platform === 'win32' ? new Set(['node.exe', 'LICENSE']) : new Set(['bin/node', 'LICENSE']);
-  const extracted = await extractEntries(readArchive(file, { decompressXz }), path.join(runtime, 'node'), {
+  const extracted = await extractEntries(readArchive(file, { decompressXz }), (direct ? runtime : path.join(runtime, 'node')), {
     map: (name, entry) => {
       const inner = name.split('/').slice(1).join('/');
       return entry.type !== 'directory' && keep.has(inner) ? inner : null;
@@ -128,12 +129,22 @@ async function extractNode(file, runtime, target) {
   return extracted;
 }
 
-/** CPython de python-build-standalone (install_only_stripped): su carpeta python/ completa. */
-async function extractPython(file, runtime, target, recordLinks) {
-  const extracted = await extractEntries(readArchive(file), path.join(runtime, 'python'), {
+/** Perfil mínimo: conserva stdlib y extensiones usadas, excluye herramientas de desarrollo/GUI. */
+export function keepPythonPath(relative) {
+  const value = relative.toLowerCase();
+  if (/(?:^|\/)(?:include|__pycache__|ensurepip|idlelib|tkinter|turtledemo)(?:\/|$)/u.test(value)) return false;
+  if (/(?:^|\/)site-packages\/pip(?:[./-]|$)/u.test(value)) return false;
+  if (/(?:^|\/)(?:tcl|tk|itcl|tix)(?:\d+(?:\.\d+)*)?(?:\/|$)/u.test(value) || /(?:^|\/)thread\d+(?:\.\d+)*(?:\/|$)/u.test(value)) return false;
+  if (/(?:^|\/)(?:lib(?:tcl|tk|itcl|thread)[^/]*|(?:tcl|tk)\d+[^/]*|_tkinter[^/]*)\.(?:so|dylib|dll|pyd)(?:\.\d+)*$/u.test(value)) return false;
+  if (/(?:^|\/)(?:turtle\.py|idle(?:3(?:\.\d+)?)?|pip(?:3(?:\.\d+)?)?|2to3(?:-\d+\.\d+)?|python3?(?:\.\d+)?-config|pydoc3?(?:\.\d+)?)$/u.test(value)) return false;
+  return !/\.(?:pyc|pyo|a)$/u.test(value) && !value.startsWith('share/terminfo/');
+}
+
+async function extractPython(file, runtime, target, recordLinks, direct = false) {
+  const extracted = await extractEntries(readArchive(file), (direct ? runtime : path.join(runtime, 'python')), {
     // share/terminfo (bases de datos de terminales para curses) no lo usa Mind y
     // contiene nombres que solo difieren en mayúsculas: chocan en macOS y Windows.
-    map: (name) => (name.startsWith('python/') && !name.startsWith('python/share/terminfo/') ? name.slice('python/'.length) : null),
+    map: (name) => (name.startsWith('python/') && keepPythonPath(name.slice('python/'.length)) ? name.slice('python/'.length) : null),
     links: recordLinks || target.platform === 'win32' ? 'record' : 'create',
   });
   const interpreter = target.platform === 'win32' ? 'python.exe' : 'bin/python3';
@@ -171,8 +182,8 @@ function mcpConfig(target) {
     mcpServers: {
       mind: {
         type: 'stdio',
-        command: windows ? 'Runtime\\node\\node.exe' : 'Runtime/node/bin/node',
-        args: [windows ? 'Motor\\bin\\mind.js' : 'Motor/bin/mind.js', 'mcp'],
+        command: windows ? 'Sistema\\Componentes\\Node\\win32-x64\\node.exe' : `Sistema/Componentes/Node/${target.platform}-${target.arch}/bin/node`,
+        args: ['Sistema/arranque.cjs', 'mcp'],
         // Opciones de Node del usuario no deben alterar el Motor.
         env: { NODE_OPTIONS: '' },
       },
@@ -194,7 +205,7 @@ licencias acompañan al paquete.
 | CPython (python-build-standalone ${components.python.publicacion}, ${components.python.variante}) | ${components.python.version} | ${components.python.licencia} (véase \`python.txt\`) | ${python.url} | \`${python.sha256}\` |
 
 Del archivo de Node.js solo se incluyen el ejecutable y su licencia. De CPython
-se incluye la carpeta \`python/\` completa en \`${prefix}/python\`.
+se incluye el perfil mínimo de ejecución (biblioteca estándar y auxiliares), sin pip, herramientas gráficas ni cabeceras. Los alias ejecutables POSIX son pequeños iniciadores del intérprete original.
 
 La integridad de estos archivos se comprobó con su SHA-256 antes de empaquetarlos
 y cada archivo del paquete figura con su huella en \`mind-producto.json\`. Eso
@@ -203,10 +214,10 @@ seguridad de los propios componentes.
 `;
 }
 
-async function findPythonLicense(runtime, target) {
+async function findPythonLicense(runtime, target, direct = false) {
   const candidates = target.platform === 'win32'
-    ? ['python/LICENSE.txt']
-    : ['python/lib/python3.12/LICENSE.txt'];
+    ? [direct ? 'LICENSE.txt' : 'python/LICENSE.txt']
+    : [direct ? 'lib/python3.12/LICENSE.txt' : 'python/lib/python3.12/LICENSE.txt'];
   for (const relative of candidates) {
     const file = path.join(runtime, ...relative.split('/'));
     if (fs.existsSync(file)) return file;
@@ -216,7 +227,7 @@ async function findPythonLicense(runtime, target) {
 
 /** Comprueba que el archivo final conserva los permisos y enlaces esperados. */
 async function verifyArchiveMetadata(file, entries) {
-  const remaining = new Map(entries.map((entry) => [`Mind/${entry.path}`, entry]));
+  const remaining = new Map(entries.map((entry) => [`My Mind/${entry.path}`, entry]));
   for await (const entry of readArchive(file)) {
     if (entry.type === 'directory') continue;
     const expected = remaining.get(entry.name);
@@ -234,26 +245,29 @@ async function copySharedFiles(stage) {
   const tracked = git(['ls-files', '-z', '--', ...MOTOR_PATHS]).split('\0').filter(Boolean);
   if (tracked.length === 0) fail('No hay archivos del Motor versionados.');
   for (const relative of tracked) {
-    await copyRepositoryFile(relative, path.join(stage, 'Motor', ...relative.split('/')));
+    await copyRepositoryFile(relative, path.join(stage, 'Sistema', 'Programa', 'Motor', ...relative.split('/')));
   }
+  const semanticConfig = JSON.parse(git(['show', 'HEAD:packaging/semantica.json']));
+  await copySemanticBundle(path.join(stage, 'Sistema', 'Componentes', 'Semantica'), { manifestSha256: semanticConfig.bundleManifestSha256 });
   for (const name of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'LEEME.md']) {
     await copyRepositoryFile(`packaging/plantilla/${name}`, path.join(stage, name));
   }
-  await copyRepositoryFile('LICENSE', path.join(stage, 'LICENCIA.txt'));
+  await copyRepositoryFile('LICENSE', path.join(stage, 'Sistema', 'LICENCIA.txt'));
 }
 
 async function copyLaunchers(stage, modes, { windows, posix, mac }) {
+  await copyRepositoryFile('packaging/iniciadores/arranque.cjs', path.join(stage,'Sistema','arranque.cjs'));
   if (windows) {
-    await copyRepositoryFile('packaging/iniciadores/mind.cmd', path.join(stage, 'mind.cmd'), { crlf: true });
-    await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.cmd', path.join(stage, 'Autorizar Mind.cmd'), { crlf: true });
+    await copyRepositoryFile('packaging/iniciadores/mind.cmd', path.join(stage, 'Sistema', 'mind.cmd'), { crlf: true });
+    await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.cmd', path.join(stage, 'Sistema', 'Autorizar Mind.cmd'), { crlf: true });
   }
   if (posix) {
-    await copyRepositoryFile('packaging/iniciadores/mind', path.join(stage, 'mind'), { mode: 0o755 });
-    modes.set('mind', 0o755);
+    await copyRepositoryFile('packaging/iniciadores/mind', path.join(stage, 'Sistema', 'mind'), { mode: 0o755 });
+    modes.set('Sistema/mind', 0o755);
   }
   if (mac) {
-    await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.command', path.join(stage, 'Autorizar Mind.command'), { mode: 0o755 });
-    modes.set('Autorizar Mind.command', 0o755);
+    await copyRepositoryFile('packaging/iniciadores/Autorizar Mind.command', path.join(stage, 'Sistema', 'Autorizar Mind.command'), { mode: 0o755 });
+    modes.set('Sistema/Autorizar Mind.command', 0o755);
   }
 }
 
@@ -294,13 +308,19 @@ export async function materializeRuntimeLinks(directory, entries) {
     const target = alias && resolveLinkTarget(alias, entry.target);
     const original = target && safeRelativePath(target) && files.get(target);
     if (!original) fail(`El enlace ${entry.path} no apunta a un archivo regular del runtime.`);
-    await copyFile(path.join(directory, ...target.split('/')), path.join(directory, ...alias.split('/')), { mode: original.mode });
-    materialized.push({ path: alias, type: 'file', mode: original.mode });
+    if (['bin/python', 'bin/python3'].includes(alias) && /^bin\/python3\.\d+$/u.test(target)) {
+      const name = path.posix.basename(target);
+      await fsp.writeFile(path.join(directory, ...alias.split('/')), `#!/bin/sh\nDIR=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd -P) || exit 1\nexec "$DIR/${name}" "$@"\n`, { flag: 'wx', mode: 0o755 });
+      materialized.push({ path: alias, type: 'file', mode: 0o755 });
+    } else {
+      await copyFile(path.join(directory, ...target.split('/')), path.join(directory, ...alias.split('/')), { mode: original.mode });
+      materialized.push({ path: alias, type: 'file', mode: original.mode });
+    }
   }
   return materialized;
 }
 
-async function archiveStage(stage, { recordedLinks = [], modes, metadata, destination, write, mtime, verifyMetadata }) {
+async function archiveStage(stage, { recordedLinks = [], modes, metadata, destination, write, mtime, verifyMetadata, privateKey }) {
   // Manifiesto con la huella de cada archivo.
   const tree = [...await scanTree(stage), ...recordedLinks].sort((a, b) => compareBytes(a.path, b.path));
   const other = tree.filter((entry) => entry.type === 'other');
@@ -316,10 +336,12 @@ async function archiveStage(stage, { recordedLinks = [], modes, metadata, destin
     version: 1,
     builtFrom: git(['rev-parse', 'HEAD']).trim(),
     ...metadata,
+    packageRevision: metadata.packageRevision ?? 1, layoutVersion: 2, updateProtocolVersion: 2,
     files,
     links,
   });
-  await fsp.writeFile(path.join(stage, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
+  const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+  await fsp.writeFile(path.join(stage, ...MANIFEST_RELATIVE_PATH.split('/')), manifestBytes, { flag: 'wx' });
   const check = await verifyTree(stage, recordedLinks.length > 0 ? { ...manifest, links: {} } : manifest);
   if (!check.ok) fail(`La carpeta construida no coincide con su manifiesto: ${describeProblems(check.problems)}`);
 
@@ -327,9 +349,18 @@ async function archiveStage(stage, { recordedLinks = [], modes, metadata, destin
   const entries = tree.map((entry) => (entry.type === 'symlink'
     ? { path: entry.path, type: 'symlink', target: entry.target }
     : { path: entry.path, type: 'file', mode: modes.get(entry.path) ?? 0o644, source: { file: path.join(stage, ...entry.path.split('/')) } }));
-  entries.push({ path: MANIFEST_NAME, type: 'file', source: { file: path.join(stage, MANIFEST_NAME) } });
+  entries.push({ path: MANIFEST_RELATIVE_PATH, type: 'file', source: { file: path.join(stage, ...MANIFEST_RELATIVE_PATH.split('/')) } });
+  if (privateKey) {
+    const { createSignedPackageDescriptor, PACKAGE_DESCRIPTOR_PATH } = await import('../src/package-descriptor.js');
+    const descriptor = createSignedPackageDescriptor({ manifest, manifestBytes, privateKey });
+    const descriptorFile = path.join(stage, ...PACKAGE_DESCRIPTOR_PATH.split('/'));
+    await fsp.writeFile(descriptorFile, JSON.stringify(descriptor) + '\n', {flag:'wx',mode:0o644});
+    entries.push({path:PACKAGE_DESCRIPTOR_PATH,type:'file',mode:0o644,source:{file:descriptorFile}});
+  }
+  const total = (await Promise.all(entries.map(async entry => entry.source?.file ? (await fsp.stat(entry.source.file)).size : 0))).reduce((a,b)=>a+b,0);
+  if (entries.length > 4500 || total > Math.floor(1.10 * 1024 ** 3)) fail(`El paquete excede el presupuesto: ${entries.length} archivos, ${total} bytes.`);
   await fsp.rm(destination, { force: true });
-  const written = await write(destination, entries, { root: 'Mind', mtime });
+  const written = await write(destination, entries, { root: 'My Mind', mtime });
   if (verifyMetadata) await verifyArchiveMetadata(destination, entries);
   const sha256 = await hashFile(destination);
   const size = (await fsp.stat(destination)).size;
@@ -338,67 +369,58 @@ async function archiveStage(stage, { recordedLinks = [], modes, metadata, destin
   return { name, sha256 };
 }
 
-async function buildTarget(id, { components, cache, output, mtime, version, keepStage }) {
+async function stageTargetRuntime(stage, id, components, cache, modes) {
+  const nodeDirectory = path.join(stage, 'Sistema', 'Componentes', 'Node', id);
+  const pythonDirectory = path.join(stage, 'Sistema', 'Componentes', 'Python', id);
+  const nodeArchive = await fetchComponent(components.node.plataformas[id], cache);
+  const pythonArchive = await fetchComponent(components.python.plataformas[id], cache);
+  const nodeEntries = await extractNode(nodeArchive, nodeDirectory, TARGETS[id], true);
+  const pythonEntries = await extractPython(pythonArchive, pythonDirectory, TARGETS[id], true, true);
+  const pythonFiles = await materializeRuntimeLinks(pythonDirectory, pythonEntries);
+  for (const entry of nodeEntries) modes.set(`Sistema/Componentes/Node/${id}/${entry.path}`, entry.mode);
+  for (const entry of pythonFiles) modes.set(`Sistema/Componentes/Python/${id}/${entry.path}`, entry.mode);
+  const licenses = path.join(stage, 'Sistema', 'Licencias', id);
+  await copyFile(path.join(nodeDirectory, 'LICENSE'), path.join(licenses, 'node.txt'));
+  await copyFile(await findPythonLicense(pythonDirectory, TARGETS[id], true), path.join(licenses, 'python.txt'));
+  await fsp.writeFile(path.join(licenses, 'AVISOS.md'), noticesText(components,id,`Sistema/Componentes/Python/${id}`), {flag:'wx'});
+  return runtimeComponents(components,id).map(component => ({...component,target:id}));
+}
+
+async function buildTarget(id, { components, cache, output, mtime, version, keepStage, privateKey, packageRevision = 1 }) {
   const target = TARGETS[id];
   const work = path.join(output, '.construccion', id);
-  await fsp.rm(work, { recursive: true, force: true });
-  const stage = path.join(work, 'Mind');
+  await fsp.rm(work, {recursive:true,force:true});
+  const stage = path.join(work,'My Mind');
   await copySharedFiles(stage);
-
-  const runtime = path.join(stage, 'Runtime');
-  const recordLinks = process.platform === 'win32' && target.platform !== 'win32';
-  const { nodeEntries, pythonEntries } = await stageRuntime(id, runtime, { components, cache, recordLinks });
   const modes = new Map();
-  for (const entry of nodeEntries) modes.set(`Runtime/node/${entry.path}`, entry.mode);
-  for (const entry of pythonEntries) modes.set(`Runtime/python/${entry.path}`, entry.mode);
-  // Los enlaces POSIX se empaquetan sin crearlos en Windows.
-  const recordedLinks = recordLinks ? pythonEntries.filter((entry) => entry.type === 'symlink')
-    .map((entry) => ({ ...entry, path: `Runtime/python/${entry.path}` })) : [];
-  await copyLaunchers(stage, modes, {
-    windows: target.platform === 'win32', posix: target.platform !== 'win32', mac: target.platform === 'darwin',
-  });
-  await fsp.writeFile(path.join(stage, '.mcp.json'), mcpConfig(target), { flag: 'wx' });
-  await copyRuntimeLicenses(runtime, path.join(stage, 'LICENCIAS'), components, id);
-
-  const result = await archiveStage(stage, {
-    recordedLinks, modes, mtime, verifyMetadata: recordLinks,
-    metadata: {
-      mindVersion: version, platform: target.platform, arch: target.arch, components: runtimeComponents(components, id),
-    },
-    destination: path.join(output, `Mind-${version}-${id}.${target.format}`),
-    write: target.format === 'zip' ? writeZip : writeTarGz,
-  });
-  if (!keepStage) await fsp.rm(work, { recursive: true, force: true });
+  const manifestComponents = await stageTargetRuntime(stage,id,components,cache,modes);
+  await copyLaunchers(stage,modes,{windows:target.platform==='win32',posix:target.platform!=='win32',mac:target.platform==='darwin'});
+  await fsp.writeFile(path.join(stage,'.mcp.json'),mcpConfig(target),{flag:'wx'});
+  const result = await archiveStage(stage, {modes,mtime,verifyMetadata:true,privateKey,
+    metadata:{mindVersion:version,packageRevision,platform:target.platform,arch:target.arch,components:manifestComponents},
+    destination:path.join(output,`Mind-${version}-${id}.${target.format}`),write:target.format==='zip'?writeZip:writeTarGz});
+  if(!keepStage)await fsp.rm(work,{recursive:true,force:true});
   return result;
 }
 
-async function buildUniversal(targets, { components, cache, output, mtime, version, keepStage }) {
+async function buildUniversal(targets, { components, cache, output, mtime, version, keepStage, privateKey, packageRevision = 1 }) {
   const work = await fsp.mkdtemp(path.join(output, '.mind-construccion-'));
   try {
-    const stage = path.join(work, 'Mind');
+    const stage = path.join(work, 'My Mind');
     const modes = new Map();
     const manifestComponents = [];
     await copySharedFiles(stage);
     await copyLaunchers(stage, modes, { windows: true, posix: true, mac: true });
-    for (const id of targets) {
-      const prefix = id === 'win32-x64' ? 'Runtime' : `Runtime/${id}`;
-      const runtime = path.join(stage, ...prefix.split('/'));
-      const { nodeEntries, pythonEntries } = await stageRuntime(id, runtime, { components, cache, recordLinks: true });
-      const pythonFiles = await materializeRuntimeLinks(path.join(runtime, 'python'), pythonEntries);
-      for (const entry of nodeEntries) modes.set(`${prefix}/node/${entry.path}`, entry.mode);
-      for (const entry of pythonFiles) modes.set(`${prefix}/python/${entry.path}`, entry.mode);
-      manifestComponents.push(...runtimeComponents(components, id).map((component) => ({ ...component, target: id })));
-      await copyRuntimeLicenses(runtime, path.join(stage, 'LICENCIAS', id), components, id, prefix);
-    }
+    for (const id of targets) manifestComponents.push(...await stageTargetRuntime(stage,id,components,cache,modes));
     const notices = targets.map((id) => `- [${id}](${id}/AVISOS.md)`).join('\n');
-    await fsp.writeFile(path.join(stage, 'LICENCIAS', 'AVISOS.md'), `# Componentes por plataforma\n\n${notices}\n`, { flag: 'wx' });
+    await fsp.writeFile(path.join(stage, 'Sistema', 'Licencias', 'AVISOS.md'), `# Componentes por plataforma\n\n${notices}\n`, { flag: 'wx' });
 
-    const name = `Mind-${version}-universal.zip`;
+    const name = `Mind-${version}-universal-r${packageRevision}.zip`;
     const destination = path.join(work, name);
     const result = await archiveStage(stage, {
-      modes, mtime, destination, write: writeZip, verifyMetadata: true,
+      modes, mtime, destination, write: writeZip, verifyMetadata: true, privateKey,
       // El destino primario conserva la compatibilidad con el actualizador Windows 1.0.1.
-      metadata: { mindVersion: version, platform: 'win32', arch: 'x64', targets, components: manifestComponents },
+      metadata: { mindVersion: version, packageRevision, platform: 'win32', arch: 'x64', targets, components: manifestComponents },
     });
     await fsp.rename(destination, path.join(output, name));
     if (keepStage) process.stdout.write(`Carpeta de construcción: ${stage}\n`);
@@ -434,7 +456,11 @@ async function main(argv) {
   process.stdout.write(`Mind ${version} · commit ${git(['rev-parse', '--short', 'HEAD']).trim()} · fecha ${new Date(mtime * 1000).toISOString()}\n`);
   if (argv.includes('--sumas-oficiales')) await checkOfficialSums(components, targets);
   await fsp.mkdir(output, { recursive: true });
-  const options = { components, cache, output, mtime, version, keepStage: argv.includes('--conservar-carpeta') };
+  const packageRevision = Number(values('--revision-paquete')[0] ?? 1);
+  if(!Number.isSafeInteger(packageRevision)||packageRevision<1)fail('La revisión del paquete debe ser un entero positivo.');
+  const privateKeyPath = values('--clave-publicacion')[0];
+  const privateKey = privateKeyPath ? await fsp.readFile(path.resolve(privateKeyPath), 'utf8') : undefined;
+  const options = { components, cache, output, mtime, version, privateKey, packageRevision, keepStage: argv.includes('--conservar-carpeta') };
   const built = [];
   if (requested.length === 0) built.push(await buildUniversal(targets, options));
   for (const id of requested) built.push(await buildTarget(id, options));

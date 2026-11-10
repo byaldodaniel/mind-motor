@@ -162,7 +162,7 @@ class Posix(reader.Posix):
         with contextlib.suppress(OSError):
             os.fsync(parent)
 
-    def confirm_replaced(self, target):
+    def confirm_replaced(self, target, original=None, parent=None, name=None, temp=None):
         # El inode verificado ya no tiene nombre: lo sustituido era exactamente él.
         return os.fstat(target).st_nlink == 0
 
@@ -186,6 +186,7 @@ class Windows(reader.Windows):
 
     def __init__(self):
         super().__init__()
+        self._delete_excluded_targets = set()
         c, w = self.c, self.w
 
         class Basic(c.Structure):
@@ -243,12 +244,25 @@ class Windows(reader.Windows):
         # SYNCHRONIZE, READ_CONTROL, READ_ATTRIBUTES, READ_DATA y WRITE_DATA.
         # Sin FILE_SHARE_WRITE: también otra instancia de Mind debe pedir escritura,
         # de modo que su apertura falle mientras este handle permanece abierto.
-        handle = self._nt(parent, component(name), 0x100000 | 0x20000 | 0x80 | 0x1 | 0x2, 0x1 | 0x4, 1, 0x200020)
+        volume = self.check(parent, True)
+        capabilities = self._fat32_no_hardlinks_flags(parent, volume)
+        # En FAT32/DriveFS el reemplazo clásico exige conservar una exclusión
+        # de DELETE: bloquea intercambiar el nombre original durante el commit,
+        # incluso si existía antes un handle con acceso DELETE.
+        share = 0x1 if capabilities is not None else 0x1 | 0x4
+        handle = self._nt(parent, component(name), 0x100000 | 0x20000 | 0x80 | 0x1 | 0x2, share, 1, 0x200020)
         try:
-            return handle, self.check(handle, False)
+            target_volume = self.check(handle, False)
+            if share == 0x1:
+                self._delete_excluded_targets.add(handle)
+            return handle, target_volume
         except BaseException:
             self.close(handle)
             raise
+
+    def close(self, handle):
+        self._delete_excluded_targets.discard(handle)
+        super().close(handle)
 
     def read(self, handle, limit=MAX_BYTES):
         """Lee como máximo limit + 1 bytes: lo justo para saber si supera el límite."""
@@ -310,14 +324,22 @@ class Windows(reader.Windows):
         info = self._identity(handle)
         if info.attributes & 0x1:
             raise Refusal('ACCESS_DENIED')  # Solo lectura: el usuario lo protegió.
-        if (info.attributes & ~self.ALLOWED or not self._single_stream(handle)
-                or not self._inherited_dacl_only(handle)):
+        capabilities = self._fat32_no_hardlinks_flags(handle, info.volume)
+        # No existen ADS ni ACL persistentes en el volumen confirmado. Evitar
+        # consultas que el proveedor no implementa sólo cuando sus flags lo prueban.
+        no_streams = capabilities is not None and not capabilities & 0x00040000
+        no_acls = capabilities is not None and not capabilities & 0x00000008
+        if (info.attributes & ~self.ALLOWED
+                or (not no_streams and not self._single_stream(handle))
+                or (not no_acls and not self._inherited_dacl_only(handle))):
             raise Refusal('METADATA_NOT_PRESERVABLE')
         basic = self.Basic()
         if not self.kernel.GetFileInformationByHandleEx(handle, 0, self.c.byref(basic), self.c.sizeof(basic)):
             self._error()
         return {'identity': (info.volume, info.index_high, info.index_low),
-                'attributes': info.attributes & self.PRESERVED, 'created': basic.created}
+                'attributes': info.attributes & self.PRESERVED, 'created': basic.created,
+                'zero_links_reported': info.links == 0 and capabilities is not None,
+                'delete_excluded': handle in self._delete_excluded_targets}
 
     def create(self, parent, name, original):
         # SYNCHRONIZE, DELETE, READ/WRITE_ATTRIBUTES, WRITE_DATA; FILE_CREATE sin compartir.
@@ -345,9 +367,9 @@ class Windows(reader.Windows):
         if not self.kernel.FlushFileBuffers(handle):
             self._error()
 
-    def publish(self, temp, parent, temporary, target, name, original):
-        c, w = self.c, self.w
-        # El handle propio impide escribir, pero no renombrar: se comprueba el nombre.
+    def _confirm_original_name(self, parent, name, original):
+        # Resolver un solo componente respecto al padre retenido. No cerrar el
+        # original ni abrir su ruta absoluta para poder reemplazarlo.
         try:
             named = self._nt(parent, component(name), 0x100000 | 0x80, 0x7, 1, 0x200020)
         except OSError as error:
@@ -361,24 +383,64 @@ class Windows(reader.Windows):
                 raise Refusal('VERSION_CONFLICT')
         finally:
             self.close(named)
+
+    def publish(self, temp, parent, temporary, target, name, original):
+        c, w = self.c, self.w
+        self._confirm_original_name(parent, name, original)
         encoded = name.encode('utf-16-le')
 
         class Rename(c.Structure):
             _fields_ = [('flags', w.ULONG), ('root', w.HANDLE), ('length', w.ULONG),
                         ('name', w.WCHAR * (len(encoded) // 2))]
 
-        # FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS; sin ignorar solo lectura.
+        # FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS.
         info = Rename(0x1 | 0x2, parent, len(encoded))
         c.memmove(c.addressof(info) + Rename.name.offset, encoded, len(encoded))
         result = self.nt.NtSetInformationFile(temp, c.byref(self.Status()), c.byref(info), c.sizeof(info), 65)
-        if result in (-1073741821, -1073741822, -1073741637):  # INVALID_INFO_CLASS, NOT_IMPLEMENTED, NOT_SUPPORTED
-            raise Refusal('SAFE_OPEN_UNAVAILABLE')
+        unsupported = (-1073741821, -1073741822, -1073741637, -1073741811)
+        if result in unsupported:
+            capabilities = self._fat32_no_hardlinks_flags(target, original['identity'][0])
+            if (not original.get('zero_links_reported') or capabilities is None
+                    or not original.get('delete_excluded') or target not in self._delete_excluded_targets):
+                raise Refusal('SAFE_OPEN_UNAVAILABLE')
+            # DriveFS/FAT32 no implementa la clase extendida. La clase clásica
+            # sigue siendo un renombrado nativo relativo al mismo handle padre.
+            # Revalidar tras el rechazo; original y temporal permanecen abiertos.
+            self._confirm_original_name(parent, name, original)
+            info.flags = 1
+            result = self.nt.NtSetInformationFile(temp, c.byref(self.Status()), c.byref(info), c.sizeof(info), 10)
+            self._status(result)
+            original['classic_fallback'] = True
+            return
         self._status(result)
 
-    def confirm_replaced(self, target):
+    def confirm_replaced(self, target, original=None, parent=None, name=None, temp=None):
         standard = self.Standard()
         if not self.kernel.GetFileInformationByHandleEx(target, 1, self.c.byref(standard), self.c.sizeof(standard)):
             self._error()
+        if original and original.get('zero_links_reported'):
+            if not original.get('classic_fallback'):
+                return bool(standard.delete_pending)
+            if (parent is None or name is None or temp is None
+                    or not original.get('delete_excluded') or target not in self._delete_excluded_targets):
+                return False
+            # En DriveFS ni cero enlaces ni delete_pending demuestran el cambio.
+            # El nombre final debe identificar al temporal retenido y diferir del
+            # original, ambos aún abiertos, sin enlaces ni cambio de volumen.
+            try:
+                named = self._nt(parent, component(name), 0x100000 | 0x80, 0x7, 1, 0x200020)
+            except OSError:
+                return False
+            try:
+                self.check(named, False)
+                current, replacement, previous = self._identity(named), self._identity(temp), self._identity(target)
+                identity = lambda info: (info.volume, info.index_high, info.index_low)
+                return (identity(current) == identity(replacement)
+                        and identity(current) != identity(previous)
+                        and identity(previous) == original['identity']
+                        and current.volume == previous.volume)
+            finally:
+                self.close(named)
         return standard.links == 0 or bool(standard.delete_pending)
 
     def discard(self, handle, parent, temporary):
@@ -462,7 +524,7 @@ def modify_file(root, relative, expected, data, confirm=None, after_directory=No
                 with contextlib.suppress(OSError):
                     backend.discard(temp, parent, temporary)
             raise
-        if not backend.confirm_replaced(target):
+        if not backend.confirm_replaced(target, original, parent, name, temp):
             raise Refusal('MODIFY_UNCONFIRMED')
         try:
             return {**backend.metadata(temp), 'previousIdentity': previous_identity}

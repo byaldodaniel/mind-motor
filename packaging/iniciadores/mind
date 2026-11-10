@@ -1,32 +1,18 @@
 #!/bin/sh
-# Iniciador de Mind para macOS y Linux. Usa el Node incluido en Runtime/.
-case "$0" in
-  */*) DIR=${0%/*} ;;
-  *) DIR=. ;;
-esac
+# Todos los ejecutores están incluidos y listos al extraer My Mind.
+case "$0" in */*) DIR=${0%/*} ;; *) DIR=. ;; esac
 DIR=$(cd -P -- "$DIR" && pwd -P) || exit 1
-node="$DIR/Runtime/node/bin/node"
-if [ ! -x "$node" ]; then
-  machine=$(/usr/bin/uname -sm) || exit 1
-  case "$machine" in
-    'Darwin arm64') target=darwin-arm64 ;;
-    'Darwin x86_64')
-      target=darwin-x64
-      if [ "$(/usr/sbin/sysctl -in sysctl.proc_translated 2>/dev/null)" = 1 ]; then
-        target=darwin-arm64
-      fi
-      ;;
-    'Linux x86_64') target=linux-x64 ;;
-    'Linux aarch64'|'Linux arm64') target=linux-arm64 ;;
-    *)
-      printf '%s\n' "Este paquete de Mind no incluye un ejecutor para $machine." >&2
-      exit 1
-      ;;
-  esac
-  node="$DIR/Runtime/$target/node/bin/node"
-  if [ ! -x "$node" ]; then
-    printf '%s\n' "Falta el Node incluido de Mind para $target. Vuelve a extraer el paquete." >&2
-    exit 1
-  fi
-fi
-NODE_OPTIONS= exec "$node" "$DIR/Motor/bin/mind.js" "$@"
+machine=$(/usr/bin/uname -sm) || exit 1
+case "$machine" in
+  'Darwin arm64') target=darwin-arm64 ;;
+  'Darwin x86_64')
+    target=darwin-x64
+    if [ "$(/usr/sbin/sysctl -in sysctl.proc_translated 2>/dev/null)" = 1 ]; then target=darwin-arm64; fi ;;
+  'Linux x86_64') target=linux-x64 ;;
+  'Linux aarch64'|'Linux arm64') target=linux-arm64 ;;
+  *) printf '%s\n' "Este paquete de Mind no incluye un ejecutor para $machine." >&2; exit 1 ;;
+esac
+node="$DIR/Componentes/Node/$target/bin/node"
+if [ ! -x "$node" ]; then node="$DIR/Actualizaciones/Trabajo/actual/recuperador/Node/bin/node"; fi
+if [ ! -x "$node" ]; then printf '%s\n' "Falta el ejecutor incluido para $target. Vuelve a extraer My Mind." >&2; exit 1; fi
+NODE_OPTIONS= exec "$node" "$DIR/arranque.cjs" "$@"

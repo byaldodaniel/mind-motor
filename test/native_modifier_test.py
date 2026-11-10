@@ -318,5 +318,88 @@ class ModifierTest(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), b'original')
 
 
+
+@unittest.skipUnless(os.name == 'nt', 'capacidades y metadatos de handles Windows')
+class WindowsCapabilitiesTest(unittest.TestCase):
+    def backend(self, capabilities=0x106, attributes=0x80):
+        backend=native.Windows()
+        info=backend.Info();info.volume=42;info.links=0;info.attributes=attributes;info.index_low=7
+        backend._identity=mock.Mock(return_value=info)
+        backend._fat32_no_hardlinks_flags=mock.Mock(return_value=capabilities)
+        backend._single_stream=mock.Mock(return_value=True)
+        backend._inherited_dacl_only=mock.Mock(return_value=True)
+        backend.kernel=mock.Mock()
+        backend.kernel.GetFileInformationByHandleEx.return_value=True
+        return backend
+
+    def test_ads_acl_queries_are_skipped_only_when_positive_capabilities_exclude_them(self):
+        backend=self.backend();value=backend.inspect(123)
+        self.assertTrue(value['zero_links_reported'])
+        backend._single_stream.assert_not_called();backend._inherited_dacl_only.assert_not_called()
+        for flags in [None,0x00040008]:
+            with self.subTest(flags=flags):
+                backend=self.backend(flags);backend.inspect(123)
+                backend._single_stream.assert_called_once_with(123)
+                backend._inherited_dacl_only.assert_called_once_with(123)
+
+    def test_readonly_and_unsupported_metadata_stay_rejected(self):
+        for attrs in [0x81,0x800]:
+            with self.subTest(attributes=attrs),self.assertRaises(native.Refusal):
+                self.backend(attributes=attrs).inspect(123)
+        backend=self.backend(None);backend._single_stream.return_value=False
+        with self.assertRaisesRegex(native.Refusal,'METADATA_NOT_PRESERVABLE'):
+            backend.inspect(123)
+
+    def test_zero_count_before_replacement_is_not_confirmation(self):
+        backend=self.backend()
+        self.assertFalse(backend.confirm_replaced(123,{'zero_links_reported':True}))
+
+    def test_classic_fallback_never_runs_for_unknown_volume(self):
+        for capabilities,zero in [(None,True),(0x106,False)]:
+            with self.subTest(capabilities=capabilities,zero=zero):
+                backend=self.backend(capabilities);backend._confirm_original_name=mock.Mock()
+                backend.nt=mock.Mock();backend.nt.NtSetInformationFile.return_value=-1073741811
+                with self.assertRaisesRegex(native.Refusal,'SAFE_OPEN_UNAVAILABLE'):
+                    backend.publish(22,33,'temporary',11,'name.md',{'identity':(42,0,7),'zero_links_reported':zero})
+                self.assertEqual(backend.nt.NtSetInformationFile.call_count,1)
+
+    def test_classic_fallback_revalidates_original_name_after_extended_refusal(self):
+        backend=self.backend();backend._delete_excluded_targets.add(11);backend.nt=mock.Mock();backend.nt.NtSetInformationFile.return_value=-1073741811
+        backend._confirm_original_name=mock.Mock(side_effect=[None,native.Refusal('VERSION_CONFLICT')])
+        with self.assertRaisesRegex(native.Refusal,'VERSION_CONFLICT'):
+            backend.publish(22,33,'temporary',11,'name.md',{'identity':(42,0,7),'zero_links_reported':True,'delete_excluded':True})
+        self.assertEqual(backend.nt.NtSetInformationFile.call_count,1)
+
+    def test_classic_fallback_requires_final_identity_equal_temp_and_distinct_old(self):
+        backend=self.backend();backend._nt=mock.Mock(return_value=55);backend.check=mock.Mock();backend.close=mock.Mock()
+        def identity(index):
+            value=backend.Info();value.volume=42;value.index_low=index;return value
+        original={'identity':(42,0,7),'zero_links_reported':True,'classic_fallback':True,'delete_excluded':True}
+        backend._delete_excluded_targets.add(11)
+        backend._identity.side_effect=lambda handle: identity({11:7,22:8,55:9}[handle])
+        self.assertFalse(backend.confirm_replaced(11,original,33,'name.md',22))
+        backend._identity.side_effect=lambda handle: identity({11:7,22:8,55:8}[handle])
+        self.assertTrue(backend.confirm_replaced(11,original,33,'name.md',22))
+
+    def test_positive_target_capability_without_actual_delete_guard_refuses_classic(self):
+        backend=self.backend();backend.nt=mock.Mock();backend.nt.NtSetInformationFile.return_value=-1073741811
+        backend._confirm_original_name=mock.Mock()
+        # El padre no permitió demostrar la capacidad al abrir: el handle no
+        # consta en el conjunto con DELETE excluido, aunque luego el target sí.
+        for declared in [False,True]:
+            with self.subTest(declared=declared),self.assertRaisesRegex(native.Refusal,'SAFE_OPEN_UNAVAILABLE'):
+                backend.publish(22,33,'temporary',11,'name.md',{'identity':(42,0,7),'zero_links_reported':True,'delete_excluded':declared})
+        self.assertEqual(backend.nt.NtSetInformationFile.call_count,2)
+
+    def test_closed_handle_does_not_keep_delete_guard_proof(self):
+        backend=self.backend();backend._delete_excluded_targets.add(11)
+        backend.close(11)
+        self.assertNotIn(11,backend._delete_excluded_targets)
+        backend.nt=mock.Mock();backend.nt.NtSetInformationFile.return_value=-1073741811
+        backend._confirm_original_name=mock.Mock()
+        # Un HANDLE numérico reutilizado no hereda la exclusión del anterior.
+        with self.assertRaisesRegex(native.Refusal,'SAFE_OPEN_UNAVAILABLE'):
+            backend.publish(22,33,'temporary',11,'name.md',{'identity':(42,0,7),'zero_links_reported':True,'delete_excluded':True})
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

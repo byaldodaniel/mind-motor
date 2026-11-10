@@ -5,6 +5,11 @@ import { MotorError } from './errors.js';
 import { readJson, writeJson } from './storage.js';
 import { contains } from './paths.js';
 import { createContinuity } from './continuity.js';
+import { createWorkDestinations } from './work-destinations.js';
+import { createResultRegistry } from './result-registry.js';
+import { createResultCopier } from './result-copier.js';
+import { createConversations } from './conversations.js';
+import { createConversationRelocation } from './conversation-relocation.js';
 import { createContinuityAccess } from './continuity-access.js';
 import { createFolderRegistry } from './folders.js';
 import { createTextReader } from './text-reader.js';
@@ -114,7 +119,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, userDataDirectory } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -150,10 +155,11 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   }
   const protectedPhysical = await Promise.all(protectedDirectories.map((item) => realpath(item)));
   // setExclusions solo se usa bajo la coordinación del índice (setFolderExclusions).
-  const { loadAuthorizedFolder, setExclusions, ...folders } = createFolderRegistry(base, motor, protectedPhysical);
+  const { loadAuthorizedFolder, setExclusions, ...folders } = createFolderRegistry(base, motor, protectedPhysical, userDataDirectory ? await realpath(userDataDirectory) : null);
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
+  const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder });
   const indexer = createFolderIndexer({
     baseDirectory: base,
     pythonExecutable,
@@ -175,6 +181,11 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   // Organización (Función 03): carpetas, mover y papelera de Mind, con permisos de un solo intento.
   const trash = createTrashRegistry({ baseDirectory: base, loadAuthorizedFolder });
   const organizer = createOrganizer({ loadAuthorizedFolder, pythonExecutable, trash });
+  const workDestinations = createWorkDestinations(base);
+  const resultRegistry = createResultRegistry(base);
+  const relocation=createConversationRelocation({baseDirectory:base,continuity,conversations,results:resultRegistry,destinations:workDestinations});
+  const coordinated=operation=>(...args)=>relocation.withState(()=>operation(...args));
+  const resultCopier = createResultCopier({loadAuthorizedFolder,pythonExecutable});
   const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
   const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
   /** Observadores abiertos en esta instancia; solo existen si el anfitrión los abre. */
@@ -241,14 +252,40 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     getTrashEntry: trash.get,
     // Continuidad: administración del anfitrión. El agente recibe solo la vista
     // { readContext, recordResult } de bindContinuityAgent, nunca estas operaciones.
-    recordContinuity: continuity.recordContinuity,
-    getContinuity: continuity.getContinuity,
-    updateContinuity: continuity.updateContinuity,
-    relateContinuity: continuity.relateContinuity,
-    retireContinuity: continuity.retireContinuity,
-    listContinuityIds: continuity.listContinuityIds,
-    exportContinuity: continuity.exportContinuity,
-    importContinuity: continuity.importContinuity,
+    recordContinuity: coordinated(continuity.recordContinuity),
+    getContinuity: coordinated(continuity.getContinuity),
+    updateContinuity: coordinated(continuity.updateContinuity),
+    relateContinuity: coordinated(continuity.relateContinuity),
+    retireContinuity: coordinated(continuity.retireContinuity),
+    listContinuityIds: coordinated(continuity.listContinuityIds),
+    exportContinuity: coordinated(continuity.exportContinuity),
+    importContinuity: coordinated(continuity.importContinuity),
+    // Conversaciones: administración del mismo motor, con permisos en las herramientas.
+    ...conversations,
+    ...Object.fromEntries(['getConversation','saveConversation','searchConversations','getConversationPreferences','configureConversationPreferences']
+      .map(name=>[name,coordinated(conversations[name])])),
+    getWorkDestinations: coordinated(workDestinations.get),
+    configureWorkDestinations: coordinated(workDestinations.configure),
+    workDestinationDirectories: coordinated(workDestinations.directories),
+    readConversationResults: coordinated(resultRegistry.read),
+    rememberConversationResult: coordinated(resultRegistry.remember),
+    replaceConversationResults: coordinated(resultRegistry.replace),
+    moveWithConversationRelocation: relocation.move,
+    relocateConversationMetadata: relocation.metadata,
+    resumeConversationRelocation: relocation.recover,
+    grantResultCopy: resultCopier.grantResultCopy,
+    grantResultVerification: resultCopier.grantResultVerification,
+    verifyResultFile: resultCopier.verifyResultFile,
+    async copyResultFile(request) {
+      const copied=await resultCopier.copyResultFile(request);
+      const iso=value=>Number.isSafeInteger(value)?new Date(value).toISOString():null;
+      let index;
+      try { index=await indexer.recordCreatedFile(copied.folderId,{
+        path:copied.relativePath,type:'file',size:copied.size,state:'indexed',reason:null,
+        modifiedAt:iso(copied.modifiedMs),changedAt:iso(copied.changedMs),createdAt:iso(copied.createdMs),identity:copied.identity??null
+      }); } catch(error) {index={status:'needs-reconciliation',code:error.code??'INDEX_UPDATE_FAILED'};}
+      return {...copied,index};
+    },
     grantContinuityAccess: continuityAccess.grantContinuityAccess,
     describeContinuityAccess: continuityAccess.describeContinuityAccess,
     revokeContinuityAccess: continuityAccess.revokeContinuityAccess,

@@ -1,3 +1,4 @@
+import { resolveWorkOutput } from '../work-routing.js';
 import { MotorError } from '../errors.js';
 import { only, text, absolute, schema, FOLDER_REF, RELATIVE_PATH, TYPE_OUT } from './helpers.js';
 import {
@@ -19,7 +20,7 @@ const DEFINITIONS = [
     name: 'crear_carpeta',
     title: 'Crear carpeta',
     description: 'Crea una carpeta vacía dentro de una carpeta autorizada. No crea carpetas intermedias ni reemplaza nada. Requiere "organizar".',
-    inputSchema: schema({ carpeta: FOLDER_REF, ruta: RELATIVE_PATH }, ['ruta']),
+    inputSchema: schema({ carpeta: FOLDER_REF, ruta: RELATIVE_PATH, destino:{type:'string'},tipo:{type:'string'},proyecto:{type:'string'},conversacion:{type:'string'} }, ['ruta']),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
@@ -86,11 +87,17 @@ function trashOut(folder, entry) {
 
 export function createOrganizeTools({ session, connection }) {
   const handlers = {
-    async crear_carpeta(args, { requester, resolveFolder, requireAccess, source }) {
-      only(args, ['carpeta', 'ruta']);
-      const folder = await resolveFolder(args.carpeta);
+    async crear_carpeta(args, context) {
+      const {requester,resolveFolder,requireAccess,source}=context;
+      only(args, ['carpeta','ruta','destino','tipo','proyecto','conversacion']);
+      let selected;
+      const policy=context.internalFile?null:await session.motor.getWorkDestinations({project:args.proyecto,conversation:args.conversacion});
+      if(!context.internalFile&&(context.defaultDirectory||args.destino||args.proyecto||args.conversacion||Object.keys(policy.efectivos).length)) {
+        selected=await resolveWorkOutput({motor:session.motor,context,name:args.ruta,type:args.tipo??'otros',destination:args.destino,folderReference:args.carpeta,project:args.proyecto,conversation:args.conversacion,prepare:true});
+      }
+      const folder = selected?.folder ?? await resolveFolder(args.carpeta);
       await requireAccess(folder, 'organizar');
-      const relativePath = text(args.ruta, 'ruta');
+      const relativePath = selected?.path ?? text(args.ruta, 'ruta');
       await createFolder(session, { requester, folder, relativePath, source });
       return { estado: 'creada', carpeta: folder.id, ruta: relativePath, ruta_absoluta: absolute(folder.path, relativePath) };
     },
@@ -108,6 +115,7 @@ export function createOrganizeTools({ session, connection }) {
         estado: 'movido', carpeta: folder.id, carpeta_destino: target.id, desde: from, hasta: to,
         ruta_absoluta: absolute(target.path, to), tipo: TYPE_OUT[moved.type] ?? moved.type,
         propiedades_trasladadas: moved.properties.moved ?? 0,
+        continuidad: moved.continuity,
       };
     },
 
@@ -124,6 +132,7 @@ export function createOrganizeTools({ session, connection }) {
       return {
         estado: 'renombrado', carpeta: folder.id, desde: from, hasta: to, ruta_absoluta: absolute(folder.path, to),
         tipo: TYPE_OUT[moved.type] ?? moved.type, propiedades_trasladadas: moved.properties.moved ?? 0,
+        continuidad: moved.continuity,
       };
     },
 

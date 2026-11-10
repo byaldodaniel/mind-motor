@@ -65,8 +65,8 @@ caracteres sin controles; localizadores ≤ 2048; ≤ 100 referencias por regist
   Retirar un registro no modifica a quienes lo citan; la exportación lo señala en
   `missing`.
 - **Revisiones.** `expectedRevision` rechaza con `CONTINUITY_REVISION_CONFLICT` un
-  cambio basado en una versión anterior. Es una comprobación optimista, no un
-  bloqueo: dos escrituras simultáneas sobre el mismo id pueden pisarse.
+  cambio basado en una versión anterior. La lectura y escritura se coordinan por registro mediante el bloqueo cooperativo
+  del motor; dos actualizaciones con la misma revisión no se pisan.
 - **Exportación.** Solo incluye registros pedidos por id y, con `includeReferenced`,
   los citados transitivamente. El paquete (`format: "mind-continuity-export"`,
   `version: 1`) contiene registros completos, `exportedAt` y `missing`. El Motor no
@@ -95,3 +95,7 @@ y `RECORD_CORRUPT` de `storage.js`.
 - No hay historial de revisiones ni transacciones entre procesos.
 - Un paquete puede incluir contenido de originales solo si el anfitrión lo puso en
   `content`; no existe aún una vía segura para adjuntarlos automáticamente.
+
+## Conversaciones como elementos
+
+El incremento de [conversaciones](CONVERSACIONES.md) conserva título, información importante y referencias usando estos mismos registros. Las herramientas del agente permiten guardarlas, buscarlas con un índice de contenido y leer lo pertinente por ID. No requiere una carpeta por conversación ni copia el historial nativo.

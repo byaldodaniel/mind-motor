@@ -1,3 +1,4 @@
+import { identifyCurrentProcess, inspectProcessOwners } from './process-identity.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,8 +11,6 @@ const WAIT_MS = 2000;
 const RETRY_MS = 20;
 /** Cada cuánto, mientras se espera, se comprueba si el dueño del bloqueo sigue vivo. */
 const INSPECT_EVERY_MS = 100;
-/** Un bloqueo vacío (dueño terminado antes de escribirlo) solo se recupera pasado este margen. */
-const EMPTY_LOCK_GRACE_MS = 30_000;
 
 /** true si el proceso existe en este equipo; EPERM indica que existe aunque sea de otro usuario. */
 export function processAlive(pid) {
@@ -29,7 +28,7 @@ export function processAlive(pid) {
  * duda (otro equipo, proceso vivo o PID reutilizado, contenido ilegible
  * reciente) devuelve null y el bloqueo se respeta.
  */
-async function abandoned(filename) {
+async function abandoned(filename, { pythonExecutable, ownerInspector = inspectProcessOwners } = {}) {
   let info;
   let text;
   try {
@@ -47,13 +46,11 @@ async function abandoned(filename) {
     owner = null;
   }
   if (owner && typeof owner === 'object' && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
-    // Los bloqueos anteriores a este cambio no guardaban el equipo; la Base es local.
-    if (owner.host !== undefined && owner.host !== os.hostname()) return null;
-    return processAlive(owner.pid) ? null : info;
+    const [status] = await ownerInspector([{ ...owner, host: owner.host ?? os.hostname() }], { pythonExecutable });
+    return status.state === 'stale' ? info : null;
   }
-  // Vacío: el dueño terminó entre crear y escribir el archivo. Con margen amplio,
-  // porque un dueño vivo lo escribe inmediatamente después de crearlo.
-  if (text === '' && Date.now() - Number(info.mtimeMs) > EMPTY_LOCK_GRACE_MS) return info;
+  // Empty/corrupt coordination never proves abandonment, regardless of age.
+
   return null;
 }
 
@@ -64,7 +61,7 @@ async function abandoned(filename) {
  * La barrera no se recupera automáticamente; si su dueño termina aquí se
  * necesita revisión manual con todas las sesiones cerradas.
  */
-async function recover(filename) {
+async function recover(filename, identityOptions) {
   const barrier = `${filename}.recovery`;
   try {
     await fs.mkdir(barrier, { mode: 0o700 });
@@ -74,7 +71,7 @@ async function recover(filename) {
   }
   const owned = await fs.lstat(barrier, { bigint: true });
   try {
-    const examined = await abandoned(filename);
+    const examined = await abandoned(filename, identityOptions);
     if (!examined) return false;
     const aside = `${filename}.abandonado-${randomUUID()}`;
     try {
@@ -110,19 +107,20 @@ const LOCK_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  *
  * Recuperación automática aprobada por el usuario (2026-11-01, opción B): un
  * bloqueo se retira solo si fue creado en este mismo equipo y el sistema
- * confirma que su proceso ya no existe. Si el PID se reutilizó, el bloqueo se
- * considera vivo (fallo seguro) y queda la recuperación guiada `mind reparar`.
+ * confirma que terminó o que su identidad nativa ya no corresponde. Un dueño
+ * indeterminado conserva el bloqueo y requiere la recuperación guiada `mind reparar`.
  * Nunca se recupera por antigüedad un bloqueo con dueño vivo ni uno de otro equipo.
  *
  * lockName permite que otros datos de la Base ligados a un id (propiedades,
  * índices personalizados) usen su propio archivo `<lockName>-<id>.lock` con la
  * misma espera y la misma política de recuperación.
  */
-export async function withIndexLock(baseDirectory, scopeId, task, lockName = INDEX_LOCK_NAME, { timeoutMs = WAIT_MS, signal } = {}) {
+export async function withIndexLock(baseDirectory, scopeId, task, lockName = INDEX_LOCK_NAME, { timeoutMs = WAIT_MS, signal, pythonExecutable, ownerInspector = inspectProcessOwners } = {}) {
   if (typeof lockName !== 'string' || !LOCK_NAME.test(lockName)
       || (lockName !== INDEX_LOCK_NAME && (typeof scopeId !== 'string' || !LOCK_ID.test(scopeId)))) {
     throw new MotorError('INVALID_LOCK_NAME', 'El nombre del bloqueo no es válido.');
   }
+  const ownerIdentity = await identifyCurrentProcess({ pythonExecutable });
   const filename = path.join(baseDirectory, `${lockName}-${scopeId}.lock`);
   const started = performance.now();
   const deadline = started + timeoutMs;
@@ -146,12 +144,14 @@ export async function withIndexLock(baseDirectory, scopeId, task, lockName = IND
       handle = await fs.open(filename, 'wx', 0o600);
       break;
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+      // Windows puede devolver EPERM mientras otro proceso termina de desvincular el bloqueo.
+      // Solo reintentar la creación exclusiva, con el mismo plazo; nunca conceder permisos.
+      if (error.code !== 'EEXIST' && !(process.platform === 'win32' && error.code === 'EPERM')) throw error;
       const now = performance.now();
       if (now - inspectedAt >= INSPECT_EVERY_MS) {
         inspectedAt = now;
-        const examined = await abandoned(filename);
-        if (examined && await recover(filename)) continue;
+        const examined = await abandoned(filename, { pythonExecutable, ownerInspector });
+        if (examined && await recover(filename, { pythonExecutable, ownerInspector })) continue;
       }
       if (now >= deadline) {
         throw new MotorError('INDEX_LOCK_TIMEOUT', lockName === INDEX_LOCK_NAME
@@ -174,7 +174,7 @@ export async function withIndexLock(baseDirectory, scopeId, task, lockName = IND
   try {
     owned = await handle.stat({ bigint: true });
     await handle.writeFile(JSON.stringify({
-      version: 1, owner: randomUUID(), pid: process.pid, host: os.hostname(), createdAt: new Date().toISOString(),
+      version: 2, owner: randomUUID(), ...ownerIdentity, createdAt: new Date().toISOString(),
     }) + '\n');
     // The barrier may have appeared between the first check and open('wx').
     // Publish our live owner before waiting, but never enter the task through

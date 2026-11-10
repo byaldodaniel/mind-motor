@@ -219,6 +219,10 @@ movimiento ni eliminación. Detalles en
 [docs/FUNCION_03_MODIFICAR.md](docs/FUNCION_03_MODIFICAR.md) y
 [docs/INTERFACES.md](docs/INTERFACES.md).
 
+## Conversaciones como elementos
+
+Mind puede conservar una conversación con título, información importante y referencias a recursos en distintas ubicaciones. El agente usa `conversacion_guardar`, `conversaciones_buscar` y `conversacion_leer` para recordar sin cargar todo el historial. La conservación es personalizable: esencial predeterminado, detallado, manual o reglas propias, con excepciones por conversación. La búsqueda híbrida combina palabras y significado local; prepara los vectores en segundo plano y conserva los permisos de continuidad. Ver [Conversaciones](docs/CONVERSACIONES.md).
+
 ## Continuidad entre agentes — Función 05
 
 El Motor conserva en la Base información útil de un trabajo (instrucciones,
@@ -331,3 +335,5 @@ No incorporar datos personales, credenciales ni contenido de las Bases.
 aprobada. SHA-256:
 `a6fcf4dd221bc0b5d0bd1c8430ecfa545c1f7dceb30baa20c93bbd3293963815`.
 El PDF describe el producto; no constituye autorización para ejecutar acciones.
+
+Los resultados nuevos también tienen destinos físicos persistentes: general, por tipo, por proyecto o por conversación. Sin preferencias, una instalación crea `Conversaciones/` junto a `Base/`. El agente consulta el plan al empezar; las herramientas de Mind lo aplican al crear y ofrecen resolución/importación para herramientas externas. Cambiar un proyecto afecta a nuevas creaciones; no traslada archivos anteriores. No intercepta escrituras arbitrarias de otras aplicaciones.
