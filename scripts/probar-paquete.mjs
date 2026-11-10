@@ -9,8 +9,17 @@ import { extractEntries, readArchive } from '../src/archive.js';
 import { hashFile, readManifestFile, supportsProductTarget } from '../src/product-files.js';
 import { productRuntime } from '../src/layout.js';
 
-const [archive, update, archiveHash, updateHash, reportDir, flag, claude] = process.argv.slice(2);
-if (!archive || !update || !archiveHash || !updateHash || !reportDir || (flag && (flag !== '--claude' || !claude))) {
+import { verifyPackageDescriptor } from '../src/package-descriptor.js';
+const [archive, update, archiveHash, updateHash, reportDir, ...options] = process.argv.slice(2);
+let claude, testPublicKeyFile, updatePublicKeyFile;
+for (let index = 0; index < options.length; index += 2) {
+  if (!options[index + 1]) throw new Error('Falta el valor de una opcion de prueba.');
+  if (options[index] === '--claude') claude = options[index + 1];
+  else if (options[index] === '--clave-ensayo') testPublicKeyFile = options[index + 1];
+  else if (options[index] === '--clave-actualizacion-ensayo') updatePublicKeyFile = options[index + 1];
+  else throw new Error('Opcion de prueba no reconocida.');
+}
+if (!archive || !update || !archiveHash || !updateHash || !reportDir) {
   throw new Error('Uso: probar-paquete.mjs <paquete> <actualización de ensayo> <sha256 paquete> <sha256 actualización> <informes> [--claude <orden>]');
 }
 const hashes = await Promise.all([hashFile(archive), hashFile(update)]);
@@ -21,10 +30,15 @@ const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'Mind prueba ñ-'));
 const report = { plataforma: platform, paquete_sha256: hashes[0], actualizacion_sha256: hashes[1], resultado: 'fallido' };
 const readReport = async name => JSON.parse(await fs.readFile(path.join(temporary, name), 'utf8'));
 
-async function extract(folder) {
+const publicKey = testPublicKeyFile ? await fs.readFile(testPublicKeyFile, 'utf8') : JSON.parse(await fs.readFile(fileURLToPath(new URL('../src/update-channel.json', import.meta.url)), 'utf8')).publicKey;
+
+async function extract(folder, source = archive) {
   const destination = path.join(temporary, folder);
-  await extractEntries(readArchive(archive), destination);
-  return path.join(destination, 'Mind');
+  await extractEntries(readArchive(source), destination);
+  const product = path.join(destination, 'My Mind');
+  const trustedKey=source===update&&updatePublicKeyFile?await fs.readFile(updatePublicKeyFile,'utf8'):publicKey;
+  await verifyPackageDescriptor({ root: product, publicKey:trustedKey });
+  return product;
 }
 
 function run(node, script, args) {
@@ -37,6 +51,11 @@ function run(node, script, args) {
 
 try {
   const mind = await extract('Producto');
+  const updateRoot = await extract('Actualizacion', update);
+  const next = await readManifestFile(updateRoot);
+  const initial = await readManifestFile(mind);
+  if (next.mindVersion !== initial.mindVersion || next.packageRevision <= initial.packageRevision) throw new Error('El ensayo debe aumentar revision manteniendo la version publica.');
+  report.firma = testPublicKeyFile ? 'clave efimera de ensayo' : 'clave de distribucion fijada';
   const manifest = await readManifestFile(mind);
   if (!supportsProductTarget(manifest)) {
     throw new Error(`El paquete no corresponde al destino nativo ${platform}.`);

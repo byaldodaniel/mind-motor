@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { startMcp } from '../test/helpers/mcp-client.js';
-import { productRuntime } from '../src/layout.js';
+import { productPaths, productRuntime } from '../src/layout.js';
 import { readManifestFile } from '../src/product-files.js';
 
 const args=process.argv.slice(2);
@@ -28,7 +28,7 @@ const temporary=await fs.realpath(await fs.mkdtemp(path.join(temporaryParent,'mi
 const product=path.join(temporary,'Mind');
 const home=path.join(temporary,'Perfil ficticio');
 const project=path.join(temporary,'Proyecto Duna');
-const base=path.join(product,'Base');
+let base=path.join(product,'Base');
 const store=path.join(product,'Conversaciones');
 const clients=[];
 const env={...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:path.join(home,'.codex'),MIND_AGENT_STARTUP:'1',MIND_UPDATE_RESTART:'1'};
@@ -95,22 +95,29 @@ try{
     if(packageRoot){
       for(const name of await fs.readdir(packageRoot))if(!['Base','Conversaciones'].includes(name))await fs.cp(path.join(packageRoot,name),path.join(product,name),{recursive:true,verbatimSymlinks:true});
     }else{
-      await fs.mkdir(path.join(product,'Motor'));
-      for(const name of ['src','bin','package.json'])await fs.cp(path.join(repository,name),path.join(product,'Motor',name),{recursive:true,verbatimSymlinks:true});
-      await fs.mkdir(path.join(product,'Runtime'));
-      const sourceRuntime=productRuntime(runtimeRoot,await readManifestFile(runtimeRoot));
-      for(const component of ['node','python'])await fs.cp(path.join(sourceRuntime.directory,component),path.join(product,'Runtime',component),{recursive:true,verbatimSymlinks:true});
-      await fs.writeFile(path.join(product,'mind-producto.json'),JSON.stringify({format:'mind-product',version:1,mindVersion:'1.0.3'}));
+      const manifest={format:'mind-product',version:1,mindVersion:'1.0.3',platform:process.platform,arch:process.arch,layoutVersion:2,packageRevision:1,updateProtocolVersion:2,files:{}};
+      const paths=productPaths(product,manifest),runtime=productRuntime(product,manifest);
+      await fs.mkdir(paths.motorDirectory,{recursive:true});
+      for(const name of ['src','bin','package.json'])await fs.cp(path.join(repository,name),path.join(paths.motorDirectory,name),{recursive:true,verbatimSymlinks:true});
+      const sourceManifest=await readManifestFile(runtimeRoot),sourceRuntime=productRuntime(runtimeRoot,sourceManifest);
+      for(const [from,to] of [[sourceRuntime.nodeDirectory,runtime.nodeDirectory],[sourceRuntime.pythonDirectory,runtime.pythonDirectory]]){
+        await fs.mkdir(path.dirname(to),{recursive:true});await fs.cp(from,to,{recursive:true,verbatimSymlinks:true});
+      }
+      const semantic=productPaths(runtimeRoot,sourceManifest).semanticDirectory;
+      if(await exists(semantic)){await fs.mkdir(path.dirname(paths.semanticDirectory),{recursive:true});await fs.cp(semantic,paths.semanticDirectory,{recursive:true,verbatimSymlinks:true});}
+      await fs.writeFile(paths.manifestFile,JSON.stringify(manifest));
       for(const name of ['AGENTS.md','CLAUDE.md','GEMINI.md','LEEME.md'])await fs.copyFile(path.join(repository,'packaging','plantilla',name),path.join(product,name));
       const launcher=process.platform==='win32'?'mind.cmd':'mind';
-      await fs.copyFile(path.join(repository,'packaging','iniciadores',launcher),path.join(product,launcher));
-      if(process.platform!=='win32')await fs.chmod(path.join(product,launcher),0o755);
+      await fs.copyFile(path.join(repository,'packaging','iniciadores',launcher),path.join(paths.launcherDirectory,launcher));
+      await fs.copyFile(path.join(repository,'packaging','iniciadores','arranque.cjs'),path.join(paths.launcherDirectory,'arranque.cjs'));
+      if(process.platform!=='win32')await fs.chmod(path.join(paths.launcherDirectory,launcher),0o755);
     }
-    report.codigo=await codeFingerprint(path.join(product,'Motor'));
-    const manifest=packageRoot?await readManifestFile(product):null;
+    const manifest=await readManifestFile(product);
+    const paths=productPaths(product,manifest);base=paths.baseDirectory;
+    report.codigo=await codeFingerprint(paths.motorDirectory);
     node=productRuntime(product,manifest).nodeExecutable;
     report.paquete=manifest?{version:manifest.mindVersion,commit:manifest.builtFrom,targets:manifest.targets??[manifest.platform+'-'+manifest.arch]}:null;
-    entry=path.join(product,'Motor','bin','mind.js');
+    entry=paths.entrypoint;
     assert.equal(await exists(base),false);assert.equal(await exists(store),false);
     if(args.includes('--codex')){
       const sourceAuth=path.join(process.env.CODEX_HOME??path.join(os.homedir(),'.codex'),'auth.json');

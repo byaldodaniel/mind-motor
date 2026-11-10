@@ -119,7 +119,9 @@ test('actualización sustituye Motor/Runtime, arranca el código nuevo y conserv
   assert.deepEqual(await snapshot(userData), beforeData);
   assert.equal((await readManifestFile(f.mind)).mindVersion, '1.1.0');
   assert.equal(await fs.readFile(path.join(f.mind, 'Motor', 'prueba.txt'), 'utf8'), '1.1.0');
-  assert.equal(await fs.readFile(path.join(f.mind, result.backup, 'Motor', 'prueba.txt'), 'utf8'), '1.0.0');
+  assert.equal(result.backup, undefined);
+  assert.ok(!(await fs.readdir(f.mind)).some(name=>name.startsWith('.anterior-')));
+  await assert.rejects(fs.stat(path.join(f.mind,'Sistema','Actualizaciones','Trabajo','actual')),{code:'ENOENT'});
   assert.deepEqual(await snapshot(f.layout.baseDirectory), before);
   const motor = await openMotor({ baseDirectory: f.layout.baseDirectory });
   assert.deepEqual(await motor.listAuthorizedFolders(), [f.folder]);
@@ -168,17 +170,42 @@ test('fallo del Motor nuevo revierte la sustitución sin perder la Base', async 
   assert.deepEqual(await snapshot(f.mind), before);
 });
 
-test('sesiones activas y formato de Base incompatible impiden la sustitución', async (t) => {
+test('sesiones y Base incompatible conservan la preparación para reanudar sin duplicarla', async (t) => {
   const f = await fixture(t);
   const active = await f.open();
   await assert.rejects(updateMind(f.options), { code: 'MIND_IN_USE' });
+  const updates = path.join(f.mind, 'Sistema', 'Actualizaciones');
+  const journalPath = path.join(updates, 'transaccion.json');
+  const work = path.join(updates, 'Trabajo', 'actual');
+  const preparedBytes = await fs.readFile(journalPath);
+  const prepared = JSON.parse(preparedBytes.toString('utf8'));
+  assert.equal(prepared.phase, 'prepared');
+  assert.ok((await fs.stat(path.join(work, 'paquete'))).isDirectory());
+  const preparedPayload = await snapshot(work);
   await active.close();
   const markerPath = path.join(f.layout.baseDirectory, 'mind-base.json');
   const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
   await fs.writeFile(markerPath, JSON.stringify({ ...marker, version: BASE_FORMAT_VERSION + 1 }));
-  const before = await snapshot(f.mind);
+  const withoutUpdateState = entries=>Object.fromEntries(Object.entries(entries).filter(([r])=>!r.startsWith('Sistema/Actualizaciones/')));
+  const before = withoutUpdateState(await snapshot(f.mind));
   await assert.rejects(updateMind(f.options), { code: 'UPDATE_BASE_INCOMPATIBLE' });
-  assert.deepEqual(await snapshot(f.mind), before);
+  assert.deepEqual(withoutUpdateState(await snapshot(f.mind)), before);
+  // This retry did not create the operation: it must not destroy the package
+  // previously prepared while a real session was active.
+  assert.deepEqual(await fs.readFile(journalPath), preparedBytes);
+  assert.deepEqual(await snapshot(work), preparedPayload);
+  assert.deepEqual(await fs.readdir(path.join(updates, 'Trabajo')), ['actual']);
+  // Resolve only the fictional format mismatch, then resume the same payload.
+  // This fixture deliberately has a dummy runtime, so it uses an injected
+  // verifier; real bootstrap/runtime recovery has separate native coverage.
+  const originalMarker = JSON.stringify(marker);
+  await fs.writeFile(markerPath, originalMarker);
+  const resumed = await updateMind({ ...f.options, verifyInstalled: async () => {} });
+  assert.equal(resumed.status, 'actualizada');
+  assert.equal(resumed.to, '1.1.0');
+  assert.equal(await fs.readFile(markerPath, 'utf8'), originalMarker);
+  await assert.rejects(fs.stat(work), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(journalPath), { code: 'ENOENT' });
 });
 
 test('una sesión con otra Base de la misma instalación impide la actualización automática', async t => {

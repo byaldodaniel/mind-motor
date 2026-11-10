@@ -14,7 +14,7 @@ jobs:
           node-version: 24.22.1
       - name: Preparar componente semántico fijado
         run: node scripts/preparar-semantica.mjs
-      - name: Construir y comprobar reproducibilidad del ZIP universal
+      - name: Construir ZIP universal de ensayo y comprobar reproducibilidad
         run: node scripts/preparar-paridad.mjs dist --reproducibilidad
       - uses: actions/upload-artifact@v4
         with:
@@ -23,6 +23,7 @@ jobs:
             dist/candidatos/*.zip
             dist/ensayo/*.zip
             dist/matriz.json
+            dist/clave-ensayo-publica.pem
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
@@ -58,7 +59,7 @@ jobs:
           $upgrades = @($matrix.paquetes | ForEach-Object { $_.actualizacion.name + '|' + $_.actualizacion.sha256 } | Select-Object -Unique)
           if ($archives.Count -ne 1 -or $upgrades.Count -ne 1) { throw 'Los destinos deben compartir el mismo ZIP y huella' }
           $row = $matrix.paquetes | Where-Object plataforma -eq $env:MIND_TARGET
-          node scripts/probar-paquete.mjs "dist/candidatos/$($row.paquete.name)" "dist/ensayo/$($row.actualizacion.name)" $row.paquete.sha256 $row.actualizacion.sha256 dist/informes
+          node scripts/probar-paquete.mjs "dist/candidatos/$($row.paquete.name)" "dist/ensayo/$($row.actualizacion.name)" $row.paquete.sha256 $row.actualizacion.sha256 dist/informes --clave-ensayo "dist/$($matrix.claveEnsayo)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

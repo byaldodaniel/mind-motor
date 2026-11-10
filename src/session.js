@@ -1,3 +1,6 @@
+import { productPaths } from './layout.js';
+import { identifyCurrentProcess, inspectProcessOwners } from './process-identity.js';
+import { writeJson } from './storage.js';
 import { ensureUserDataDirectory } from './user-data-directory.js';
 import { lockInstallation } from './installation-lock.js';
 import fs from 'node:fs/promises';
@@ -48,7 +51,7 @@ function createAudit(baseDirectory) {
  */
 export async function openSession({ layout, motorVersion, log = () => {}, observe = true, functionExecutors = {},
   motorFactory = openMotor }) {
-  const releaseStartup = layout.product ? await lockInstallation(layout.root) : async () => {};
+  const releaseStartup = layout.product ? await lockInstallation(layout.root, { pythonExecutable: layout.pythonExecutable }) : async () => {};
   try {
   await ensureUserDataDirectory(layout);
   const base = await ensureBase(layout.baseDirectory, { motorVersion, protectedFrom: layout.motorDirectory });
@@ -66,7 +69,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   const removals = createRemovalLog({ baseDirectory: motor.baseDirectory, getAuthorizedFolder: motor.getAuthorizedFolder });
   const audit = createAudit(motor.baseDirectory);
   const sessionId = randomUUID();
-  const lease = observe ? createBackgroundLease(motor.baseDirectory, sessionId) : null;
+  const lease = observe ? createBackgroundLease(motor.baseDirectory, sessionId, { pythonExecutable: layout.pythonExecutable }) : null;
   const sessionsDirectory = path.join(motor.baseDirectory, SESSIONS_DIRECTORY);
   const sessionFile = path.join(sessionsDirectory, `sesion-${sessionId}.json`);
   const folders = new Map();
@@ -102,14 +105,14 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   }
 
   await fs.mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
-  await fs.writeFile(sessionFile, `${JSON.stringify({
-    format: 'mind-session', version: 1, id: sessionId, pid: process.pid, host: os.hostname(),
-    startedAt: new Date().toISOString(), observe,
-  })}\n`, { encoding: 'utf8', mode: 0o600 });
-  const installationSession = layout.product ? path.join(layout.root, '.mind-producto', SESSIONS_DIRECTORY, `sesion-${sessionId}.json`) : null;
+  const ownerIdentity = await identifyCurrentProcess({ pythonExecutable: layout.pythonExecutable });
+  const sessionRecord = { format: 'mind-session', version: 2, id: sessionId, ...ownerIdentity,
+    startedAt: new Date().toISOString(), observe };
+  await writeJson(sessionFile, sessionRecord);
+  const installationSession = layout.product ? path.join(layout.installationStateDirectory ?? productPaths(layout.root, layout.manifest).installationStateDirectory, SESSIONS_DIRECTORY, `sesion-${sessionId}.json`) : null;
   if (installationSession) {
     await fs.mkdir(path.dirname(installationSession), { recursive: true, mode: 0o700 });
-    await fs.copyFile(sessionFile, installationSession);
+    await writeJson(installationSession, sessionRecord);
   }
   await releaseStartup();
 
@@ -422,40 +425,35 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   } catch (error) { await releaseStartup().catch(() => {}); throw error; }
 }
 
-/** Sesiones registradas en la Base cuyo proceso sigue vivo en este equipo. */
-export async function liveSessions(baseDirectory) {
+/** Unknown records block old callers conservatively but remain separately diagnosable. */
+export async function liveSessions(baseDirectory, options = {}) {
   const directory = path.join(baseDirectory, SESSIONS_DIRECTORY);
-  let entries = [];
-  try {
-    entries = await fs.readdir(directory);
-  } catch (error) {
-    if (error.code === 'ENOENT') return { live: [], stale: [] };
-    throw error;
-  }
-  const live = [];
-  const stale = [];
-  for (const entry of entries) {
-    if (!/^sesion-[a-f0-9-]{36}\.json$/.test(entry)) continue;
-    let data = null;
+  let entries;
+  try { entries = await fs.readdir(directory); }
+  catch (error) { if (error.code === 'ENOENT') return { live: [], stale: [], unknown: [], directory }; throw error; }
+  const records = [];
+  for (const file of entries) {
+    if (!/^sesion-[a-f0-9-]{36}\.json$/.test(file)) continue;
     try {
-      data = JSON.parse(await fs.readFile(path.join(directory, entry), 'utf8'));
-    } catch {
-      stale.push({ file: entry, reason: 'ilegible' });
-      continue;
-    }
-    if (data.host !== os.hostname()) {
-      live.push({ ...data, file: entry, note: 'otro-equipo' });
-      continue;
-    }
-    let alive = true;
-    try {
-      process.kill(data.pid, 0);
+      const info = await fs.lstat(path.join(directory, file));
+      if (!info.isFile()) { records.push({ file, invalid: true }); continue; }
+      const record = JSON.parse(await fs.readFile(path.join(directory, file), 'utf8'));
+      if (!record || record.format !== 'mind-session' || ![1, 2].includes(record.version)
+          || !/^[a-f0-9-]{36}$/.test(record.id ?? '') || file !== 'sesion-' + record.id + '.json') {
+        records.push({ file, invalid: true }); continue;
+      }
+      records.push({ ...record, file });
     } catch (error) {
-      alive = error.code === 'EPERM';
+      if (error.code === 'ENOENT') continue;
+      records.push({ file, invalid: true, reason: 'unreadable-record' });
     }
-    (alive ? live : stale).push({ ...data, file: entry });
   }
-  return { live, stale, directory };
+  const inspected = await inspectProcessOwners(records, options);
+  const unknown = inspected.filter(record => record.state === 'unknown');
+  return {
+    live: inspected.filter(record => record.state === 'active' || record.state === 'unknown'),
+    stale: inspected.filter(record => record.state === 'stale'), unknown, directory,
+  };
 }
 
 export { MotorError };

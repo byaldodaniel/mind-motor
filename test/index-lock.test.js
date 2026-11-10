@@ -58,13 +58,13 @@ test('nunca se recupera un bloqueo vivo, de otro equipo ni vacío reciente', asy
   }
 });
 
-test('un bloqueo vacío y antiguo (dueño terminado antes de escribirlo) se recupera', async (t) => {
+test('un bloqueo vacío antiguo sigue siendo indeterminado y se conserva', async (t) => {
   const { base, lock } = await fixture(t);
   await fs.writeFile(lock, '');
   const old = new Date(Date.now() - 120_000);
   await fs.utimes(lock, old, old);
-  assert.equal(await withIndexLock(base, SCOPE, async () => 'hecho'), 'hecho');
-  assert.deepEqual(await fs.readdir(base), []);
+  await assert.rejects(withIndexLock(base, SCOPE, async () => 'hecho', 'folder-index', { timeoutMs: 150 }), { code: 'INDEX_LOCK_TIMEOUT' });
+  assert.equal(await fs.readFile(lock, 'utf8'), '');
 });
 
 test('el bloqueo nuevo guarda el equipo y el proceso para poder demostrar su abandono', async (t) => {

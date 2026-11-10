@@ -1,3 +1,6 @@
+import { productPaths } from './layout.js';
+import { lockInstallation } from './installation-lock.js';
+import { recoverAbandonedOwnerFile } from './process-identity.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline/promises';
@@ -226,24 +229,42 @@ export async function permissionsConsole({ session, prompt, revoke = null, exclu
  */
 export async function repairConsole({ session, prompt }) {
   const base = session.motor.baseDirectory;
-  const { live, stale } = await liveSessions(base);
-  const others = live.filter((item) => item.id !== session.id);
-  if (others.length > 0) {
-    prompt.write(`Hay ${others.length} sesión(es) de Mind activas (agentes abiertos). Ciérralas y vuelve a intentarlo.`);
-    return 0;
-  }
-  const entries = await fs.readdir(base);
-  const locks = entries.filter((entry) => /^folder-index-[a-f0-9]{64}\.lock$/.test(entry));
-  const temporaries = entries.filter((entry) => /^\.mind-[A-Za-z0-9-]+\.tmp$/.test(entry));
-  if (locks.length + temporaries.length + stale.length === 0) {
-    prompt.write('La Base no tiene bloqueos ni temporales abandonados.');
-    return 0;
-  }
-  prompt.write(`Bloqueos de índice: ${locks.length}; temporales: ${temporaries.length}; sesiones cerradas sin limpiar: ${stale.length}.`);
-  if (!(await prompt.yes('¿Confirmas que cerraste todos los agentes y programas que usan esta Base?', false))) return 0;
-  for (const entry of [...locks, ...temporaries]) await fs.rm(path.join(base, entry), { force: true });
-  for (const item of stale) await fs.rm(path.join(base, 'sesiones', item.file), { force: true });
-  await session.audit('base-reparada', { bloqueos: locks.length, temporales: temporaries.length, sesiones: stale.length, canal: 'consola' });
-  prompt.write('Listo. Los índices afectados se reconcilian en la próxima sesión.');
-  return locks.length + temporaries.length + stale.length;
+  const options = { pythonExecutable: session.layout.pythonExecutable };
+  const release = session.layout.product ? await lockInstallation(session.layout.root, options) : async () => {};
+  try {
+    const locations = [...new Set([base, ...(session.layout.product ? [session.layout.installationStateDirectory ?? productPaths(session.layout.root, session.layout.manifest).installationStateDirectory, path.join(session.layout.root, '.mind-producto')] : [])])];
+    const registries = await Promise.all(locations.map(location => liveSessions(location, options)));
+    const others = registries.flatMap(registry => registry.live).filter(item => item.id !== session.id);
+    const unknown = others.filter(item => item.state === 'unknown');
+    if (others.length) {
+      prompt.write(unknown.length
+        ? 'Hay propietarios no verificables; se conservan sus registros. Revisa permisos o el equipo de origen antes de reparar.'
+        : 'Hay sesiones reales de Mind activas. Cierra sus conexiones y vuelve a intentarlo.');
+      return 0;
+    }
+    const entries = await fs.readdir(base);
+    const locks = entries.filter(entry => /^folder-index-[a-f0-9]{64}\.lock$/.test(entry));
+    const temporaries = entries.filter(entry => /^\.mind-[A-Za-z0-9-]+\.tmp$/.test(entry));
+    const stale = registries.flatMap(registry => registry.stale.map(item => ({ ...item, directory: registry.directory })));
+    if (!locks.length && !stale.length) {
+      prompt.write(temporaries.length ? 'Se conservan los temporales sin propietario verificable.' : 'No hay registros abandonados demostrados.');
+      return 0;
+    }
+    prompt.write('Bloqueos de índice: ' + locks.length + '; temporales sin propietario verificable (se conservan): ' + temporaries.length
+      + '; registros de sesiones abandonadas: ' + stale.length + '.');
+    if (!(await prompt.yes('¿Confirmas que cerraste todos los agentes y programas que usan esta Base?', false))) return 0;
+    // Only proven abandoned lock/session owners are removed. Corrupt or active
+    // coordination remains intact even after a general confirmation.
+    let removed = 0;
+    for (const file of locks) {
+      if (await recoverAbandonedOwnerFile(path.join(base, file), options)) removed++;
+    }
+    for (const item of stale) {
+      if (await recoverAbandonedOwnerFile(path.join(item.directory, item.file), options)) removed++;
+    }
+    // A temporary filename does not establish ownership or completed work.
+    await session.audit('base-reparada', { retirados: removed, canal: 'consola' });
+    prompt.write('Recuperación terminada. Los registros no verificables se conservan.');
+    return removed;
+  } finally { await release(); }
 }

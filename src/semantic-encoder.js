@@ -4,9 +4,14 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 
+const motorLocation = fileURLToPath(new URL('..', import.meta.url));
+const defaultSemanticDirectory = path.basename(path.dirname(motorLocation)) === 'Programa' && path.basename(path.dirname(path.dirname(motorLocation))) === 'Sistema'
+  ? path.join(path.dirname(path.dirname(motorLocation)), 'Componentes', 'Semantica')
+  : path.join(motorLocation, '.cache', 'semantic');
+
 export const SEMANTIC_MODEL = 'multilingual-e5-small-uint8-761b726-sentence-v1';
 export const SEMANTIC_DIMENSIONS = 384;
-export function createSemanticEncoder({ directory = fileURLToPath(new URL('../.cache/semantic/', import.meta.url)), idleMs = 60_000 } = {}) {
+export function createSemanticEncoder({ directory = defaultSemanticDirectory, idleMs = 60_000 } = {}) {
   let worker;
   let sequence = 0;
   let idle;

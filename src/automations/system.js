@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { productPaths } from '../layout.js';
 import { MotorError } from '../errors.js';
 import { readJson, writeJson, removeJson } from '../storage.js';
 
@@ -88,7 +89,7 @@ function checkCommandPart(value) {
  */
 export async function launcherCommand(layout, { baseDirectory = layout.baseDirectory, platform = process.platform, execPath = process.execPath } = {}) {
   const command = layout.product && layout.root
-    ? { program: path.join(layout.root, platform === 'win32' ? 'mind.cmd' : 'mind'), args: ['programadas'], mode: 'producto' }
+    ? { program: path.join(productPaths(layout.root,layout.manifest).launcherDirectory, platform === 'win32' ? 'mind.cmd' : 'mind'), args: ['programadas'], mode: 'producto' }
     : { program: execPath, args: [path.join(layout.motorDirectory, 'bin', 'mind.js'), '--base', baseDirectory, 'programadas'], mode: 'desarrollo' };
   [command.program, ...command.args].forEach(checkCommandPart);
   try {

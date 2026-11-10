@@ -13,8 +13,9 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { extractEntries, readArchive } from '../src/archive.js';
 import { githubDownload, verifyFeed } from '../src/auto-update.js';
-import { compareVersions, hashFile, MANIFEST_NAME, readManifestFile, supportsProductTarget } from '../src/product-files.js';
-import { productRuntime } from '../src/layout.js';
+import { comparePackageVersions, hashFile, MANIFEST_NAME, MANIFEST_RELATIVE_PATH, readManifestFile, supportsProductTarget } from '../src/product-files.js';
+import { productPaths, productRuntime } from '../src/layout.js';
+import { releaseOf } from '../src/package-descriptor.js';
 import { startMcp } from '../test/helpers/mcp-client.js';
 
 const [mindArgument, archiveArgument, thirdArgument, fourthArgument, ...extra] = process.argv.slice(2);
@@ -31,7 +32,7 @@ const report = { resultado: 'fallido', plataforma: `${process.platform}-${proces
 
 async function readIncomingProduct(archive) {
   const metadata = path.join(temporary, 'metadatos');
-  const files = [MANIFEST_NAME, 'Motor/package.json'];
+  const files = [MANIFEST_NAME, MANIFEST_RELATIVE_PATH, 'Motor/package.json', 'Sistema/Programa/Motor/package.json'];
   await extractEntries(readArchive(archive), metadata, {
     map(name, entry) {
       if (entry.type !== 'file') return null;
@@ -41,13 +42,14 @@ async function readIncomingProduct(archive) {
   });
   const manifest = await readManifestFile(metadata);
   assert.ok(manifest, `El archivo no contiene ${MANIFEST_NAME}.`);
-  const { version } = JSON.parse(await fs.readFile(path.join(metadata, 'Motor', 'package.json'), 'utf8'));
+  const { version } = JSON.parse(await fs.readFile(path.join(productPaths(metadata, manifest).motorDirectory, 'package.json'), 'utf8'));
   // --version-paquete cambia el manifiesto de prueba sin editar la versión del Motor.
-  return { manifest, motorVersion: version };
+  return { manifest, motorVersion: version, manifestSha256: await hashFile(productPaths(metadata, manifest).manifestFile) };
 }
 
-async function prepareFetch(mind, archive, incoming) {
-  const channelFile = path.join(mind, 'Motor', 'src', 'update-channel.json');
+async function prepareFetch(mind, archive, incoming, manifestSha256) {
+  const current = await readManifestFile(mind);
+  const channelFile = path.join(productPaths(mind, current).motorDirectory, 'src', 'update-channel.json');
   const channel = JSON.parse(await fs.readFile(channelFile, 'utf8'));
   const [sha256, { size: bytes }] = await Promise.all([hashFile(archive), fs.stat(archive)]);
   let feed;
@@ -58,7 +60,7 @@ async function prepareFetch(mind, archive, incoming) {
     channel.publicKey = publicKey.export({ type: 'spki', format: 'pem' });
     await fs.writeFile(channelFile, JSON.stringify(channel) + '\n');
     const url = `https://github.com/${channel.repository}/releases/download/v${incoming.mindVersion}/${encodeURIComponent(path.basename(archive))}`;
-    const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 1, mindVersion: incoming.mindVersion,
+    const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 2, ...releaseOf(incoming), manifestSha256,
       packages: [{ platform: incoming.platform, arch: incoming.arch, ...(incoming.targets ? { targets: incoming.targets } : {}), url, bytes, sha256 }] }));
     feed = path.join(temporary, 'stable.json');
     await fs.writeFile(feed, JSON.stringify({ payload: payload.toString('base64'),
@@ -102,18 +104,19 @@ try {
   assert.ok(supportsProductTarget(before));
   assert.ok(!(await fs.readdir(origin)).some(name => name.toLowerCase() === 'base'),
     'Usa un paquete recién extraído, sin Base del usuario.');
-  const { manifest: incoming, motorVersion } = await readIncomingProduct(archive);
+  const { manifest: incoming, motorVersion, manifestSha256 } = await readIncomingProduct(archive);
   report.desde = before.mindVersion;
   report.hasta = incoming.mindVersion;
   report.motor = motorVersion;
   assert.ok(supportsProductTarget(incoming), 'El paquete nuevo debe admitir este equipo.');
-  assert.ok(compareVersions(incoming.mindVersion, before.mindVersion) > 0, 'El paquete nuevo debe tener una versión superior.');
+  assert.ok(comparePackageVersions(incoming, before) > 0, 'El paquete nuevo debe tener una versión o revisión superior.');
+  assert.equal(before.layoutVersion, 2, 'Las copias legacy se validan mediante corregir, no el actualizador antiguo.');
 
   const mind = path.join(temporary, 'Mind de prueba ñ');
   await fs.cp(origin, mind, { recursive: true, verbatimSymlinks: true });
-  const preload = await prepareFetch(mind, archive, incoming);
-  const { resolveLayout } = await import(pathToFileURL(path.join(mind, 'Motor', 'src', 'layout.js')));
-  const { openSession } = await import(pathToFileURL(path.join(mind, 'Motor', 'src', 'session.js')));
+  const preload = await prepareFetch(mind, archive, incoming, manifestSha256);
+  const { resolveLayout } = await import(pathToFileURL(path.join(productPaths(mind, before).motorDirectory, 'src', 'layout.js')));
+  const { openSession } = await import(pathToFileURL(path.join(productPaths(mind, before).motorDirectory, 'src', 'session.js')));
   const layout = await resolveLayout({ env: {} });
   const session = await openSession({ layout, motorVersion: before.mindVersion, observe: false });
   const decision = 'Decisión ficticia anterior a actualizar';
@@ -129,7 +132,7 @@ try {
   await fs.mkdir(project);
   await fs.writeFile(path.join(project, 'nota.txt'), 'Texto ficticio');
 
-  if (before.targets) execFileSync(productRuntime(mind, before).nodeExecutable, [path.join(mind, 'Motor', 'bin', 'mind.js'), 'preparar']);
+  if (before.targets) execFileSync(productRuntime(mind, before).nodeExecutable, [productPaths(mind, before).entrypoint, 'preparar']);
   const { mcpServers: { mind: config } } = JSON.parse(await fs.readFile(path.join(mind, '.mcp.json'), 'utf8'));
   const node = path.resolve(mind, config.command);
   const [launcher, ...args] = config.args;

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-export async function copySemanticBundle(destination, { source = fileURLToPath(new URL('../.cache/semantic/', import.meta.url)), manifestSha256 } = {}) {
+export async function copySemanticBundle(destination, { source = process.env.MIND_SEMANTIC_SOURCE ?? fileURLToPath(new URL('../.cache/semantic/', import.meta.url)), manifestSha256 } = {}) {
   const raw = await fs.readFile(path.join(source, 'manifest.json'));
   if (createHash('sha256').update(raw).digest('hex') !== manifestSha256) throw new Error('Componente semántico no coincide con la configuración versionada. Ejecuta scripts/preparar-semantica.mjs.');
   const manifest = JSON.parse(raw);

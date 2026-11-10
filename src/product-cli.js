@@ -117,7 +117,7 @@ export async function main(args) {
   try {
     const { options, command, parameters } = parse(args);
     options.autoWorkspace = ['estado', 'herramienta', 'inicio'].includes(command);
-    if (!['version', '--version', 'actualizar'].includes(command)) {
+    if (!['version', '--version', 'actualizar', 'corregir'].includes(command)) {
       const { prepareProductMcp } = await import('./product-mcp.js');
       try {
         const result = await prepareProductMcp();
@@ -151,6 +151,8 @@ export async function main(args) {
         print({
           mind: layout?.manifest?.mindVersion ?? MOTOR_VERSION,
           motor: MOTOR_VERSION,
+          revision: layout?.manifest?.packageRevision ?? 0,
+          estructura: layout?.manifest?.layoutVersion ?? 1,
           node: process.versions.node,
           plataforma: `${process.platform}-${process.arch}`,
           producto: layout?.product ?? false,
