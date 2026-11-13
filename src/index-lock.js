@@ -1,4 +1,4 @@
-import { identifyCurrentProcess, inspectProcessOwners } from './process-identity.js';
+import { identifyCurrentProcess, inspectProcessOwners, parseOwnerRecord, predatesSystemBoot } from './process-identity.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,11 +24,13 @@ export function processAlive(pid) {
 
 /**
  * Devuelve la identidad física del bloqueo si está demostrablemente abandonado:
- * creado en este mismo equipo por un proceso que ya no existe. Ante cualquier
- * duda (otro equipo, proceso vivo o PID reutilizado, contenido ilegible
- * reciente) devuelve null y el bloqueo se respeta.
+ * creado en este mismo equipo por un proceso que ya no existe, o con contenido
+ * ilegible (vacío o en ceros tras un apagado abrupto) y anterior al último
+ * arranque del equipo. Ante cualquier duda (otro equipo, proceso vivo o PID
+ * reutilizado, contenido ilegible posterior al arranque) devuelve null y el
+ * bloqueo se respeta. La antigüedad por sí sola nunca prueba abandono.
  */
-async function abandoned(filename, { pythonExecutable, ownerInspector = inspectProcessOwners } = {}) {
+async function abandoned(filename, { pythonExecutable, ownerInspector = inspectProcessOwners, bootTime } = {}) {
   let info;
   let text;
   try {
@@ -39,19 +41,13 @@ async function abandoned(filename, { pythonExecutable, ownerInspector = inspectP
     if (error.code === 'ENOENT') return null;
     throw error;
   }
-  let owner = null;
-  try {
-    owner = JSON.parse(text);
-  } catch {
-    owner = null;
-  }
-  if (owner && typeof owner === 'object' && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
+  const owner = parseOwnerRecord(text);
+  if (owner && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
     const [status] = await ownerInspector([{ ...owner, host: owner.host ?? os.hostname() }], { pythonExecutable });
     return status.state === 'stale' ? info : null;
   }
-  // Empty/corrupt coordination never proves abandonment, regardless of age.
-
-  return null;
+  // Un dueño ilegible solo se demuestra abandonado si es anterior al arranque.
+  return predatesSystemBoot(info, bootTime === undefined ? {} : { bootTime }) ? info : null;
 }
 
 /**
@@ -115,7 +111,7 @@ const LOCK_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
  * índices personalizados) usen su propio archivo `<lockName>-<id>.lock` con la
  * misma espera y la misma política de recuperación.
  */
-export async function withIndexLock(baseDirectory, scopeId, task, lockName = INDEX_LOCK_NAME, { timeoutMs = WAIT_MS, signal, pythonExecutable, ownerInspector = inspectProcessOwners } = {}) {
+export async function withIndexLock(baseDirectory, scopeId, task, lockName = INDEX_LOCK_NAME, { timeoutMs = WAIT_MS, signal, pythonExecutable, ownerInspector = inspectProcessOwners, bootTime } = {}) {
   if (typeof lockName !== 'string' || !LOCK_NAME.test(lockName)
       || (lockName !== INDEX_LOCK_NAME && (typeof scopeId !== 'string' || !LOCK_ID.test(scopeId)))) {
     throw new MotorError('INVALID_LOCK_NAME', 'El nombre del bloqueo no es válido.');
@@ -150,8 +146,8 @@ export async function withIndexLock(baseDirectory, scopeId, task, lockName = IND
       const now = performance.now();
       if (now - inspectedAt >= INSPECT_EVERY_MS) {
         inspectedAt = now;
-        const examined = await abandoned(filename, { pythonExecutable, ownerInspector });
-        if (examined && await recover(filename, { pythonExecutable, ownerInspector })) continue;
+        const examined = await abandoned(filename, { pythonExecutable, ownerInspector, bootTime });
+        if (examined && await recover(filename, { pythonExecutable, ownerInspector, bootTime })) continue;
       }
       if (now >= deadline) {
         throw new MotorError('INDEX_LOCK_TIMEOUT', lockName === INDEX_LOCK_NAME
@@ -176,6 +172,8 @@ export async function withIndexLock(baseDirectory, scopeId, task, lockName = IND
     await handle.writeFile(JSON.stringify({
       version: 2, owner: randomUUID(), ...ownerIdentity, createdAt: new Date().toISOString(),
     }) + '\n');
+    // Durable antes de entrar en la tarea: un apagado abrupto no debe dejar un dueño ilegible.
+    await handle.sync();
     // The barrier may have appeared between the first check and open('wx').
     // Publish our live owner before waiting, but never enter the task through
     // the temporary filename gap left by a recovery in progress.

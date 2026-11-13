@@ -67,6 +67,41 @@ test('un bloqueo vacío antiguo sigue siendo indeterminado y se conserva', async
   assert.equal(await fs.readFile(lock, 'utf8'), '');
 });
 
+test('un bloqueo ilegible anterior al último arranque se recupera (apagado abrupto)', async (t) => {
+  const { base } = await fixture(t);
+  // Caso real del 10-nov-2026: el sistema reservó el tamaño y el contenido quedó en ceros.
+  for (const [name, scope] of [['folder-index', SCOPE], ['resource-work', 'global']]) {
+    const lock = path.join(base, `${name}-${scope}.lock`);
+    for (const content of [Buffer.alloc(372), '', '{no es json']) {
+      await fs.writeFile(lock, content);
+      const bootTime = Date.now() + 10_000; // El archivo es anterior al arranque simulado.
+      assert.equal(await withIndexLock(base, scope, async () => 'hecho', name, { timeoutMs: 500, bootTime }), 'hecho');
+      assert.deepEqual(await fs.readdir(base), []);
+    }
+  }
+});
+
+test('un bloqueo ilegible posterior al arranque se conserva aunque sea antiguo', async (t) => {
+  const { base } = await fixture(t);
+  const lock = path.join(base, 'resource-work-global.lock');
+  await fs.writeFile(lock, Buffer.alloc(372));
+  const old = new Date(Date.now() - 3_600_000);
+  await fs.utimes(lock, old, old);
+  const bootTime = Date.now() - 7_200_000; // Arranque anterior al archivo.
+  await assert.rejects(withIndexLock(base, 'global', async () => {}, 'resource-work', { timeoutMs: 150, bootTime }),
+    { code: 'INDEX_LOCK_TIMEOUT' });
+  assert.equal((await fs.readFile(lock)).length, 372);
+});
+
+test('un dueño vivo anterior al arranque simulado nunca se recupera por la prueba de arranque', async (t) => {
+  const { base, lock } = await fixture(t);
+  const content = owner({ pid: process.pid, host: os.hostname() });
+  await fs.writeFile(lock, content);
+  await assert.rejects(withIndexLock(base, SCOPE, async () => {}, undefined, { timeoutMs: 150, bootTime: Date.now() + 10_000 }),
+    { code: 'INDEX_LOCK_TIMEOUT' });
+  assert.equal(await fs.readFile(lock, 'utf8'), content);
+});
+
 test('el bloqueo nuevo guarda el equipo y el proceso para poder demostrar su abandono', async (t) => {
   const { base, lock } = await fixture(t);
   await withIndexLock(base, SCOPE, async () => {

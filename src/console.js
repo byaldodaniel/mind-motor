@@ -243,7 +243,8 @@ export async function repairConsole({ session, prompt }) {
       return 0;
     }
     const entries = await fs.readdir(base);
-    const locks = entries.filter(entry => /^folder-index-[a-f0-9]{64}\.lock$/.test(entry));
+    // Todos los bloqueos de withIndexLock: índices, trabajo global, prioridad, propiedades e índices personalizados.
+    const locks = entries.filter(entry => /^[a-z][a-z0-9-]{0,40}-[a-z0-9][a-z0-9_-]{0,63}\.lock$/.test(entry));
     const temporaries = entries.filter(entry => /^\.mind-[A-Za-z0-9-]+\.tmp$/.test(entry));
     const stale = registries.flatMap(registry => registry.stale.map(item => ({ ...item, directory: registry.directory })));
     if (!locks.length && !stale.length) {
