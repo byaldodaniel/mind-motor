@@ -719,7 +719,8 @@ async function recordLastBackup(base, created) {
 export function isExcludedFromBackup(name, { topLevel }) {
   if (TEMPORARY.test(name) || name.endsWith('.lock') || name.includes('.lock.abandonado-')) return true;
   return topLevel && (name === KEY_FILE || name === 'sesiones' || name === 'conector.json'
-    || name === 'conector-secreto.json' || name.startsWith('consent-request-')
+    || name === 'conector-secreto.json' || name === 'motor-central.log' || name === 'motor-central.log.1'
+    || name.startsWith('consent-request-')
     || /^conversation-index\.sqlite(?:-journal|-wal|-shm)?$/.test(name));
 }
 

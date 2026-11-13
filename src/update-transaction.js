@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readArchive } from './archive.js';
 import { MotorError } from './errors.js';
@@ -86,6 +86,47 @@ async function sessionState(base,root,current,pythonExecutable){
   if(active.size||unknown.size)throw Object.assign(error(unknown.size?'SESSION_IDENTITY_UNKNOWN':'MIND_IN_USE',`${active.size} sesiones activas y ${unknown.size} no verificables; la actualización queda preparada.`),{active:active.size,unknown:unknown.size});
 }
 async function safeRemove(root,p){await noLinks(root,p);if(!within(root,p)||p===root)throw error('UPDATE_PATH_INVALID','No se elimina fuera de la transacción.');await fs.rm(p,{recursive:true,force:true});}
+// Un proceso que sigue vivo con el programa anterior (p. ej. el puente de un chat abierto)
+// impide en Windows borrar su ejecutable, aunque sí deja renombrar la carpeta que lo contiene.
+const IN_USE=new Set(['EPERM','EBUSY','EACCES','ENOTEMPTY']);
+const retiredDirectory=root=>path.join(root,'Sistema','Actualizaciones','Retirados');
+/** Retira el trabajo de una operación ya cerrada; si algo sigue en uso, lo aparta para borrarlo después. */
+async function removeWork(root,work){
+  try{await safeRemove(root,work);return false;}
+  catch(e){
+    if(!IN_USE.has(e.code)||!(await has(work)))throw e;
+    const dir=retiredDirectory(root);await noLinks(root,dir);await fs.mkdir(dir,{recursive:true});
+    const to=path.join(dir,`${Date.now()}-${randomBytes(6).toString('hex')}`);
+    // Un antivirus o un indexador puede retener unos instantes un ejecutable recién escrito.
+    for(let attempt=0;;attempt++){
+      try{await fs.rename(work,to);return true;}
+      catch(failure){
+        if(attempt>=5||!IN_USE.has(failure.code))throw Object.assign(e,{detail:`${failure.code} al apartar ${path.basename(e.path??'')}`});
+        await new Promise(done=>setTimeout(done,200*(attempt+1)));
+      }
+    }
+  }
+}
+/** Borra lo retirado que ya no esté en uso. Nunca falla: lo que siga en uso se intenta en otra ocasión. */
+async function purgeRetiredLocked(root){
+  const dir=retiredDirectory(root);let names;
+  try{await noLinks(root,dir);names=await fs.readdir(dir);}catch{return {pending:0};}
+  let pending=0;
+  for(const name of names){
+    if(!/^[0-9]+-[a-f0-9]{12}$/u.test(name)){pending++;continue;}
+    try{await safeRemove(root,path.join(dir,name));}catch{pending++;}
+  }
+  if(!pending)await fs.rmdir(dir).catch(()=>{});
+  return {pending};
+}
+export async function purgeRetiredUpdates(root,{pythonExecutable}={}){
+  root=await fs.realpath(root);
+  if(!(await has(retiredDirectory(root))))return {pending:0};
+  let release;
+  try{release=await lease(path.join(root,'Sistema','Actualizaciones','preparacion.lock'),pythonExecutable);}
+  catch{return {pending:null,busy:true};}
+  try{return await purgeRetiredLocked(root);}finally{await release();}
+}
 async function durableMove(root,journalFile,journal,from,to,testing,{copy=false}={}){
   await noLinks(root,from);await noLinks(root,path.dirname(to));
   const toExists=await has(to),fromInfo=await fs.lstat(from);
@@ -210,7 +251,7 @@ async function recoverTransactionLocked(root,{pythonExecutable}={}){
     }finally{await releaseGate();}
   }
   if(j.phase==='prepared')return {status:'preparada',journal:j};
-  try {if(j.phase==='committed'||j.phase==='cleanup-pending')await cleanupObsolete(root,j);await safeRemove(root,work);await fs.rm(file);return {status:'recuperada'};}
+  try {if(j.phase==='committed'||j.phase==='cleanup-pending')await cleanupObsolete(root,j);const retired=await removeWork(root,work);await fs.rm(file);return {status:'recuperada',retired};}
   catch(e){j.phase='cleanup-pending';j.cleanupError=e.code;await writeJson(file,j);throw error('UPDATE_CLEANUP_PENDING','La limpieza anterior sigue pendiente; no se inicia otra operación.');}
 }
 export async function recoverUpdateTransaction(root,options={}){
@@ -231,6 +272,7 @@ export async function runUpdateTransaction(options,h){
   const journalFile=path.join(directory,'transaccion.json');const work=path.join(directory,'Trabajo','actual');
   let unlockGate, j, tree, incoming, committed=false,createdWork=false,createdJournal=false;
   try{
+    await purgeRetiredLocked(root);
     const recovered=await recoverUpdateTransaction(root,{pythonExecutable,leaseHeld:true});
     current=await readManifestFile(root);if(!current)throw error('NOT_PRODUCT','No es una instalación de Mind.');
     baseDirectory=path.resolve(baseDirectory??productPaths(root,current).baseDirectory);
@@ -312,12 +354,13 @@ export async function runUpdateTransaction(options,h){
     for(const [r,hash]of Object.entries(baseHashes))if(await hashFile(path.join(baseTarget,r))!==hash)throw error('UPDATE_BASE_CHANGED','La Base cambió durante la instalación.');
     j.phase='committed';await writeJson(journalFile,j);committed=true;await testing.afterPhase?.('committed');
     let preservedLegacy=[];
-    try{await cleanupObsolete(root,j);preservedLegacy=await cleanLegacy(root);await safeRemove(root,work);await fs.rm(journalFile);}
-    catch(e){j.phase='cleanup-pending';j.cleanupError=e.code;await writeJson(journalFile,j);return {status:'actualizada',...summary,cleanupPending:true,baseDirectory:baseTarget,baseMigration:baseTarget!==baseDirectory?{from:baseDirectory,to:baseTarget}:null};}
-    return {status:'actualizada',...summary,cleanupPending:false,baseDirectory:baseTarget,baseMigration:baseTarget!==baseDirectory?{from:baseDirectory,to:baseTarget}:null,reusedComponents:keep.size,preservedLegacy};
+    let retired=false;
+    try{await cleanupObsolete(root,j);preservedLegacy=await cleanLegacy(root);retired=await removeWork(root,work);await fs.rm(journalFile);}
+    catch(e){j.phase='cleanup-pending';j.cleanupError=e.code;j.cleanupDetail=String(e.detail??e.message??'').slice(0,300);await writeJson(journalFile,j);return {status:'actualizada',...summary,cleanupPending:true,baseDirectory:baseTarget,baseMigration:baseTarget!==baseDirectory?{from:baseDirectory,to:baseTarget}:null};}
+    return {status:'actualizada',...summary,cleanupPending:false,retiredPending:retired,baseDirectory:baseTarget,baseMigration:baseTarget!==baseDirectory?{from:baseDirectory,to:baseTarget}:null,reusedComponents:keep.size,preservedLegacy};
   }catch(e){
     if(j&&!committed&&j.phase!=='prepared'){
-      try{await rollback(root,journalFile,j);await safeRemove(root,work);await fs.rm(journalFile);}catch(failure){throw Object.assign(error('UPDATE_ROLLBACK_FAILED',`Se conserva la recuperación: ${failure.message}`),{cause:e});}
+      try{await rollback(root,journalFile,j);await removeWork(root,work);await fs.rm(journalFile);}catch(failure){throw Object.assign(error('UPDATE_ROLLBACK_FAILED',`Se conserva la recuperación: ${failure.message}`),{cause:e});}
     }else if(!e.prepared && createdJournal && j?.phase==='prepared'){
       await safeRemove(root,work);await fs.rm(journalFile);
     }else if(!j&&createdWork&&await has(work))await safeRemove(root,work);

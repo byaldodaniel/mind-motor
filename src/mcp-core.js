@@ -87,6 +87,9 @@ export function createMcpProcessor({
   const pending = new Map();
   const running = new Map();
   const routeContext = new AsyncLocalStorage();
+  // Señal de la `tools/call` en curso: cancelarla cancela también lo que esa
+  // herramienta esté esperando del cliente (un formulario de confirmación).
+  const callSignal = new AsyncLocalStorage();
   let nextId = 1;
   let closed = false;
   let closing = null;
@@ -128,8 +131,9 @@ export function createMcpProcessor({
       return Object.keys(elicitation).length === 0 || isObject(elicitation.form);
     },
     /** Petición del servidor al cliente; resuelve con el resultado o rechaza con el error del cliente. */
-    request(method, params, { timeoutMs = SERVER_REQUEST_TIMEOUT_MS, signal } = {}) {
+    request(method, params, { timeoutMs = SERVER_REQUEST_TIMEOUT_MS, signal = callSignal.getStore() } = {}) {
       if (closed) return Promise.reject(new MotorError('SESSION_CLOSED', 'La sesión con el agente terminó.'));
+      if (signal?.aborted) return Promise.reject(new MotorError('REQUEST_CANCELLED', 'La solicitud se canceló.'));
       const id = `mind-${nextId++}`;
       const route = routeContext.getStore();
       return new Promise((resolve, reject) => {
@@ -199,7 +203,7 @@ export function createMcpProcessor({
         const controller = new AbortController();
         running.set(id, controller);
         try {
-          return toolResult(await toolset.call(name, args, { signal: controller.signal, connection }));
+          return toolResult(await callSignal.run(controller.signal, () => toolset.call(name, args, { signal: controller.signal, connection })));
         } catch (error) {
           if (!(error instanceof MotorError)) log('error', 'Fallo inesperado en una herramienta', { tool: name, error: String(error?.stack ?? error) });
           return toolError(error);
@@ -298,6 +302,8 @@ export function createMcpProcessor({
   return Object.freeze({
     connection,
     dispatchOne,
+    /** Cancela una `tools/call` en curso, como haría `notifications/cancelled` (el cliente se fue). */
+    cancel(requestId) { running.get(requestId)?.abort(); },
     close,
     isClosed: () => closed,
   });

@@ -1,4 +1,5 @@
 import { MotorError } from './errors.js';
+import { currentDirectory } from './paths.js';
 import { resolveLayout, productInstallation, productRuntime } from './layout.js';
 import { MOTOR_VERSION } from './version.js';
 import { COMMANDS } from './commands/index.js';
@@ -153,7 +154,25 @@ export async function main(args) {
         const quarantine = await releaseQuarantine(layout);
         if (quarantine.aviso) process.stderr.write(`Aviso: ${quarantine.aviso}\n`);
         const { runCentralMotorDaemon } = await import('./motor-central.js');
-        await runCentralMotorDaemon({ layout, motorVersion: MOTOR_VERSION, observe: true });
+        const { createFileLog } = await import('./motor-log.js');
+        // Restos de una actualización hecha con un chat abierto: se borran cuando ya nadie los usa.
+        if (layout.product && layout.root) {
+          const fs = await import('node:fs/promises');
+          const path = await import('node:path');
+          if (await fs.lstat(path.join(layout.root, 'Sistema', 'Actualizaciones', 'Retirados')).then(() => true, () => false)) {
+            import('./update-transaction.js')
+              .then(({ purgeRetiredUpdates }) => purgeRetiredUpdates(layout.root, { pythonExecutable: layout.pythonExecutable }))
+              .catch(() => {});
+          }
+        }
+        await runCentralMotorDaemon({
+          layout,
+          motorVersion: MOTOR_VERSION,
+          observe: true,
+          // Quien lanzó este proceso espera aquí el motivo si el inicio falla.
+          errorFile: process.env.MIND_MOTOR_ERROR_FILE ?? null,
+          log: createFileLog(layout.baseDirectory),
+        });
         return 0;
       }
       case 'despertar': {
@@ -164,7 +183,21 @@ export async function main(args) {
         if (options.headers) {
           process.stdout.write(`${JSON.stringify({ Authorization: `Bearer ${conn.token}` })}\n`);
         } else {
-          print({ ok: true, pid: conn.health.pid, port: conn.state.port, url: conn.url, despertado: conn.spawned });
+          const { health } = conn;
+          print({
+            ok: true,
+            pid: health.pid,
+            port: conn.state.port,
+            url: conn.url,
+            despertado: conn.spawned,
+            version: health.motorVersion,
+            estado: health.state,
+            iniciado: health.startedAt,
+            sesiones: health.sessions,
+            peticiones_activas: health.activeRequests,
+            trabajo_de_fondo: health.backgroundBusy === true,
+            cola: health.queue,
+          });
         }
         return 0;
       }
@@ -184,7 +217,17 @@ export async function main(args) {
         }
         if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `mcp no admite argumentos (${parameters[0]}).`);
         const { runMcpBridge } = await import('./mcp-bridge.js');
-        await runMcpBridge({ layout, workspacePaths: options.workspacePaths });
+        await runMcpBridge({
+          layout,
+          workspacePaths: options.workspacePaths,
+          // La misma orden con la que el cliente inició este puente: tras una
+          // actualización con el chat abierto, inicia el programa ya instalado.
+          relaunch: { command: process.execPath, args: process.argv.slice(1) },
+          // Como la sesión directa: diagnóstico en stderr, una línea JSON por evento.
+          log: (level, message, data) => {
+            process.stderr.write(`${JSON.stringify({ nivel: level, mensaje: message, ...(data ? { datos: data } : {}), fecha: new Date().toISOString() })}\n`);
+          },
+        });
         return 0;
       }
       case 'inicio': {
@@ -193,7 +236,7 @@ export async function main(args) {
         const res = await callCentralRpc({
           layout,
           baseDirectory: layout.baseDirectory,
-          payload: { accion: 'inicio', paths: options.workspacePaths, cwd: process.cwd() },
+          payload: { accion: 'inicio', paths: options.workspacePaths, cwd: currentDirectory() },
         });
         print({ mind: res.mind, instrucciones: res.instrucciones, destinos: res.destinos });
         return 0;
@@ -204,7 +247,7 @@ export async function main(args) {
         const res = await callCentralRpc({
           layout,
           baseDirectory: layout.baseDirectory,
-          payload: { accion: 'estado', paths: options.workspacePaths, cwd: process.cwd() },
+          payload: { accion: 'estado', paths: options.workspacePaths, cwd: currentDirectory() },
         });
         print(res.value);
         return res.isError ? 1 : 0;
@@ -226,7 +269,7 @@ export async function main(args) {
         const res = await callCentralRpc({
           layout,
           baseDirectory: layout.baseDirectory,
-          payload: { accion: 'herramienta', tool: name, args: parsedArgs, paths: options.workspacePaths, cwd: process.cwd() },
+          payload: { accion: 'herramienta', tool: name, args: parsedArgs, paths: options.workspacePaths, cwd: currentDirectory() },
         });
         print(res.text);
         return res.isError ? 1 : 0;

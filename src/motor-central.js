@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -20,12 +19,24 @@ import {
   readOrCreateSecret,
   writeConnectorState,
   removeConnectorState,
-  writeJsonAtomic,
+  writeStartupError,
   checkHealthyConnector,
+  healthProof,
+  HEALTH_NONCE_PATTERN,
 } from './connector.js';
 
 const DEFAULT_LIGHT_IDLE_MS = 3 * 60_000;
 const DEFAULT_SHUTDOWN_IDLE_MS = 10 * 60_000;
+// Prórroga máxima del reposo y del autoapagado mientras hay trabajo de fondo en curso
+// (un recorrido inicial grande o la preparación semántica). Acotada: un trabajo
+// atascado no mantiene el Motor despierto para siempre.
+const DEFAULT_BACKGROUND_GRACE_MS = 30 * 60_000;
+const BACKGROUND_RECHECK_MS = 15_000;
+// Una sesión MCP sin flujo abierto, sin peticiones y sin actividad se da por abandonada
+// (su puente murió sin despedirse). Un puente vivo que vuelva recibe 404 y se reinicializa.
+const DEFAULT_SESSION_IDLE_MS = 15 * 60_000;
+// Al apagar, lo ya admitido dispone de este margen para terminar antes de cerrar la sesión.
+const DEFAULT_SHUTDOWN_DRAIN_MS = 5_000;
 const SSE_HEARTBEAT_MS = 25_000;
 const LOCK_WAIT_TIMEOUT_MS = 20_000;
 
@@ -86,14 +97,24 @@ function parseBody(req, maxBytes = MAX_MESSAGE_BYTES) {
   });
 }
 
-function parseHeaderPaths(raw) {
-  if (typeof raw !== 'string' || !raw.trim()) return [];
+/**
+ * Ámbito de trabajo declarado por el puente: `X-Mind-Workspace` lleva
+ * base64url(UTF-8 JSON {"cwd": string, "paths": string[]}). Las cabeceras HTTP
+ * solo admiten Latin-1, y una ruta puede tener cualquier carácter Unicode.
+ * Sin cabecera válida no hay ámbito: nunca se hereda el directorio del Motor.
+ */
+export function parseWorkspaceHeader(raw) {
+  const empty = { cwd: null, paths: [] };
+  if (typeof raw !== 'string' || !raw.trim()) return empty;
   try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item) => typeof item === 'string' && item.trim() !== '');
+    const parsed = JSON.parse(Buffer.from(raw.trim(), 'base64url').toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return empty;
+    return {
+      cwd: typeof parsed.cwd === 'string' && parsed.cwd.trim() ? parsed.cwd : null,
+      paths: parseRpcPaths(parsed.paths),
+    };
   } catch {
-    return [];
+    return empty;
   }
 }
 
@@ -157,7 +178,12 @@ export async function startCentralMotor({
   preferredPort: explicitPort,
   idleLightMs = DEFAULT_LIGHT_IDLE_MS,
   idleShutdownMs = DEFAULT_SHUTDOWN_IDLE_MS,
+  backgroundGraceMs = DEFAULT_BACKGROUND_GRACE_MS,
+  sessionIdleMs = DEFAULT_SESSION_IDLE_MS,
+  shutdownDrainMs = DEFAULT_SHUTDOWN_DRAIN_MS,
   observe = true,
+  errorFile = null,
+  sessionFactory = openSession,
   log = () => {},
   onShutdown,
 } = {}) {
@@ -169,65 +195,103 @@ export async function startCentralMotor({
     });
     canonicalBase = validated.baseDirectory;
   } catch (error) {
-    const { errorFile } = connectorPaths(canonicalBase);
-    if (error instanceof MotorError) {
-      await writeJsonAtomic(errorFile, {
-        code: error.code,
-        message: error.message,
-        ...(error.details ? { details: error.details } : {}),
-        at: new Date().toISOString(),
-      }).catch(() => {});
-    }
+    await writeStartupError(errorFile, error);
     throw error;
   }
-  const { lockFile, errorFile } = connectorPaths(canonicalBase);
+  const { lockFile } = connectorPaths(canonicalBase);
   const lockAttempt = await acquireConnectorLock(lockFile, canonicalBase, layout.pythonExecutable);
   if (lockAttempt.alreadyRunning) {
     return { alreadyRunning: true, ...lockAttempt.existing, stop: async () => false };
   }
 
   const releaseLock = lockAttempt.release;
-  await fs.rm(errorFile, { force: true }).catch(() => {});
 
   let session = null;
   let httpServer = null;
   let boundPort = null;
   let shuttingDown = false;
   let shutdownPromise = null;
-  let shutdown = null;
   let activeWork = 0;
   let activityState = 'active';
   let lastActivityAt = Date.now();
-  let lightIdleTimer = null;
-  let shutdownIdleTimer = null;
+  let sessionSweep = null;
+  const idleTimers = { light: null, shutdown: null };
   const mcpSessions = new Map();
   const inFlight = new Set();
 
   function clearIdleTimers() {
-    clearTimeout(lightIdleTimer);
-    clearTimeout(shutdownIdleTimer);
-    lightIdleTimer = null;
-    shutdownIdleTimer = null;
+    clearTimeout(idleTimers.light);
+    clearTimeout(idleTimers.shutdown);
+    idleTimers.light = null;
+    idleTimers.shutdown = null;
+  }
+
+  /** El trabajo de fondo en curso aplaza el reposo y el apagado, con un tope. */
+  function backgroundHolds(idleMs) {
+    return session?.isBackgroundBusy?.() === true && Date.now() - lastActivityAt < idleMs + backgroundGraceMs;
+  }
+
+  function armIdle(name, idleMs, action, delayMs = idleMs) {
+    if (!Number.isFinite(idleMs) || idleMs <= 0) return;
+    idleTimers[name] = setTimeout(() => {
+      idleTimers[name] = null;
+      if (shuttingDown || activeWork > 0) return;
+      if (backgroundHolds(idleMs)) {
+        armIdle(name, idleMs, action, Math.min(idleMs, BACKGROUND_RECHECK_MS));
+        return;
+      }
+      action();
+    }, delayMs);
+    idleTimers[name].unref?.();
   }
 
   function scheduleIdleTimers() {
     clearIdleTimers();
     if (shuttingDown || activeWork > 0) return;
-    if (Number.isFinite(idleLightMs) && idleLightMs > 0) {
-      lightIdleTimer = setTimeout(() => {
-        if (shuttingDown || activeWork > 0) return;
-        activityState = 'light-idle';
-        (session?.pauseIdle?.() ?? session?.clearCaches?.())?.catch?.(() => {});
-      }, idleLightMs);
-      lightIdleTimer.unref?.();
-    }
-    if (Number.isFinite(idleShutdownMs) && idleShutdownMs > 0) {
-      shutdownIdleTimer = setTimeout(() => {
-        if (shuttingDown || activeWork > 0) return;
-        shutdown('idle-timeout').catch((error) => log('error', 'Error en autoapagado por inactividad', { error: String(error) }));
-      }, idleShutdownMs);
-      shutdownIdleTimer.unref?.();
-    }
+    armIdle('light', idleLightMs, () => {
+      activityState = 'light-idle';
+      Promise.resolve().then(() => session?.pauseIdle?.())
+        .catch((error) => log('aviso', 'No se pudo entrar en reposo ligero', { error: String(error) }));
+    });
+    armIdle('shutdown', idleShutdownMs, () => {
+      shutdown('idle-timeout').catch((error) => log('error', 'Error en autoapagado por inactividad', { error: String(error) }));
+    });
+  }
+
+  /**
+   * Apagado ordenado. Deja de anunciarse, concede un margen a lo ya admitido, cierra
+   * las sesiones MCP y el servidor, y solo entonces cierra la sesión compartida y
+   * libera `conector.lock`. Lo que llegue durante el apagado recibe 503 y se reintenta
+   * contra el Motor siguiente.
+   */
+  function shutdown(reason = 'manual') {
+    shutdownPromise ??= (async () => {
+      shuttingDown = true;
+      clearIdleTimers();
+      clearInterval(sessionSweep);
+      await removeConnectorState(canonicalBase);
+      const drainDeadline = Date.now() + shutdownDrainMs;
+      while (activeWork > 0 && Date.now() < drainDeadline) await delay(25);
+      await Promise.allSettled([...mcpSessions.values()].map((entry) => entry.processor.close()));
+      mcpSessions.clear();
+      if (httpServer) {
+        httpServer.closeIdleConnections?.();
+        await Promise.race([
+          new Promise((resolve) => httpServer.close(() => resolve())),
+          delay(1_500),
+        ]);
+        httpServer.closeAllConnections?.();
+      }
+      if (inFlight.size > 0) {
+        await Promise.race([Promise.allSettled([...inFlight]), delay(2_000)]);
+      }
+      await session?.close().catch((error) => log('error', 'Error al cerrar sesión central', { error: String(error) }));
+      await releaseLock().catch(() => {});
+      log('info', 'Motor Central detenido', { motivo: reason });
+      await onShutdown?.(reason);
+      return { stopped: true, reason };
+    })();
+    return shutdownPromise;
   }
 
   function trackInFlight(promise) {
@@ -262,7 +326,7 @@ export async function startCentralMotor({
 
   try {
     const smartQueue = createSmartQueue();
-    session = await openSession({ layout, motorVersion, log, observe, backgroundGate: smartQueue });
+    session = await sessionFactory({ layout, motorVersion, log, observe, backgroundGate: smartQueue });
     const baseId = baseIdOf(canonicalBase);
     const token = await readOrCreateSecret(canonicalBase);
     const startedAt = new Date().toISOString();
@@ -302,7 +366,33 @@ export async function startCentralMotor({
       );
     }
 
-    function createIsolatedMcpSession({ workspacePaths = [], cwd = process.cwd() } = {}) {
+    /**
+     * Mientras una herramienta espera al usuario (un formulario de confirmación puede
+     * tardar minutos), no retiene la exclusión de su carpeta: los demás chats siguen
+     * leyendo y escribiendo en ella, como cuando cada chat era un proceso aparte. La
+     * exclusión se recupera antes de que la herramienta continúe.
+     */
+    function releasingLocksWhileAsking(connection) {
+      return new Proxy(connection, {
+        get(target, property, receiver) {
+          if (property !== 'request') return Reflect.get(target, property, receiver);
+          return (method, params, options) => smartQueue.suspendWhile(() => target.request(method, params, options));
+        },
+      });
+    }
+
+    /** Ejecuta una herramienta de un ámbito por la cola. `estado` añade quién la atiende. */
+    async function runTool({ tools, workspace, fallbackDir }, name, args, context) {
+      const value = await executeToolWithQueue(name, args, async () => {
+        await workspace.beforeCall(name, args);
+        return tools.call(name, args, context);
+      }, { signal: context?.signal, fallbackDir });
+      if (name !== 'estado' || !value || typeof value !== 'object' || Array.isArray(value)) return value;
+      // Permite detectar un puente de una versión hablando con un Motor de otra.
+      return { ...value, motor_central: { version: motorVersion, pid: process.pid, estado: activityState, sesiones: mcpSessions.size } };
+    }
+
+    function createIsolatedMcpSession({ workspacePaths = [], cwd = null } = {}) {
       const id = randomUUID();
       const workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
       const sseStreams = new Set();
@@ -329,21 +419,14 @@ export async function startCentralMotor({
         serverInfo: serverInfo(motorVersion),
         instructions: AGENT_INSTRUCTIONS,
         tools(connection) {
-          const tools = createAgentTools({ session: workspace.session, connection, log });
-          const fallbackDir = workspacePaths[0] ?? cwd;
+          const scope = {
+            tools: createAgentTools({ session: workspace.session, connection: releasingLocksWhileAsking(connection), log }),
+            workspace,
+            fallbackDir: workspacePaths[0] ?? cwd,
+          };
           return {
-            definitions: tools.definitions,
-            call(name, args, context) {
-              return executeToolWithQueue(
-                name,
-                args,
-                async () => {
-                  await workspace.beforeCall(name, args);
-                  return tools.call(name, args, context);
-                },
-                { signal: context?.signal, fallbackDir },
-              );
-            },
+            definitions: scope.tools.definitions,
+            call: (name, args, context) => runTool(scope, name, args, context),
           };
         },
         onInitialized: async (connection) => {
@@ -368,6 +451,8 @@ export async function startCentralMotor({
         processor,
         workspace,
         sseStreams,
+        activeRequests: 0,
+        lastSeenAt: Date.now(),
         flushPendingSse(stream) {
           while (pendingSse.length > 0 && !stream.writableEnded) {
             emitSse(stream, pendingSse.shift());
@@ -390,6 +475,8 @@ export async function startCentralMotor({
       if (!Array.isArray(body) && body?.method === 'server/discover') {
         return sendJson(res, 404, { error: 'DISCOVERY_NOT_SUPPORTED' });
       }
+      // El apagado pudo empezar mientras llegaba el cuerpo: no se admite trabajo nuevo.
+      if (shuttingDown) return sendJson(res, 503, { error: 'MOTOR_SHUTTING_DOWN' }, { Connection: 'close' });
 
       const sessionHeader = typeof req.headers['mcp-session-id'] === 'string' ? req.headers['mcp-session-id'] : '';
       let mcpSession;
@@ -400,11 +487,8 @@ export async function startCentralMotor({
           return sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32001, message: 'Sesión MCP no encontrada.' } });
         }
       } else if (!Array.isArray(body) && body?.method === 'initialize') {
-        const workspacePaths = parseHeaderPaths(req.headers['x-mind-workspace-paths']);
-        const headerCwd = typeof req.headers['x-mind-cwd'] === 'string' && req.headers['x-mind-cwd'].trim()
-          ? req.headers['x-mind-cwd']
-          : process.cwd();
-        mcpSession = createIsolatedMcpSession({ workspacePaths, cwd: headerCwd });
+        const declared = parseWorkspaceHeader(req.headers['x-mind-workspace']);
+        mcpSession = createIsolatedMcpSession({ workspacePaths: declared.paths, cwd: declared.cwd });
       } else {
         return sendJson(res, 400, formatError(body?.id ?? null, rpcError(INVALID_REQUEST, 'Falta cabecera Mcp-Session-Id.')));
       }
@@ -433,6 +517,13 @@ export async function startCentralMotor({
       };
 
       const messages = Array.isArray(body) ? body : [body];
+      // Si el cliente corta antes de recibir la respuesta, sus llamadas en curso se cancelan.
+      res.on('close', () => {
+        if (res.writableFinished) return;
+        for (const message of messages) {
+          if (message && typeof message === 'object' && message.method === 'tools/call') mcpSession.processor.cancel(message.id);
+        }
+      });
       const runMessages = async () => {
         const replies = [];
         for (const message of messages) {
@@ -441,9 +532,16 @@ export async function startCentralMotor({
         }
         return replies;
       };
-      const replies = isKeepaliveMcpBody(body)
-        ? await runMessages()
-        : await trackWork(runMessages);
+      let replies;
+      mcpSession.activeRequests += 1;
+      try {
+        replies = isKeepaliveMcpBody(body)
+          ? await runMessages()
+          : await trackWork(runMessages);
+      } finally {
+        mcpSession.activeRequests -= 1;
+        mcpSession.lastSeenAt = Date.now();
+      }
 
       if (res.writableEnded || res.destroyed) return;
       if (replies.length === 0) {
@@ -486,12 +584,11 @@ export async function startCentralMotor({
       }, SSE_HEARTBEAT_MS);
       keepAlive.unref?.();
 
-      const cleanup = () => {
+      res.on('close', () => {
         clearInterval(keepAlive);
         mcpSession.sseStreams.delete(res);
-      };
-      req.on('close', cleanup);
-      res.on('close', cleanup);
+        mcpSession.lastSeenAt = Date.now();
+      });
     }
 
     async function handleMcpDelete(req, res) {
@@ -543,9 +640,24 @@ export async function startCentralMotor({
         return;
       }
 
+      if (!['inicio', 'estado', 'herramienta'].includes(body.accion)) {
+        return sendJson(res, 400, { ok: false, error: { codigo: 'UNKNOWN_RPC_ACTION', mensaje: `Acción no admitida: ${body.accion}` } });
+      }
+      // El apagado pudo empezar mientras llegaba el cuerpo: no se admite trabajo nuevo.
+      if (shuttingDown) return sendJson(res, 503, { error: 'MOTOR_SHUTTING_DOWN' }, { Connection: 'close' });
+
       const workspacePaths = parseRpcPaths(body.paths);
-      const cwd = typeof body.cwd === 'string' && body.cwd.trim() ? body.cwd : process.cwd();
+      const cwd = typeof body.cwd === 'string' && body.cwd.trim() ? body.cwd : null;
       const conn = nonElicitingConnection();
+      // Si quien llama se va antes de recibir la respuesta, la operación se cancela.
+      const controller = new AbortController();
+      res.on('close', () => {
+        if (!res.writableFinished) controller.abort();
+      });
+      const context = { signal: controller.signal, connection: conn };
+      const sendToolResult = (formatted) => sendJson(res, 200, {
+        ok: true, value: formatted.structuredContent, text: formatted.content[0].text, isError: formatted.isError === true,
+      });
 
       try {
         return await trackWork(async () => {
@@ -553,21 +665,14 @@ export async function startCentralMotor({
           await session.sync();
           const workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
           await workspace.initialize({ clientCapabilities: {} });
-          const tools = createAgentTools({ session: workspace.session, connection: conn, log });
-          const controller = new AbortController();
-          req.on('close', () => {
-            if (!res.writableEnded) controller.abort();
-          });
-
-          const fallbackDir = workspacePaths[0] ?? cwd;
+          const scope = {
+            tools: createAgentTools({ session: workspace.session, connection: conn, log }),
+            workspace,
+            fallbackDir: workspacePaths[0] ?? cwd,
+          };
 
           if (body.accion === 'inicio') {
-            const formatted = toolResult(await executeToolWithQueue(
-              'destinos_consultar',
-              {},
-              () => tools.call('destinos_consultar', {}, { signal: controller.signal, connection: conn }),
-              { signal: controller.signal, fallbackDir },
-            ));
+            const formatted = toolResult(await runTool(scope, 'destinos_consultar', {}, context));
             return sendJson(res, 200, {
               ok: true,
               mind: layout?.manifest?.mindVersion ?? motorVersion,
@@ -577,48 +682,20 @@ export async function startCentralMotor({
             });
           }
 
-          if (body.accion === 'estado') {
-            let formatted;
-            try {
-              formatted = toolResult(await executeToolWithQueue(
-                'estado',
-                {},
-                () => tools.call('estado', {}, { signal: controller.signal, connection: conn }),
-                { signal: controller.signal, fallbackDir },
-              ));
-            } catch (error) {
-              formatted = toolError(error);
-            }
-            return sendJson(res, 200, { ok: true, value: formatted.structuredContent, text: formatted.content[0].text, isError: formatted.isError === true });
+          const name = body.accion === 'estado' ? 'estado' : (typeof body.tool === 'string' ? body.tool : '');
+          const args = body.accion === 'estado' || body.args === undefined ? {} : body.args;
+          if (!name || !scope.tools.definitions.some((tool) => tool.name === name)) {
+            return sendJson(res, 400, { ok: false, error: { codigo: 'INVALID_ARGUMENTS', mensaje: `Herramienta desconocida: ${name}. Disponibles: ${scope.tools.definitions.map((tool) => tool.name).join(', ')}.` } });
           }
-
-          if (body.accion === 'herramienta') {
-            const name = typeof body.tool === 'string' ? body.tool : '';
-            const args = body.args === undefined ? {} : body.args;
-            if (!name || !tools.definitions.some((tool) => tool.name === name)) {
-              return sendJson(res, 400, { ok: false, error: { codigo: 'INVALID_ARGUMENTS', mensaje: `Herramienta desconocida: ${name}. Disponibles: ${tools.definitions.map((tool) => tool.name).join(', ')}.` } });
-            }
-            if (!args || typeof args !== 'object' || Array.isArray(args)) {
-              return sendJson(res, 400, { ok: false, error: { codigo: 'INVALID_ARGUMENTS', mensaje: 'Los argumentos deben ser un objeto JSON.' } });
-            }
-            let formatted;
-            try {
-              formatted = toolResult(await executeToolWithQueue(
-                name,
-                args,
-                async () => {
-                  await workspace.beforeCall(name, args);
-                  return tools.call(name, args, { signal: controller.signal, connection: conn });
-                },
-                { signal: controller.signal, fallbackDir },
-              ));
-            } catch (error) {
-              formatted = toolError(error);
-            }
-            return sendJson(res, 200, { ok: true, value: formatted.structuredContent, text: formatted.content[0].text, isError: formatted.isError === true });
+          if (!args || typeof args !== 'object' || Array.isArray(args)) {
+            return sendJson(res, 400, { ok: false, error: { codigo: 'INVALID_ARGUMENTS', mensaje: 'Los argumentos deben ser un objeto JSON.' } });
           }
-
-          return sendJson(res, 400, { ok: false, error: { codigo: 'UNKNOWN_RPC_ACTION', mensaje: `Acción no admitida: ${body.accion}` } });
+          try {
+            return sendToolResult(toolResult(await runTool(scope, name, args, context)));
+          } catch (error) {
+            if (!(error instanceof MotorError)) log('error', 'Fallo inesperado en una herramienta', { tool: name, error: String(error?.stack ?? error) });
+            return sendToolResult(toolError(error));
+          }
         });
       } catch (error) {
         const known = error instanceof MotorError;
@@ -650,10 +727,12 @@ export async function startCentralMotor({
           sendJson(res, 503, { ok: false, shuttingDown: true }, { Connection: 'close' });
           return;
         }
+        const nonce = url.searchParams.get('nonce');
         sendJson(res, 200, {
           ok: true,
           baseId,
           port: boundPort,
+          ...(nonce && HEALTH_NONCE_PATTERN.test(nonce) ? { proof: healthProof(token, nonce, baseId, boundPort) } : {}),
           pid: process.pid,
           motorVersion,
           startedAt,
@@ -661,6 +740,7 @@ export async function startCentralMotor({
           activeRequests: activeWork,
           lastActivityAt,
           sessions: mcpSessions.size,
+          backgroundBusy: session.isBackgroundBusy?.() === true,
           queue: smartQueue.status(),
         });
         return;
@@ -730,32 +810,20 @@ export async function startCentralMotor({
 
     scheduleIdleTimers();
 
-    shutdown = async function shutdown(reason = 'manual') {
-      if (shutdownPromise) return shutdownPromise;
-      shutdownPromise = (async () => {
-        shuttingDown = true;
-        clearIdleTimers();
-        await removeConnectorState(canonicalBase);
-        await Promise.allSettled([...mcpSessions.values()].map((entry) => entry.processor.close()));
-        mcpSessions.clear();
-        if (httpServer) {
-          httpServer.closeIdleConnections?.();
-          await Promise.race([
-            new Promise((resolve) => httpServer.close(() => resolve())),
-            delay(1_500),
-          ]);
-          httpServer.closeAllConnections?.();
+    // Sesiones abandonadas: su puente murió sin enviar DELETE.
+    if (Number.isFinite(sessionIdleMs) && sessionIdleMs > 0) {
+      sessionSweep = setInterval(() => {
+        const limit = Date.now() - sessionIdleMs;
+        for (const [id, entry] of mcpSessions) {
+          if (entry.activeRequests > 0 || entry.sseStreams.size > 0 || entry.lastSeenAt > limit) continue;
+          mcpSessions.delete(id);
+          entry.processor.close().catch(() => {});
         }
-        if (inFlight.size > 0) {
-          await Promise.race([Promise.allSettled([...inFlight]), delay(2_000)]);
-        }
-        await session?.close().catch((error) => log('error', 'Error al cerrar sesión central', { error: String(error) }));
-        await releaseLock().catch(() => {});
-        await onShutdown?.(reason);
-        return { stopped: true, reason };
-      })();
-      return shutdownPromise;
-    };
+      }, Math.min(sessionIdleMs, 60_000));
+      sessionSweep.unref?.();
+    }
+
+    log('info', 'Motor Central iniciado', { pid: process.pid, puerto: boundPort, version: motorVersion });
 
     return Object.freeze({
       alreadyRunning: false,
@@ -772,15 +840,10 @@ export async function startCentralMotor({
       stop: shutdown,
     });
   } catch (error) {
-    const { errorFile: targetErrorFile } = connectorPaths(canonicalBase);
-    if (error instanceof MotorError) {
-      await writeJsonAtomic(targetErrorFile, {
-        code: error.code,
-        message: error.message,
-        ...(error.details ? { details: error.details } : {}),
-        at: new Date().toISOString(),
-      }).catch(() => {});
-    }
+    log('error', 'El Motor Central no pudo iniciar', { codigo: error?.code ?? null, error: String(error?.stack ?? error) });
+    await writeStartupError(errorFile, error);
+    clearIdleTimers();
+    clearInterval(sessionSweep);
     if (httpServer) {
       try { httpServer.closeAllConnections?.(); httpServer.close(); } catch {}
     }
@@ -812,8 +875,10 @@ export async function runCentralMotorDaemon(options = {}) {
         shuttingDown = true;
         started.stop(signal).catch(reject);
       };
-      process.once('SIGINT', () => onSignal('SIGINT'));
-      process.once('SIGTERM', () => onSignal('SIGTERM'));
+      // SIGHUP: en POSIX llega al cerrarse la terminal de quien lanzó el Motor.
+      for (const signal of process.platform === 'win32' ? ['SIGINT', 'SIGBREAK'] : ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+        process.once(signal, () => onSignal(signal));
+      }
     }, reject);
   });
 

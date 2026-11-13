@@ -10,7 +10,20 @@ export function samePath(first, second) {
   return path.relative(first, second) === '';
 }
 
-const FOLD_CASE = process.platform === 'win32' || process.platform === 'darwin';
+/**
+ * Carpeta de trabajo del proceso, o null si ya no existe. En macOS y Linux la
+ * carpeta desde la que se inició un programa puede borrarse mientras sigue en
+ * marcha, y `process.cwd()` lanza entonces un error.
+ */
+export function currentDirectory() {
+  try {
+    return process.cwd();
+  } catch {
+    return null;
+  }
+}
+
+export const FOLD_CASE = process.platform === 'win32' || process.platform === 'darwin';
 
 /**
  * Papelera de Mind en la raíz de cada carpeta autorizada (docs/FUNCION_03_ORGANIZAR.md).

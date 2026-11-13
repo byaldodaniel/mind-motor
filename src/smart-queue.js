@@ -1,5 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 
 export const QUEUE_PRIORITY = Object.freeze({
   READ: 1,
@@ -7,10 +7,15 @@ export const QUEUE_PRIORITY = Object.freeze({
   BACKGROUND: 3,
 });
 
+// `leer` es lectura pura: abre el archivo por un solo handle sin impedir
+// escrituras ajenas, y `crear`/`modificar` publican con un renombrado atómico
+// (temporal + rename). Un lector ve el contenido anterior o el nuevo, nunca uno
+// a medias; la versión que devuelve protege la escritura posterior.
 const READ_TOOLS = new Set([
   'estado',
   'buscar',
   'explorar',
+  'leer',
   'eliminados',
   'continuidad_consultar',
   'conversaciones_buscar',
@@ -41,7 +46,6 @@ const FUNCTION_WRITE_TOOLS = new Set([
 ]);
 
 const FOLDER_WRITE_TOOLS = new Set([
-  'leer',
   'crear',
   'modificar',
   'editar',
@@ -53,14 +57,25 @@ const FOLDER_WRITE_TOOLS = new Set([
   'asignar_propiedades',
 ]);
 
-function normalizePathKey(prefix, raw) {
-  if (typeof raw !== 'string' || !raw.trim()) return `${prefix}:default`;
-  const trimmed = raw.trim();
-  const normalized = process.platform === 'win32'
-    ? path.normalize(trimmed).toLowerCase()
-    : path.normalize(trimmed);
-  return `${prefix}:${normalized}`;
+/**
+ * Normaliza una ruta para usarla como clave, igual en todos los sistemas.
+ * Se compara sin distinguir mayúsculas y en forma NFC porque Windows y macOS
+ * suelen no distinguirlas (y macOS entrega nombres en NFD). En un volumen que
+ * sí las distingue, dos rutas distintas pueden compartir clave: solo se
+ * serializan de más, nunca se pierde exclusión.
+ */
+function pathKeyText(raw) {
+  let value = path.normalize(raw.trim()).normalize('NFC').toLowerCase();
+  while (value.length > 1 && /[\\/]$/.test(value) && !/^[a-z]:[\\/]$/.test(value)) value = value.slice(0, -1);
+  return value;
 }
+
+function pathKey(prefix, raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return `${prefix}:default`;
+  return `${prefix}:${pathKeyText(raw)}`;
+}
+
+const hasText = (value) => typeof value === 'string' && value.trim() !== '';
 
 export function classifyToolPriority(name, args = {}) {
   if (READ_TOOLS.has(name)) return QUEUE_PRIORITY.READ;
@@ -72,80 +87,52 @@ export async function resolveToolResourceKeys(name, args = {}, resolveFolderKey)
   const folderKey = async (ref) => {
     if (typeof resolveFolderKey === 'function') {
       const resolved = await resolveFolderKey(ref);
-      if (resolved) return `folder:${resolved}`;
+      if (hasText(resolved)) return `folder:${pathKeyText(resolved)}`;
     }
-    return normalizePathKey('folder', ref);
+    return pathKey('folder', ref);
+  };
+  // Destino de una creación: destino explícito, conversación o proyecto.
+  const destinationKeys = async (fallback) => {
+    if (hasText(args?.destino)) return [await folderKey(args.destino)];
+    if (hasText(args?.conversacion)) return [`dest-conv:${args.conversacion.trim()}`];
+    if (hasText(args?.proyecto)) return [`dest-proj:${args.proyecto.trim()}`];
+    return fallback();
   };
 
-  if (name === 'mover') {
+  if (name === 'mover' || name === 'crear_indice') {
+    const second = name === 'mover' ? args?.carpeta_destino : args?.carpeta_csv;
     const keys = [await folderKey(args?.carpeta)];
-    if (typeof args?.carpeta_destino === 'string' && args.carpeta_destino.trim()) {
-      keys.push(await folderKey(args.carpeta_destino));
-    }
-    return keys;
-  }
-
-  if (name === 'crear_indice') {
-    const keys = [await folderKey(args?.carpeta)];
-    if (typeof args?.carpeta_csv === 'string' && args.carpeta_csv.trim()) {
-      keys.push(await folderKey(args.carpeta_csv));
-    }
+    if (hasText(second)) keys.push(await folderKey(second));
     return keys;
   }
 
   if (name === 'actualizar_indice' || name === 'modificar_indice' || name === 'retirar_indice') {
-    return [`custom-index:${typeof args?.id === 'string' && args.id ? args.id : 'default'}`];
+    return [`custom-index:${hasText(args?.id) ? args.id : 'default'}`];
   }
 
   if (FOLDER_WRITE_TOOLS.has(name)) {
-    if (typeof args?.carpeta === 'string' && args.carpeta.trim()) {
-      return [await folderKey(args.carpeta)];
-    }
-    if (typeof args?.destino === 'string' && args.destino.trim()) {
-      return [await folderKey(args.destino)];
-    }
-    if (typeof args?.conversacion === 'string' && args.conversacion.trim()) {
-      return [`dest-conv:${args.conversacion.trim()}`];
-    }
-    if (typeof args?.proyecto === 'string' && args.proyecto.trim()) {
-      return [`dest-proj:${args.proyecto.trim()}`];
-    }
-    return [await folderKey(undefined)];
+    if (hasText(args?.carpeta)) return [await folderKey(args.carpeta)];
+    return destinationKeys(async () => [await folderKey(undefined)]);
   }
 
   if (name === 'solicitar_acceso') {
-    if (typeof args?.ruta === 'string' && args.ruta.trim()) {
-      return [normalizePathKey('access-path', args.ruta)];
-    }
-    return ['continuity'];
+    return hasText(args?.ruta) ? [pathKey('access-path', args.ruta)] : ['continuity'];
   }
 
   if (name === 'retirar_acceso') {
-    if (typeof args?.carpeta === 'string' && args.carpeta.trim()) {
-      return [await folderKey(args.carpeta)];
-    }
-    return ['continuity'];
+    return hasText(args?.carpeta) ? [await folderKey(args.carpeta)] : ['continuity'];
   }
 
   if (name === 'destino_resolver' || name === 'resultado_importar' || name === 'resultado_registrar') {
-    if (typeof args?.destino === 'string' && args.destino.trim()) {
-      return [await folderKey(args.destino)];
-    }
-    if (typeof args?.conversacion === 'string' && args.conversacion.trim()) {
-      return [`dest-conv:${args.conversacion.trim()}`];
-    }
-    if (typeof args?.proyecto === 'string' && args.proyecto.trim()) {
-      return [`dest-proj:${args.proyecto.trim()}`];
-    }
-    return ['destinations:default'];
+    return destinationKeys(async () => ['destinations:default']);
   }
 
   if (name === 'conversacion_guardar' || name === 'conversacion_trasladar') {
-    return [`conversation:${typeof args?.id === 'string' && args.id ? args.id : 'new'}`];
+    return [`conversation:${hasText(args?.id) ? args.id : 'new'}`];
   }
 
   if (name === 'conversacion_configurar') {
-    return [`conversation-config:${typeof args?.id === 'string' && args.id ? args.id : 'global'}`];
+    return [`conversation-config:${hasText(args?.id) ? args.id : 'global'}`];
   }
 
   if (name === 'conversaciones_preparar') return ['conversation-search-prep'];
@@ -154,129 +141,165 @@ export async function resolveToolResourceKeys(name, args = {}, resolveFolderKey)
   if (name === 'crear_respaldo') return ['backup'];
 
   if (FUNCTION_WRITE_TOOLS.has(name)) {
-    return [`function:${typeof args?.id === 'string' && args.id ? args.id : 'global'}`];
+    return [`function:${hasText(args?.id) ? args.id : 'global'}`];
   }
 
   return [`tool:${name}`];
 }
 
-function throwIfAborted(signal) {
-  if (!signal?.aborted) return;
-  throw signal.reason instanceof Error
+function abortError(signal) {
+  return signal?.reason instanceof Error
     ? signal.reason
     : Object.assign(new Error('Operación cancelada.'), { name: 'AbortError' });
 }
 
-function awaitWithSignal(promise, signal) {
-  if (!signal) return promise;
-  throwIfAborted(signal);
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(
-      signal.reason instanceof Error
-        ? signal.reason
-        : Object.assign(new Error('Operación cancelada.'), { name: 'AbortError' }),
-    );
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener('abort', onAbort);
-        reject(error);
-      },
-    );
-  });
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError(signal);
 }
 
 /**
- * Cola inteligente en memoria de 3 prioridades:
- * - P1 (lectura): ejecución inmediata sin bloqueo mutuo.
- * - P2 (escritura / E/S Python): serializada solo por clave de recurso.
- * - P3 (fondo): cede cooperativamente mientras haya P1 o P2 activos o en espera.
+ * Cola en memoria de 3 prioridades:
+ * - P1 (lectura): ejecución inmediata, sin exclusión.
+ * - P2 (escritura): exclusiva por clave de recurso, en orden de llegada.
+ * - P3 (fondo): cede mientras haya lecturas o escrituras activas o en espera.
+ *
+ * Una escritura puede soltar su exclusión mientras espera al usuario
+ * (`suspendWhile`); al terminar la espera vuelve a la cola de sus mismas claves.
  */
 export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
-  const resourceTails = new Map();
+  // Por clave, las reservas en orden de llegada; la cabeza es la que la tiene.
+  const locks = new Map();
   const idleWaiters = new Set();
+  const writeContext = new AsyncLocalStorage();
+  // Cada escritura está en un solo estado: queued, held, suspended o done.
+  const counts = { queued: 0, held: 0, suspended: 0 };
+  // Trabajos de fondo que una llamada en primer plano está esperando (clave → cuántas).
+  const expedited = new Map();
   let activeReads = 0;
-  let activeWrites = 0;
-  let queuedWrites = 0;
   let completedReads = 0;
   let completedWrites = 0;
 
   function hasForegroundDemand() {
-    return activeReads > 0 || activeWrites > 0 || queuedWrites > 0;
+    return activeReads > 0 || counts.held > 0 || counts.queued > 0;
   }
 
   function notifyIdleWaiters() {
     if (hasForegroundDemand()) return;
-    for (const resolve of [...idleWaiters]) {
-      idleWaiters.delete(resolve);
-      resolve();
-    }
+    for (const done of [...idleWaiters]) done();
   }
 
-  async function waitForForegroundIdle({ signal, maxWaitMs = 2_000 } = {}) {
+  function setState(ctx, next) {
+    if (ctx.state === next || ctx.state === 'done') return;
+    if (ctx.state in counts) counts[ctx.state] -= 1;
+    if (next in counts) counts[next] += 1;
+    ctx.state = next;
+    notifyIdleWaiters();
+  }
+
+  const isHead = (reservation) => reservation.keys.every((key) => locks.get(key)[0] === reservation);
+
+  /**
+   * Reserva todas las claves en un mismo paso síncrono. Como cada reserva entra
+   * a la vez en todas sus colas, dos reservas guardan el mismo orden en cada
+   * clave que comparten y no puede haber interbloqueo entre escrituras
+   * multiclave. release() es idempotente y sirve también para abandonar una
+   * reserva que aún espera.
+   */
+  function reserve(keys) {
+    let settle;
+    const reservation = {
+      keys,
+      status: 'waiting',
+      granted: new Promise((resolve) => { settle = resolve; }),
+      grant() {
+        reservation.status = 'granted';
+        settle(true);
+      },
+      release() {
+        if (reservation.status === 'released') return;
+        if (reservation.status === 'waiting') settle(false);
+        reservation.status = 'released';
+        for (const key of keys) {
+          const queue = locks.get(key);
+          queue.splice(queue.indexOf(reservation), 1);
+          if (queue.length === 0) locks.delete(key);
+        }
+        for (const key of keys) {
+          const head = locks.get(key)?.[0];
+          if (head?.status === 'waiting' && isHead(head)) head.grant();
+        }
+      },
+    };
+    for (const key of keys) {
+      if (!locks.has(key)) locks.set(key, []);
+      locks.get(key).push(reservation);
+    }
+    if (isHead(reservation)) reservation.grant();
+    return reservation;
+  }
+
+  /** Pone la escritura a la cola de sus claves; si se cancela, abandona la reserva. */
+  async function acquire(ctx, stateOnFailure) {
+    if (ctx.signal?.aborted) {
+      setState(ctx, stateOnFailure);
+      throw abortError(ctx.signal);
+    }
+    const reservation = reserve(ctx.keys);
+    ctx.reservation = reservation;
+    setState(ctx, 'queued');
+    const onAbort = () => reservation.release();
+    ctx.signal?.addEventListener('abort', onAbort, { once: true });
+    let granted;
+    try {
+      granted = await reservation.granted;
+    } finally {
+      ctx.signal?.removeEventListener('abort', onAbort);
+    }
+    // La escritura terminó mientras esta reserva esperaba: ya no hay nada que tener.
+    if (ctx.state === 'done') return;
+    if (!granted) {
+      ctx.reservation = null;
+      setState(ctx, stateOnFailure);
+      throw abortError(ctx.signal);
+    }
+    setState(ctx, 'held');
+  }
+
+  function releaseReservation(ctx) {
+    ctx.reservation?.release();
+    ctx.reservation = null;
+  }
+
+  /** Recupera la exclusión tras una suspensión; las suspensiones hermanas comparten el intento. */
+  async function resume(ctx) {
+    if (ctx.state === 'suspended') {
+      ctx.resuming = acquire(ctx, 'suspended').finally(() => { ctx.resuming = null; });
+    }
+    if (ctx.resuming) await ctx.resuming;
+  }
+
+  /** El trabajo de fondo `key` debe ceder: hay demanda en primer plano y nadie lo está esperando. */
+  const mustYield = (key) => hasForegroundDemand() && !(key !== undefined && expedited.has(key));
+
+  async function waitForForegroundIdle({ signal, maxWaitMs = 2_000, key } = {}) {
     throwIfAborted(signal);
-    if (!hasForegroundDemand()) return;
+    if (!mustYield(key)) return;
     await new Promise((resolve, reject) => {
-      let settled = false;
-      let timer = null;
-      const done = () => {
-        if (settled) return;
-        settled = true;
+      const finish = (error) => {
         clearTimeout(timer);
         idleWaiters.delete(done);
         signal?.removeEventListener('abort', onAbort);
-        resolve();
+        if (error) reject(error);
+        else resolve();
       };
-      const onAbort = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        idleWaiters.delete(done);
-        reject(
-          signal.reason instanceof Error
-            ? signal.reason
-            : Object.assign(new Error('Operación cancelada.'), { name: 'AbortError' }),
-        );
-      };
+      const done = () => finish();
+      done.key = key;
+      const onAbort = () => finish(abortError(signal));
+      const timer = setTimeout(done, maxWaitMs);
+      timer.unref?.();
       idleWaiters.add(done);
       signal?.addEventListener('abort', onAbort, { once: true });
-      timer = setTimeout(done, maxWaitMs);
-      timer.unref?.();
     });
-  }
-
-  async function withResourceLocks(keys, fn, signal) {
-    const ordered = [...new Set(keys)].sort();
-    const releases = [];
-    const predecessors = [];
-
-    // Reserva todas las posiciones en orden determinista antes de esperar,
-    // evitando bloqueos mutuos entre escrituras multirrecurso (mover, crear_indice).
-    for (const key of ordered) {
-      const prev = resourceTails.get(key) ?? Promise.resolve();
-      let release;
-      const next = new Promise((resolve) => { release = resolve; });
-      const chained = prev.catch(() => {}).then(() => next);
-      resourceTails.set(key, chained);
-      predecessors.push(prev.catch(() => {}));
-      releases.push({ key, chained, release });
-    }
-
-    try {
-      await awaitWithSignal(Promise.all(predecessors), signal);
-      throwIfAborted(signal);
-      return await fn();
-    } finally {
-      for (let i = releases.length - 1; i >= 0; i -= 1) {
-        const { key, chained, release } = releases[i];
-        release();
-        if (resourceTails.get(key) === chained) resourceTails.delete(key);
-      }
-    }
   }
 
   return Object.freeze({
@@ -286,7 +309,7 @@ export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
       try {
         return await fn();
       } finally {
-        activeReads = Math.max(0, activeReads - 1);
+        activeReads -= 1;
         completedReads += 1;
         notifyIdleWaiters();
       }
@@ -294,23 +317,50 @@ export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
 
     async runWrite(keysOrResolver, fn, { signal } = {}) {
       throwIfAborted(signal);
-      queuedWrites += 1;
-      let acquired = false;
+      const ctx = { keys: null, signal, state: 'new', reservation: null, resuming: null };
+      // Mientras se resuelven las claves ya cuenta como escritura en espera.
+      setState(ctx, 'queued');
       try {
         const rawKeys = typeof keysOrResolver === 'function' ? await keysOrResolver() : keysOrResolver;
-        const keys = Array.isArray(rawKeys) && rawKeys.length > 0 ? rawKeys : ['general'];
-        return await withResourceLocks(keys, async () => {
-          queuedWrites = Math.max(0, queuedWrites - 1);
-          acquired = true;
-          activeWrites += 1;
-          return await fn();
-        }, signal);
+        const keys = Array.isArray(rawKeys) ? rawKeys.filter((key) => typeof key === 'string' && key) : [];
+        ctx.keys = keys.length > 0 ? [...new Set(keys)] : ['general'];
+        await acquire(ctx, 'queued');
+        return await writeContext.run({ ctx, suspended: false }, fn);
       } finally {
-        if (!acquired) queuedWrites = Math.max(0, queuedWrites - 1);
-        else activeWrites = Math.max(0, activeWrites - 1);
+        releaseReservation(ctx);
+        setState(ctx, 'done');
         completedWrites += 1;
-        notifyIdleWaiters();
       }
+    },
+
+    /**
+     * Ejecuta fn sin retener la exclusión de la escritura en curso (p. ej.,
+     * mientras se espera una confirmación del usuario) y la recupera, a la cola
+     * de las mismas claves, antes de devolver su resultado o propagar su error.
+     * Fuera de una escritura, o dentro de otra suspensión, solo ejecuta fn.
+     * Si la escritura se cancela mientras vuelve a la cola, propaga la
+     * cancelación sin retener nada. Lo observado antes de suspender puede haber
+     * cambiado al volver.
+     */
+    async suspendWhile(fn) {
+      const store = writeContext.getStore();
+      const ctx = store?.ctx;
+      if (!ctx || store.suspended || ctx.state === 'done') return await fn();
+      if (ctx.state === 'held') {
+        releaseReservation(ctx);
+        setState(ctx, 'suspended');
+      }
+      let outcome;
+      try {
+        outcome = { value: await writeContext.run({ ctx, suspended: true }, fn) };
+      } catch (error) {
+        outcome = { error };
+      }
+      // Cada suspensión que termina recupera la exclusión: el código que sigue
+      // siempre corre con ella, aunque una suspensión hermana siga esperando.
+      await resume(ctx);
+      if ('error' in outcome) throw outcome.error;
+      return outcome.value;
     },
 
     async runBackground(fn, { signal, maxWaitMs = 2_000 } = {}) {
@@ -319,13 +369,29 @@ export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
       return await fn();
     },
 
-    async yieldIfNeeded({ signal, maxWaitMs = backgroundYieldMs } = {}) {
-      if (!hasForegroundDemand()) return false;
-      await Promise.race([
-        waitForForegroundIdle({ signal, maxWaitMs }),
-        delay(maxWaitMs, undefined, { signal, ref: false }),
-      ]);
+    async yieldIfNeeded({ signal, maxWaitMs = backgroundYieldMs, key } = {}) {
+      if (!mustYield(key)) return false;
+      await waitForForegroundIdle({ signal, maxWaitMs, key });
       return true;
+    },
+
+    /**
+     * Una llamada en primer plano espera el resultado del trabajo de fondo `key`
+     * (p. ej., una búsqueda que necesita el recorrido inicial de su carpeta): ese
+     * trabajo deja de ceder, porque cedería justamente ante quien lo espera.
+     * Devuelve la función que retira la prisa; es idempotente.
+     */
+    expedite(key) {
+      expedited.set(key, (expedited.get(key) ?? 0) + 1);
+      for (const done of [...idleWaiters]) if (done.key === key) done();
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const remaining = expedited.get(key) - 1;
+        if (remaining > 0) expedited.set(key, remaining);
+        else expedited.delete(key);
+      };
     },
 
     hasForegroundDemand,
@@ -334,9 +400,10 @@ export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
     status() {
       return {
         activeReads,
-        activeWrites,
-        queuedWrites,
-        activeLocks: resourceTails.size,
+        activeWrites: counts.held,
+        queuedWrites: counts.queued,
+        suspendedWrites: counts.suspended,
+        activeLocks: locks.size,
         completedReads,
         completedWrites,
         foregroundBusy: hasForegroundDemand(),

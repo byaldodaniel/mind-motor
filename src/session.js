@@ -120,7 +120,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
   function track(folderId) {
     let state = folders.get(folderId);
     if (!state) {
-      state = { ready: null, lastReport: null, lastError: null, lastChanges: null, entries: null,
+      state = { ready: null, lastReport: null, lastError: null, lastChanges: null,
         halted: null, configuration: null, chain: Promise.resolve() };
       folders.set(folderId, state);
     }
@@ -287,6 +287,20 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     ownsBackground: () => observer !== null && !closed,
     backgroundStatus: () => observe ? lease.status() : { role: 'disabled', ownerPid: null },
 
+    /**
+     * Hay trabajo de fondo que no conviene interrumpir: el recorrido inicial de una
+     * carpeta, la sincronización del registro o la preparación semántica. Reposar o
+     * apagar ahora obligaría a empezarlo de nuevo. Los cambios que una carpeta ya
+     * observada va recibiendo no cuentan: una carpeta que cambia sin parar no debe
+     * mantener el Motor despierto.
+     */
+    isBackgroundBusy() {
+      if (closed) return false;
+      if (syncing || activeScans > 0 || waitingScans.length > 0) return true;
+      if (motor.isConversationSearchBusy?.()) return true;
+      return (observer?.list?.() ?? []).some((folder) => folder.mode === 'starting');
+    },
+
     /** Empieza la reconciliación inicial y la observación, sin bloquear al agente. */
     async start() {
       if (started || closed) return;
@@ -329,6 +343,8 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       }
       if (observer) {
         const ready = withRequestContext({}, () => begin(folderId));
+        // Esta llamada espera el recorrido de fondo de la carpeta: que no ceda ante ella.
+        const unhurry = backgroundGate?.expedite?.(folderId);
         let timer;
         const timeout = new Promise((resolve) => {
           timer = setTimeout(() => resolve('timeout'), timeoutMs);
@@ -336,7 +352,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
         });
         let result;
         try { result = await waitForRequest(Promise.race([ready, timeout]), signal); }
-        finally { clearTimeout(timer); }
+        finally { clearTimeout(timer); unhurry?.(); }
         if (result === 'timeout') return { status: 'reconciling' };
         if (folders.get(folderId)?.halted) {
           throw new MotorError(folders.get(folderId).halted, 'La indexación está detenida; cambia la configuración o solicita una reindexación explícita.');

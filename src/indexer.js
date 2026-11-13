@@ -240,12 +240,12 @@ export function createFolderIndexer({
       signal?.throwIfAborted();
       const requestedScope = await authorized(scopeId);
       if (priority === 'background') {
-        await backgroundGate?.waitForForegroundIdle?.({ signal });
+        await backgroundGate?.waitForForegroundIdle?.({ signal, key: scopeId });
       }
       return governor.run(() => exclusive(scopeId, async () => {
         signal?.throwIfAborted();
         if (priority === 'background') {
-          await backgroundGate?.yieldIfNeeded?.({ signal });
+          await backgroundGate?.yieldIfNeeded?.({ signal, key: scopeId });
         }
         let scope;
         const previous = await store.exclusive(scopeId, async () => {
@@ -265,7 +265,7 @@ export function createFolderIndexer({
         requireSameScanScope(scope, await authorized(scopeId));
         signal?.throwIfAborted();
         if (priority === 'background') {
-          await backgroundGate?.yieldIfNeeded?.({ signal });
+          await backgroundGate?.yieldIfNeeded?.({ signal, key: scopeId });
         }
         return store.exclusive(scopeId, async () => {
           requireSameScanScope(scope, await authorized(scopeId));

@@ -308,5 +308,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     prepareConversationSearch,
     relocateConversationPreferenceDirectories: preferences.relocate,
     unloadConversationSearch: () => semanticEncoder.unload?.(),
+    /** Hay una preparación o un calentamiento semántico en curso: descargar ahora lo abortaría. */
+    isConversationSearchBusy: () => Boolean(preparing || warming),
     async closeConversationSearch() { closing = true; await semanticEncoder.close(); await preparing; await warming; } });
 }

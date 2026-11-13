@@ -65,6 +65,11 @@ function rawHttp({ port, method = 'GET', pathName = '/health', headers = {}, bod
   });
 }
 
+/** Cabecera de ámbito tal como la envía el puente: base64url(UTF-8 JSON {cwd, paths}). */
+function workspaceHeader(cwd, paths = []) {
+  return { 'X-Mind-Workspace': Buffer.from(JSON.stringify({ cwd, paths }), 'utf8').toString('base64url') };
+}
+
 async function createTempBase(t, prefix = 'mind-central-') {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
   const base = path.join(root, 'Base');
@@ -162,7 +167,7 @@ test('seguridad HTTP, /health, server/discover y aislamiento por sesión en /mcp
       port: motor.port,
       method: 'POST',
       pathName: '/mcp',
-      headers: { ...authHeaders, 'X-Mind-Cwd': cwd },
+      headers: { ...authHeaders, ...workspaceHeader(cwd) },
       body: {
         jsonrpc: '2.0',
         id: 1,
@@ -686,8 +691,7 @@ test('Etapa 3: actualización drena Motor Central inactivo y bloquea solo si est
       pathName: '/mcp',
       headers: {
         ...auth,
-        'x-mind-cwd': requestedFolder,
-        'x-mind-workspace-paths': JSON.stringify([requestedFolder]),
+        ...workspaceHeader(requestedFolder, [requestedFolder]),
       },
       body: {
         jsonrpc: '2.0',
@@ -844,7 +848,7 @@ test('Etapa 4: cola inteligente — unidad de prioridades, claves por recurso y 
   assert.deepEqual(cross, ['xy', 'yx']);
 });
 
-test('Etapa 4: P1 buscar <50 ms bajo carga, P2 paralela entre carpetas y serializada en la misma', { timeout: 30_000 }, async (t) => {
+test('Etapa 4: una confirmación pendiente no bloquea la carpeta a los demás chats', { timeout: 30_000 }, async (t) => {
   const { root, base } = await createTempBase(t, 'mind-queue-live-');
   const projA = path.join(root, 'ProyectoA');
   const projB = path.join(root, 'ProyectoB');
@@ -869,8 +873,7 @@ test('Etapa 4: P1 buscar <50 ms bajo carga, P2 paralela entre carpetas y seriali
       pathName: '/mcp',
       headers: {
         ...auth,
-        'x-mind-cwd': projA,
-        'x-mind-workspace-paths': JSON.stringify([projA, projB]),
+        ...workspaceHeader(projA, [projA, projB]),
       },
       body: {
         jsonrpc: '2.0',
@@ -890,7 +893,6 @@ test('Etapa 4: P1 buscar <50 ms bajo carga, P2 paralela entre carpetas y seriali
     });
     sse = await openSseStream({ port: motor.port, token: motor.token, sessionId: sid });
 
-    // Precalienta índice en memoria para medir lecturas P1 en caliente.
     const warmSearch = await rawHttp({
       port: motor.port,
       method: 'POST',
@@ -901,7 +903,7 @@ test('Etapa 4: P1 buscar <50 ms bajo carga, P2 paralela entre carpetas y seriali
     assert.equal(warmSearch.status, 200);
     assert.notEqual(warmSearch.json.result.isError, true);
 
-    // Retiene P2 sobre ProyectoA (borrar esperando elicitación SSE).
+    // Un chat pide borrar en ProyectoA: la herramienta queda esperando la confirmación del usuario.
     heldWriteA = rawHttp({
       port: motor.port,
       method: 'POST',
@@ -916,72 +918,257 @@ test('Etapa 4: P1 buscar <50 ms bajo carga, P2 paralela entre carpetas y seriali
       }),
     ]);
 
-    // Encolamos otra escritura P2 sobre el MISMO ProyectoA: debe esperar mientras A siga retenido.
-    let sameFolderFinished = false;
-    const queuedWriteA = rawHttp({
+    // La confirmación está pendiente: `borrar` no retiene la carpeta ni cuenta como escritura activa.
+    assert.deepEqual(
+      (({ activeWrites, queuedWrites, suspendedWrites, activeLocks }) => ({ activeWrites, queuedWrites, suspendedWrites, activeLocks }))(motor.queueStatus()),
+      { activeWrites: 0, queuedWrites: 0, suspendedWrites: 1, activeLocks: 0 },
+    );
+
+    // OTRO chat (otra sesión MCP) trabaja en la MISMA carpeta mientras el primero espera al usuario.
+    const otherInit = await rawHttp({
       port: motor.port,
       method: 'POST',
       pathName: '/mcp',
-      headers: { ...auth, 'Mcp-Session-Id': sid },
-      body: { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'crear', arguments: { carpeta: projA, ruta: 'encolado-a.txt', contenido: 'turno posterior en A\n' } } },
-    }).then((res) => {
-      sameFolderFinished = true;
-      return res;
+      headers: { ...auth, ...workspaceHeader(projA, [projA, projB]) },
+      body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {} } },
     });
-
-    await delay(25);
-    assert.equal(sameFolderFinished, false, 'La escritura en la misma carpeta A no debe adelantarse');
-    assert.ok(motor.queueStatus().activeWrites >= 1);
-    assert.ok(motor.queueStatus().queuedWrites >= 1);
-
-    // Mientras A está retenido + encolado, una escritura P2 en ProyectoB (otro recurso) avanza en paralelo.
-    const writeB = await rawHttp({
+    const otherSid = otherInit.headers['mcp-session-id'];
+    assert.notEqual(otherSid, sid);
+    await rawHttp({
       port: motor.port,
       method: 'POST',
       pathName: '/mcp',
-      headers: { ...auth, 'Mcp-Session-Id': sid },
-      body: { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'crear', arguments: { carpeta: projB, ruta: 'paralelo-b.txt', contenido: 'escrito en paralelo en B\n' } } },
+      headers: { ...auth, 'Mcp-Session-Id': otherSid },
+      body: { jsonrpc: '2.0', method: 'notifications/initialized' },
     });
-    assert.equal(writeB.status, 200);
-    assert.notEqual(writeB.json.result.isError, true);
-    assert.equal(sameFolderFinished, false, 'ProyectoB terminó sin que ProyectoA se liberara');
-
-    // Lecturas P1 concurrentes (buscar en caliente) completan por debajo de 50 ms mientras P2 sigue activo/encolado.
-    const readLatencies = [];
-    for (let i = 0; i < 4; i += 1) {
-      const start = performance.now();
+    const otherCall = async (id, name, args) => {
       const res = await rawHttp({
         port: motor.port,
         method: 'POST',
         pathName: '/mcp',
-        headers: { ...auth, 'Mcp-Session-Id': sid },
-        body: { jsonrpc: '2.0', id: 20 + i, method: 'tools/call', params: { name: 'buscar', arguments: { consulta: 'objetivo' } } },
+        headers: { ...auth, 'Mcp-Session-Id': otherSid },
+        body: { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } },
       });
-      readLatencies.push(performance.now() - start);
       assert.equal(res.status, 200);
-      assert.notEqual(res.json.result.isError, true);
-    }
-    const maxReadMs = Math.max(...readLatencies);
-    assert.ok(maxReadMs < 50, `Lectura P1 tardó ${maxReadMs.toFixed(1)}ms (>50ms) bajo carga P2`);
-    assert.equal(sameFolderFinished, false);
+      assert.notEqual(res.json.result.isError, true, res.text);
+      return res.json.result;
+    };
+    await otherCall(2, 'crear', { carpeta: projA, ruta: 'mientras-espera.txt', contenido: 'escrito con la confirmación pendiente\n' });
+    await otherCall(3, 'leer', { carpeta: projA, ruta: 'objetivo-a.txt' });
+    await otherCall(4, 'buscar', { consulta: 'objetivo' });
+    await otherCall(5, 'crear', { carpeta: projB, ruta: 'paralelo-b.txt', contenido: 'escrito en paralelo en B\n' });
+    assert.equal(await fs.readFile(path.join(projA, 'mientras-espera.txt'), 'utf8'), 'escrito con la confirmación pendiente\n');
+    assert.equal(await fs.readFile(path.join(projB, 'paralelo-b.txt'), 'utf8'), 'escrito en paralelo en B\n');
+    assert.equal(motor.queueStatus().suspendedWrites, 1, 'el borrado sigue esperando al usuario');
 
-    // Al responder cancel al borrar en A, primero termina borrar y enseguida avanza crear en A.
+    // El usuario confirma: el borrado recupera la exclusión y termina.
     await rawHttp({
       port: motor.port,
       method: 'POST',
       pathName: '/mcp',
       headers: { ...auth, 'Mcp-Session-Id': sid },
-      body: { jsonrpc: '2.0', id: elicitEvent.id, result: { action: 'cancel' } },
+      body: { jsonrpc: '2.0', id: elicitEvent.id, result: { action: 'accept', content: { confirmar: true } } },
     });
-    const [heldRes, queuedRes] = await Promise.all([heldWriteA, queuedWriteA]);
+    const heldRes = await heldWriteA;
     assert.equal(heldRes.status, 200);
-    assert.equal(queuedRes.status, 200);
-    assert.notEqual(queuedRes.json.result.isError, true);
-    assert.equal(await fs.readFile(path.join(projA, 'encolado-a.txt'), 'utf8'), 'turno posterior en A\n');
-    assert.equal(await fs.readFile(path.join(projB, 'paralelo-b.txt'), 'utf8'), 'escrito en paralelo en B\n');
+    assert.equal(heldRes.json.result.structuredContent.estado, 'en_papelera', heldRes.text);
+    await assert.rejects(fs.stat(path.join(projA, 'objetivo-a.txt')), { code: 'ENOENT' });
+    const settled = motor.queueStatus();
+    assert.equal(settled.suspendedWrites + settled.activeWrites + settled.queuedWrites + settled.activeLocks, 0);
   } finally {
     sse?.close();
     await motor.stop('test').catch(() => {});
     await heldWriteA?.catch(() => {});
+  }
+});
+
+// --- Ciclo de vida: cancelación, sesiones abandonadas, trabajo de fondo y ámbito ---
+
+async function until(condition, { timeoutMs = 5_000, stepMs = 20 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await condition()) return true;
+    if (Date.now() >= deadline) return false;
+    await delay(stepMs);
+  }
+}
+
+async function openMcpSession(motor, { cwd = null, paths = [], capabilities = {} } = {}) {
+  const auth = { Authorization: `Bearer ${motor.token}` };
+  const init = await rawHttp({
+    port: motor.port,
+    method: 'POST',
+    pathName: '/mcp',
+    headers: { ...auth, ...(cwd ? workspaceHeader(cwd, paths) : {}) },
+    body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities } },
+  });
+  assert.equal(init.status, 200);
+  const headers = { ...auth, 'Mcp-Session-Id': init.headers['mcp-session-id'] };
+  await rawHttp({ port: motor.port, method: 'POST', pathName: '/mcp', headers, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
+  return { id: headers['Mcp-Session-Id'], headers };
+}
+
+test('si el cliente corta la conexión, su llamada en curso se cancela', { timeout: 30_000 }, async (t) => {
+  const { root, base } = await createTempBase(t, 'mind-central-cancel-');
+  const project = path.join(root, 'Proyecto');
+  await fs.mkdir(project, { recursive: true });
+  await fs.writeFile(path.join(project, 'nota.txt'), 'contenido ficticio\n');
+  const motor = await startCentralMotor({ layout: await resolveLayout({ base }), preferredPort: 0, observe: false });
+  let sse = null;
+  try {
+    const session = await openMcpSession(motor, { cwd: project, paths: [project], capabilities: { elicitation: { form: {} } } });
+    sse = await openSseStream({ port: motor.port, token: motor.token, sessionId: session.id });
+    const payload = JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'borrar', arguments: { carpeta: project, ruta: 'nota.txt' } } });
+    const request = http.request({
+      agent: false, host: '127.0.0.1', port: motor.port, method: 'POST', path: '/mcp',
+      headers: { ...session.headers, Host: `127.0.0.1:${motor.port}`, 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(payload)) },
+    });
+    request.on('error', () => {});
+    request.end(payload);
+    await sse.waitForEvent((event) => event?.method === 'elicitation/create');
+    assert.equal(motor.queueStatus().suspendedWrites, 1);
+
+    // El chat se cierra sin responder al formulario: la espera no se queda diez minutos.
+    request.destroy();
+    assert.equal(await until(() => motor.queueStatus().suspendedWrites === 0), true, 'la llamada abandonada sigue en curso');
+    assert.equal(motor.queueStatus().activeLocks, 0);
+    assert.equal((await fs.readFile(path.join(project, 'nota.txt'), 'utf8')), 'contenido ficticio\n', 'sin confirmación no se borra nada');
+  } finally {
+    sse?.close();
+    await motor.stop('test').catch(() => {});
+  }
+});
+
+test('una sesión MCP abandonada caduca; una con su flujo abierto se conserva', { timeout: 30_000 }, async (t) => {
+  const { base } = await createTempBase(t, 'mind-central-sesiones-');
+  const motor = await startCentralMotor({ layout: await resolveLayout({ base }), preferredPort: 0, observe: false, sessionIdleMs: 150 });
+  let sse = null;
+  try {
+    const abandoned = await openMcpSession(motor);
+    const alive = await openMcpSession(motor);
+    sse = await openSseStream({ port: motor.port, token: motor.token, sessionId: alive.id });
+    assert.equal(motor.activeSessionCount(), 2);
+    assert.equal(await until(() => motor.activeSessionCount() === 1), true, 'la sesión abandonada no caducó');
+    await delay(400);
+    assert.equal(motor.activeSessionCount(), 1, 'la sesión con flujo abierto se conserva');
+
+    const ping = { jsonrpc: '2.0', id: 2, method: 'ping' };
+    assert.equal((await rawHttp({ port: motor.port, method: 'POST', pathName: '/mcp', headers: abandoned.headers, body: ping })).status, 404);
+    assert.equal((await rawHttp({ port: motor.port, method: 'POST', pathName: '/mcp', headers: alive.headers, body: ping })).status, 200);
+  } finally {
+    sse?.close();
+    await motor.stop('test').catch(() => {});
+  }
+});
+
+test('el trabajo de fondo aplaza el reposo y el autoapagado, con un tope', { timeout: 30_000 }, async (t) => {
+  const { openSession } = await import('../src/session.js');
+  const withBackground = (isBusy) => async (options) => ({ ...(await openSession(options)), isBackgroundBusy: isBusy });
+
+  // Mientras hay trabajo de fondo, ni reposa ni se apaga; al terminar, sigue su curso normal.
+  const first = await createTempBase(t, 'mind-central-fondo-');
+  let busy = true;
+  let stopped = null;
+  const motor = await startCentralMotor({
+    layout: await resolveLayout({ base: first.base }), preferredPort: 0, observe: false,
+    idleLightMs: 60, idleShutdownMs: 150, backgroundGraceMs: 60_000,
+    sessionFactory: withBackground(() => busy),
+    onShutdown: (reason) => { stopped = reason; },
+  });
+  try {
+    await delay(700);
+    assert.equal(stopped, null, 'se apagó con trabajo de fondo en curso');
+    assert.equal(motor.state(), 'active', 'entró en reposo con trabajo de fondo en curso');
+    assert.equal((await rawHttp({ port: motor.port, pathName: '/health' })).json.backgroundBusy, true);
+    busy = false;
+    assert.equal(await until(() => stopped === 'idle-timeout'), true, 'no se apagó al terminar el trabajo de fondo');
+  } finally {
+    await motor.stop('test').catch(() => {});
+  }
+
+  // Un trabajo de fondo atascado no mantiene el Motor despierto para siempre.
+  const second = await createTempBase(t, 'mind-central-fondo-tope-');
+  let capped = null;
+  const stuck = await startCentralMotor({
+    layout: await resolveLayout({ base: second.base }), preferredPort: 0, observe: false,
+    idleLightMs: 60, idleShutdownMs: 150, backgroundGraceMs: 300,
+    sessionFactory: withBackground(() => true),
+    onShutdown: (reason) => { capped = reason; },
+  });
+  try {
+    assert.equal(await until(() => capped === 'idle-timeout'), true, 'el tope de la prórroga no se aplicó');
+  } finally {
+    await stuck.stop('test').catch(() => {});
+  }
+});
+
+test('sin ámbito declarado no se hereda la carpeta del Motor, y estado dice quién atiende', { timeout: 30_000 }, async (t) => {
+  const { base } = await createTempBase(t, 'mind-central-ambito-');
+  const motor = await startCentralMotor({ layout: await resolveLayout({ base }), preferredPort: 0, observe: false });
+  try {
+    // Un cliente HTTP sin cabecera de ámbito y sin `roots` no declara ninguna carpeta.
+    const session = await openMcpSession(motor);
+    const estado = await rawHttp({
+      port: motor.port, method: 'POST', pathName: '/mcp', headers: session.headers,
+      body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'estado', arguments: {} } },
+    });
+    assert.notEqual(estado.json.result.isError, true, estado.text);
+    assert.deepEqual(Object.keys(estado.json.result.structuredContent.motor_central).sort(), ['estado', 'pid', 'sesiones', 'version']);
+    assert.equal(estado.json.result.structuredContent.motor_central.pid, process.pid);
+
+    const forbidden = new Set(await Promise.all([process.cwd(), os.tmpdir()].map((dir) => fs.realpath(dir))));
+    const authorized = await motor.session.motor.listAuthorizedFolders();
+    assert.deepEqual(authorized.filter((folder) => forbidden.has(folder.path)), [], 'se autorizó la carpeta de trabajo o temporal del Motor');
+  } finally {
+    await motor.stop('test').catch(() => {});
+  }
+});
+
+test('borrar revalida el permiso organizar tras suspenderse en la confirmación', { timeout: 30_000 }, async (t) => {
+  const { root, base } = await createTempBase(t, 'mind-revalida-borrar-');
+  const project = path.join(root, 'Proyecto');
+  await fs.mkdir(project, { recursive: true });
+  await fs.writeFile(path.join(project, 'protegido.txt'), 'no borrar sin permiso\n');
+  const motor = await startCentralMotor({ layout: await resolveLayout({ base }), preferredPort: 0, observe: false });
+  let sse = null;
+  let heldDelete = null;
+  try {
+    const folder = await motor.session.motor.authorizeFolder(project);
+    await motor.session.policy.set(folder.id, { encontrar: true, leer: true, escribir: true, organizar: true }, { channel: 'consola' });
+    await motor.session.sync();
+
+    const chat1 = await openMcpSession(motor, { capabilities: { elicitation: { form: {} } } });
+    const chat2 = await openMcpSession(motor);
+    sse = await openSseStream({ port: motor.port, token: motor.token, sessionId: chat1.id });
+
+    heldDelete = rawHttp({
+      port: motor.port, method: 'POST', pathName: '/mcp', headers: chat1.headers,
+      body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'borrar', arguments: { carpeta: folder.id, ruta: 'protegido.txt' } } },
+    });
+    const elicit = await Promise.race([
+      sse.waitForEvent((ev) => ev?.method === 'elicitation/create'),
+      heldDelete.then((res) => { throw new Error(`borrar terminó antes de preguntar: ${res.text}`); }),
+    ]);
+
+    const revoke = await rawHttp({
+      port: motor.port, method: 'POST', pathName: '/mcp', headers: chat2.headers,
+      body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'retirar_acceso', arguments: { carpeta: folder.id, permisos: ['organizar'] } } },
+    });
+    assert.equal(revoke.status, 200);
+    assert.notEqual(revoke.json.result.isError, true, revoke.text);
+
+    await rawHttp({
+      port: motor.port, method: 'POST', pathName: '/mcp', headers: chat1.headers,
+      body: { jsonrpc: '2.0', id: elicit.id, result: { action: 'accept', content: { confirmar: true } } },
+    });
+    const res = await heldDelete;
+    assert.equal(res.status, 200);
+    assert.equal(res.json.result.isError, true, res.text);
+    assert.equal(res.json.result.structuredContent?.error?.codigo, 'ACCESS_NOT_GRANTED', res.text);
+    assert.equal((await fs.readFile(path.join(project, 'protegido.txt'), 'utf8')), 'no borrar sin permiso\n');
+  } finally {
+    sse?.close();
+    await motor.stop('test').catch(() => {});
+    await heldDelete?.catch(() => {});
   }
 });

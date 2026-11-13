@@ -80,6 +80,7 @@ export function createSemanticEncoder({ directory = defaultSemanticDirectory, id
       clearTimeout(idle);
       start();
       child.ref();
+      child.channel?.ref?.();
       const vectors = await new Promise((resolve, reject) => {
         const id = ++sequence;
         const abort = () => { stop(); };
@@ -96,7 +97,9 @@ export function createSemanticEncoder({ directory = defaultSemanticDirectory, id
         throw new MotorError('SEMANTIC_FAILED', 'Vectores de inferencia no válidos.');
       }
       idle = setTimeout(stop, idleMs); idle.unref();
+      // El canal IPC también retendría al proceso que solo espera para descargar el modelo.
       child?.unref();
+      child?.channel?.unref?.();
       return vectors;
     });
     chain = job;
