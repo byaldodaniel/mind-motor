@@ -1,6 +1,6 @@
-# Mind 1.0.3 como producto portable universal
+# Mind 1.0.4 como producto portable universal
 
-Mind permite a los agentes trabajar la información del usuario a su manera. La entrega correctiva mantiene la versión pública 1.0.3 y se identifica técnicamente como revisión 1.
+Mind permite a los agentes trabajar la información del usuario a su manera. La versión 1.0.4 introduce el Motor Central compartido («Un Solo Latido») para coordinar múltiples sesiones de agentes sobre la misma carpeta sin bloqueos en la Base.
 
 ## La carpeta es el producto
 
@@ -48,20 +48,24 @@ Las copias antiguas se actualizan desde el paquete corregido mediante su agente,
    continuidad de la Base. Al volver a abrir Mind, los índices recuperan lo que
    cambió mientras estuvo cerrado.
 
-## Sesión ligada al agente
+## Motor Central y puente por sesión
 
-- **Inicio:** el cliente lanza `mind mcp` por stdio. Mind abre la Base, o la crea
-  en el primer uso con su marca de formato; recupera autorizaciones y decisiones;
-  y empieza a reconciliar cada carpeta registrada sin bloquear al agente.
-- **Durante:** el observador mantiene los índices al día. Las notificaciones del
-  sistema solo deciden cuándo reconciliar; el recorrido seguro decide qué se
-  publica.
-- **Final:** al cerrarse stdin o recibir una señal, Mind detiene observadores y
-  temporizadores y elimina su registro de sesión. No queda ningún proceso
-  residente.
-- **Sin sesiones persistentes:** `mind herramienta <nombre> [json]` ejecuta la
-  misma herramienta en una operación individual, con reconciliación bajo demanda.
-  No es observación continua.
+- **Inicio:** el cliente lanza `mind mcp` por stdio. Ese proceso actúa como puente
+  liviano conectado al Motor Central compartido de la carpeta (`src/motor-central.js`):
+  el primer cliente lo enciende y los siguientes lo reutilizan (`src/connector.js`).
+  El Motor Central abre la Base una sola vez, recupera autorizaciones y
+  decisiones y coordina los índices y observadores sin bloquear al agente.
+- **Durante:** el observador mantiene los índices al día y la cola inteligente
+  (`src/smart-queue.js`) atiende lecturas en paralelo y escrituras ordenadas por
+  carpeta. Con `mind mcp --direct` puede ejecutarse una sesión aislada en el
+  propio proceso si hace falta.
+- **Reposo y final:** al desconectarse un chat se cierra su puente stdio; tras 3 min
+  sin llamadas el Motor Central pasa a reposo ligero y tras 10 min sin llamadas
+  se apaga de forma ordenada sin dejar sesiones colgadas (`mind apagar` lo detiene
+  al instante).
+- **Órdenes directas:** `mind herramienta <nombre> [json]` y `mind inicio` /
+  `mind estado` operan coordinadas con el Motor Central por `/rpc`. Ver
+  `docs/MOTOR_CENTRAL.md`.
 
 ## Herramientas del agente
 

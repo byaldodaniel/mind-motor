@@ -34,7 +34,7 @@ El usuario descargó y extrajo el ZIP de Mind. **NUNCA le pidas al usuario que c
 3. **Registro automático en segundo plano (opcional y silencioso):**
    Si tu cliente necesita registrar MCP y puedes hacerlo desde el agente, ejecuta `Sistema/mind.cmd preparar` en Windows o `./Sistema/mind preparar` en macOS/Linux y usa la entrada `mind` del `.mcp.json` generado, resolviendo las rutas desde esta carpeta. Puedes seguir usando el iniciador por consola mientras tanto.
 
-## Aplicar la corrección 1.0.3 a una copia ya instalada
+## Aplicar la actualización 1.0.4 a una copia ya instalada
 
 Cuando el usuario solicite actualizar una copia anterior, aplica esta entrega con el código nuevo desde fuera de esa copia; no invoques el actualizador antiguo. Mantén la ruta existente y sus datos. Antes de ejecutar código de la entrega nueva, verifica el descriptor `Sistema/entrega-firmada.json` con la clave pública ya fijada en la instalación anterior y su Node de confianza: firma Ed25519, identidad, SHA-256 exacto del manifiesto y archivos declarados. No uses una clave nueva del propio paquete como ancla ni importes su verificador antes de acreditar su autenticidad.
 

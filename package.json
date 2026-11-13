@@ -1,6 +1,6 @@
 {
   "name": "mind-motor",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "Núcleo local de Mind 1.0: Motor y Base independientes.",
   "type": "module",
