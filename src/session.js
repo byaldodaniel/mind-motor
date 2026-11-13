@@ -281,7 +281,13 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       if (started || closed) return;
       started = true;
       await policy.prune().catch((error) => log('aviso', 'No se pudieron limpiar decisiones antiguas', { error: String(error) }));
-      await sync();
+      try {
+        await sync();
+      } catch (error) {
+        // Sin observación activa: el siguiente uso debe poder reintentar el inicio.
+        started = false;
+        throw error;
+      }
       if (observe && !closed) {
         syncTimer = setInterval(() => {
           if (!observer || Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) {

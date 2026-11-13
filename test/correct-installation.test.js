@@ -17,7 +17,8 @@ import {identifyCurrentProcess} from '../src/process-identity.js';
 import {BASE_FORMAT_VERSION} from '../src/base-format.js';
 const run=promisify(execFile),repository=fileURLToPath(new URL('..',import.meta.url));
 async function write(root,relative,value){const file=path.join(root,...relative.split('/'));await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,value);}
-async function snapshot(root){return Object.fromEntries(await Promise.all((await scanTree(root)).filter(e=>e.type==='file').map(async e=>[e.path,await hashFile(path.join(root,e.path))])));}
+// Concurrencia acotada, como mapLimit del producto: una entrega real tiene miles de archivos y abrirlos todos a la vez agota los descriptores (EMFILE).
+async function snapshot(root){const files=(await scanTree(root)).filter(e=>e.type==='file'),entries=new Array(files.length);let next=0;await Promise.all(Array.from({length:Math.min(32,files.length)},async()=>{while(next<files.length){const i=next++;entries[i]=[files[i].path,await hashFile(path.join(root,files[i].path))];}}));return Object.fromEntries(entries);}
 async function manifestAt(root,{modern=false,revision=0}={}){
  const files=await snapshot(root);delete files['mind-producto.json'];delete files['Sistema/mind-producto.json'];delete files['Sistema/entrega-firmada.json'];
  const manifest={format:'mind-product',version:1,mindVersion:modern?'1.0.3':'1.0.2',platform:'win32',arch:'x64',targets:[...UNIVERSAL_TARGETS],baseFormatVersion:BASE_FORMAT_VERSION,files,links:{},...(modern?{packageRevision:revision,layoutVersion:2,updateProtocolVersion:2}:{})};

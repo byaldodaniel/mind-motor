@@ -87,6 +87,34 @@ test('owner lock preserves active, unknown, corrupt and changed owners, and reco
   assert.deepEqual(await fs.readdir(base), []);
 });
 
+test('an unreadable owner file is recovered only when it predates the last system boot', async t => {
+  const base = await fixture(t), file = path.join(base, 'operation.lock');
+  await fs.writeFile(file, Buffer.alloc(372));
+  // Posterior al arranque: se conserva aunque sea ilegible.
+  assert.equal(await recoverAbandonedOwnerFile(file, { bootTime: Date.now() - 3_600_000 }), false);
+  assert.equal((await fs.readFile(file)).length, 372);
+  // Anterior al arranque: ningún proceso vivo puede ser su dueño.
+  assert.equal(await recoverAbandonedOwnerFile(file, { bootTime: Date.now() + 10_000 }), true);
+  assert.deepEqual(await fs.readdir(base), []);
+});
+
+test('owner lock treats null, numbers and zeros as unreadable: recovered only before the last boot', async t => {
+  const base = await fixture(t), file = path.join(base, 'operation.lock');
+  for (const content of ['null', '42', '"texto"', '[]', Buffer.alloc(372)]) {
+    await fs.writeFile(file, content);
+    // Posterior al arranque: se conserva y se informa dueño no verificable.
+    await assert.rejects(acquireOwnerFileLock(file, { timeoutMs: 100, bootTime: Date.now() - 3_600_000 }),
+      { code: 'PROCESS_IDENTITY_UNKNOWN' });
+    assert.deepEqual(await fs.readFile(file), Buffer.from(content));
+    // Anterior al arranque: se recupera y se adquiere.
+    const release = await acquireOwnerFileLock(file, { timeoutMs: 500, bootTime: Date.now() + 10_000 });
+    await release();
+    assert.deepEqual(await fs.readdir(base), []);
+  }
+  await fs.writeFile(file, 'null');
+  assert.equal(await recoverAbandonedOwnerFile(file, { bootTime: Date.now() + 10_000 }), true);
+});
+
 test('recovery rereads owner inside barrier and never removes the replacement file', async t => {
   const base = await fixture(t), file = path.join(base, 'operation.lock');
   await fs.writeFile(file, JSON.stringify(legacy));

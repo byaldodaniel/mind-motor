@@ -11,6 +11,38 @@ const helper = fileURLToPath(new URL('./native_process_identity.py', import.meta
 const instanceToken = randomUUID();
 const identities = new Map();
 const LEGACY_CLOCK_MARGIN_MS = 5000;
+const BOOT_MARGIN_MS = 5000;
+
+/** Momento del último arranque del equipo, con primitivas portables (Windows, macOS y Linux). */
+export function systemBootTime({ now = Date.now(), uptimeSeconds = os.uptime() } = {}) {
+  return now - uptimeSeconds * 1000;
+}
+
+function statMs(value) {
+  return typeof value === 'bigint' ? Number(value / 1_000_000n) : value;
+}
+
+/**
+ * Prueba de abandono que no depende del contenido del archivo: ningún proceso
+ * anterior al último arranque del equipo sigue vivo. Se exige que la última
+ * escritura y el último cambio de metadatos sean anteriores al arranque (con
+ * margen). Un apagado abrupto puede dejar un registro vacío o lleno de ceros:
+ * sin esta prueba quedaría bloqueado para siempre.
+ */
+export function predatesSystemBoot(stat, { bootTime = systemBootTime() } = {}) {
+  const latest = Math.max(statMs(stat.mtimeNs ?? stat.mtimeMs), statMs(stat.ctimeNs ?? stat.ctimeMs));
+  return Number.isFinite(latest) && Number.isFinite(bootTime) && latest < bootTime - BOOT_MARGIN_MS;
+}
+
+/** Contenido que no identifica a ningún dueño: vacío, solo ceros/espacios o JSON no válido. */
+export function parseOwnerRecord(text) {
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 async function pythonFor(explicit) {
   if (explicit) return explicit;
@@ -122,7 +154,7 @@ async function exists(filename) {
 }
 
 /** A recovery barrier is respected by all acquisitions of these owner files. */
-export async function recoverAbandonedOwnerFile(filename, { pythonExecutable, inspect = inspectProcessOwners } = {}) {
+export async function recoverAbandonedOwnerFile(filename, { pythonExecutable, inspect = inspectProcessOwners, bootTime } = {}) {
   const barrier = filename + '.recovery';
   try { await fs.mkdir(barrier, { mode: 0o700 }); }
   catch (error) { if (error.code === 'EEXIST') return false; throw error; }
@@ -132,10 +164,15 @@ export async function recoverAbandonedOwnerFile(filename, { pythonExecutable, in
     try {
       examined = await fs.lstat(filename, { bigint: true });
       if (!examined.isFile()) return false;
-      record = JSON.parse(await fs.readFile(filename, 'utf8'));
-    } catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
-    const [owner] = await inspect([record], { pythonExecutable });
-    if (owner?.state !== 'stale') return false;
+      record = parseOwnerRecord(await fs.readFile(filename, 'utf8'));
+    } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+    if (record) {
+      const [owner] = await inspect([record], { pythonExecutable });
+      if (owner?.state !== 'stale') return false;
+    } else if (!predatesSystemBoot(examined, bootTime === undefined ? {} : { bootTime })) {
+      // Un registro ilegible solo se recupera si es anterior al último arranque.
+      return false;
+    }
     const current = await fs.lstat(filename, { bigint: true }).catch(error => {
       if (error.code === 'ENOENT') return null;
       throw error;
@@ -161,7 +198,7 @@ export async function recoverAbandonedOwnerFile(filename, { pythonExecutable, in
 }
 
 /** One native owner lock; no age expiry and no process termination. */
-export async function acquireOwnerFileLock(filename, { pythonExecutable, timeoutMs = 0, inspect = inspectProcessOwners } = {}) {
+export async function acquireOwnerFileLock(filename, { pythonExecutable, timeoutMs = 0, inspect = inspectProcessOwners, bootTime } = {}) {
   const deadline = Date.now() + timeoutMs;
   const identity = await identifyCurrentProcess({ pythonExecutable });
   const token = randomUUID();
@@ -186,6 +223,8 @@ export async function acquireOwnerFileLock(filename, { pythonExecutable, timeout
         };
         try {
           await handle.writeFile(JSON.stringify({ version: 2, token, ...identity, startedAt: new Date().toISOString() }) + '\n');
+          // Durable antes de usarlo: un apagado abrupto no debe dejar un dueño ilegible.
+          await handle.sync();
           while (await exists(barrier)) {
             if (Date.now() >= deadline) throw new MotorError('LOCK_BUSY', 'La recuperación de Mind está en curso.');
             await delay(20);
@@ -208,21 +247,25 @@ export async function acquireOwnerFileLock(filename, { pythonExecutable, timeout
           throw error;
         }
       }
-      try {
-        const text = await fs.readFile(filename, 'utf8');
-        const stored = JSON.parse(text);
+      let text;
+      try { text = await fs.readFile(filename, 'utf8'); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      const stored = parseOwnerRecord(text);
+      const recovery = { pythonExecutable, inspect, ...(bootTime === undefined ? {} : { bootTime }) };
+      if (!stored) {
+        // Vacío, en ceros, JSON roto o JSON que no es un objeto (null, números):
+        // solo se recupera si es anterior al último arranque del equipo.
+        unknown = true;
+        const info = await fs.lstat(filename, { bigint: true }).catch(() => null);
+        if (info?.isFile() && predatesSystemBoot(info, bootTime === undefined ? {} : { bootTime })
+            && await recoverAbandonedOwnerFile(filename, recovery)) continue;
+      } else if (text !== lastRecord || Date.now() - inspectedAt >= 500) {
         // Cache may only postpone acquisition. Recovery always inspects freshly.
-        if (text !== lastRecord || Date.now() - inspectedAt >= 500) {
-          const [owner] = await inspect([stored], { pythonExecutable });
-          unknown = owner.state === 'unknown';
-          lastRecord = text;
-          inspectedAt = Date.now();
-          if (owner.state === 'stale' && await recoverAbandonedOwnerFile(filename, { pythonExecutable, inspect })) continue;
-        }
-      } catch (error) {
-        if (error.code === 'ENOENT') continue;
-        if (error instanceof SyntaxError) unknown = true;
-        else throw error;
+        const [owner] = await inspect([stored], { pythonExecutable });
+        unknown = owner.state === 'unknown';
+        lastRecord = text;
+        inspectedAt = Date.now();
+        if (owner.state === 'stale' && await recoverAbandonedOwnerFile(filename, recovery)) continue;
       }
     }
     if (Date.now() >= deadline) throw new MotorError(unknown ? 'PROCESS_IDENTITY_UNKNOWN' : 'LOCK_BUSY',

@@ -5,7 +5,7 @@ import { serveMcp, SUPPORTED_PROTOCOL_VERSIONS } from '../src/mcp-server.js';
 import { MotorError } from '../src/errors.js';
 
 /** Servidor en memoria con un cliente que escribe y lee líneas JSON. */
-function harness({ handlers = {}, onClose } = {}) {
+function harness({ handlers = {}, onClose, onInitialized } = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const received = [];
@@ -37,6 +37,7 @@ function harness({ handlers = {}, onClose } = {}) {
       call: (name, args, context) => handlers[name](args, { ...context, connection }),
     }),
     onClose,
+    onInitialized,
   });
   const next = (match) => {
     const found = received.find(match);
@@ -182,6 +183,40 @@ test('admite lotes de versiones anteriores del protocolo', async () => {
   client.send([init(1, '2025-03-26'), { jsonrpc: '2.0', id: 2, method: 'ping' }]);
   assert.equal((await client.response(1)).result.protocolVersion, '2025-03-26');
   assert.deepEqual((await client.response(2)).result, {});
+  client.end();
+  await client.server.finished;
+});
+
+test('un inicio fallido no inutiliza la conversación: informa el motivo y se reintenta', async () => {
+  let attempts = 0;
+  let calls = 0;
+  const client = harness({
+    handlers: { estado: async () => { calls++; return { ok: true }; } },
+    onInitialized: async () => {
+      attempts++;
+      if (attempts <= 2) throw new MotorError('INDEX_LOCK_TIMEOUT', 'Otro proceso de Mind está actualizando estos datos.');
+    },
+  });
+  client.send(init(1));
+  await client.response(1);
+  client.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  // Primer uso: el reintento vuelve a fallar y el agente recibe el motivo real, no -32603.
+  client.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'estado', arguments: {} } });
+  const failed = await client.response(2);
+  assert.equal(failed.error, undefined);
+  assert.equal(failed.result.isError, true);
+  assert.equal(failed.result.structuredContent.error.codigo, 'INDEX_LOCK_TIMEOUT');
+  assert.equal(calls, 0);
+  // Segundo uso: el inicio se recupera y la herramienta funciona.
+  client.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'estado', arguments: {} } });
+  const recovered = await client.response(3);
+  assert.deepEqual(recovered.result.structuredContent, { ok: true });
+  assert.equal(attempts, 3);
+  // Ya iniciado: no se repite el inicio.
+  client.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'estado', arguments: {} } });
+  await client.response(4);
+  assert.equal(attempts, 3);
+  assert.equal(calls, 2);
   client.end();
   await client.server.finished;
 });

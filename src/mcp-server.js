@@ -71,6 +71,28 @@ export function serveMcp({ input, output, serverInfo, instructions, tools, onIni
   let closed = false;
   let toolset = null;
   let initialization = Promise.resolve();
+  let retrying = null;
+
+  /**
+   * Un fallo de inicio (por ejemplo, una coordinación ocupada) no debe inutilizar
+   * la conversación: cada llamada posterior reintenta el inicio, compartiendo un
+   * único reintento entre llamadas simultáneas. Si vuelve a fallar se propaga el
+   * motivo real para que el agente pueda explicarlo.
+   */
+  async function ensureInitialized() {
+    try {
+      await initialization;
+      return;
+    } catch {
+      // Reintentar a continuación.
+    }
+    if (!retrying) {
+      const attempt = Promise.resolve().then(() => onInitialized?.(connection));
+      retrying = attempt;
+      attempt.then(() => { initialization = attempt; }, () => {}).finally(() => { if (retrying === attempt) retrying = null; });
+    }
+    await retrying;
+  }
 
   const connection = {
     protocolVersion: null,
@@ -154,13 +176,18 @@ export function serveMcp({ input, output, serverInfo, instructions, tools, onIni
         if (!toolset) throw rpcError(INVALID_REQUEST, 'La sesión no se inicializó.');
         return { tools: toolset.definitions };
       case 'tools/call': {
-        await initialization;
         if (!toolset) throw rpcError(INVALID_REQUEST, 'La sesión no se inicializó.');
         const { name, arguments: args = {} } = params;
         if (typeof name !== 'string' || !toolset.definitions.some((tool) => tool.name === name)) {
           throw rpcError(INVALID_PARAMS, `Herramienta desconocida: ${String(name).slice(0, 64)}.`);
         }
         if (!isObject(args)) throw rpcError(INVALID_PARAMS, 'arguments debe ser un objeto.');
+        try {
+          await ensureInitialized();
+        } catch (error) {
+          log('error', 'Mind no pudo iniciar la sesión', { tool: name, codigo: error?.code ?? null, error: String(error?.stack ?? error) });
+          return toolError(error);
+        }
         const controller = new AbortController();
         running.set(id, controller);
         try {
