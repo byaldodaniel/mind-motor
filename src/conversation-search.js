@@ -22,17 +22,19 @@ export function conversationChunks(title, important) {
   return chunks;
 }
 
-export async function prepareConversationVectors(db, encoder, publish) {
+export async function prepareConversationVectors(db, encoder, publish, { backgroundGate } = {}) {
   let embedded = 0;
   const reuse = new Map();
   const rows = db.prepare(`SELECT id,revision,title,important FROM conversations
     WHERE id NOT IN (SELECT id FROM conversation_vectors WHERE model=?)`).all(encoder.model);
 
   for (const row of rows) {
+    await backgroundGate?.yieldIfNeeded?.();
     const chunks = conversationChunks(row.title, row.important);
     // No publicar una conversación parcialmente vectorizada si se cancela.
     const complete = [];
     for (let start = 0; start < chunks.length; start += 1) {
+      await backgroundGate?.yieldIfNeeded?.();
       const batch = chunks.slice(start, start + 1);
       const key = batch[0].text;
       let vectors = reuse.get(key);

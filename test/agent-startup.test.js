@@ -5,6 +5,7 @@ import path from 'node:path';
 import {promisify} from 'node:util';
 import {execFile} from 'node:child_process';
 import {prepareAgentStartup} from '../src/agent-startup.js';
+import {stopCentralMotor} from '../src/connector.js';
 import {agentFixture,motorDirectory} from './helpers/agent-fixture.js';
 const run=promisify(execFile);
 async function fixture(t){
@@ -60,9 +61,13 @@ test('CLI inicio desde otro proyecto devuelve instrucciones y destino sin JSON n
  for(const folder of ['src','bin'])await fs.cp(path.join(motorDirectory,folder),path.join(f.mind,'Motor',folder),{recursive:true});
  await fs.copyFile(path.join(motorDirectory,'package.json'),path.join(f.mind,'Motor','package.json'));
  await fs.writeFile(path.join(f.mind,'mind-producto.json'),JSON.stringify({format:'mind-product',version:1,mindVersion:'1.0.3'}));
- const result=await run(process.execPath,[path.join(f.mind,'Motor','bin','mind.js'),'inicio'],{cwd:f.folder,env:{...process.env,MIND_UPDATE_RESTART:'1',MIND_AGENT_STARTUP:'1',MIND_PYTHON:process.platform==='win32'?'python':'python3',CODEX_HOME:path.join(f.home,'.codex'),HOME:f.home,USERPROFILE:f.home}});
- const value=JSON.parse(result.stdout);assert.equal(value.mind,'1.0.3');assert.match(value.instrucciones,/destinos_consultar/);
- assert.equal(value.destinos.predeterminado,path.join(f.mind,'Conversaciones'));
- assert.ok((await fs.stat(value.destinos.predeterminado)).isDirectory());
- for(const relative of ['.codex/AGENTS.md','.claude/CLAUDE.md','.gemini/GEMINI.md'])assert.match(await fs.readFile(path.join(f.home,relative),'utf8'),/mind-startup:begin/);
+ try {
+  const result=await run(process.execPath,[path.join(f.mind,'Motor','bin','mind.js'),'inicio'],{cwd:f.folder,env:{...process.env,MIND_UPDATE_RESTART:'1',MIND_AGENT_STARTUP:'1',MIND_PYTHON:process.platform==='win32'?'python':'python3',CODEX_HOME:path.join(f.home,'.codex'),HOME:f.home,USERPROFILE:f.home}});
+  const value=JSON.parse(result.stdout);assert.equal(value.mind,'1.0.3');assert.match(value.instrucciones,/destinos_consultar/);
+  assert.equal(value.destinos.predeterminado,path.join(f.mind,'Conversaciones'));
+  assert.ok((await fs.stat(value.destinos.predeterminado)).isDirectory());
+  for(const relative of ['.codex/AGENTS.md','.claude/CLAUDE.md','.gemini/GEMINI.md'])assert.match(await fs.readFile(path.join(f.home,relative),'utf8'),/mind-startup:begin/);
+ } finally {
+  await stopCentralMotor({ baseDirectory: path.join(f.mind, 'Base') }).catch(() => {});
+ }
 });

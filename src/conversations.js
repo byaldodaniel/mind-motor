@@ -54,7 +54,7 @@ function asConversation(entry) {
  * No lee originales ni historiales ni crea carpetas de trabajo.
  * Inferencia local bajo demanda en un worker que se libera tras inactividad.
  */
-export function createConversations({ baseDirectory, continuity, semanticEncoder = createSemanticEncoder() }) {
+export function createConversations({ baseDirectory, continuity, semanticEncoder = createSemanticEncoder(), backgroundGate = null }) {
   const preferences = createConversationPreferences(baseDirectory);
   let preparing;
   let warming;
@@ -81,7 +81,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
               db.exec('RELEASE vector_document');
             } catch (error) { db.exec('ROLLBACK TO vector_document; RELEASE vector_document'); throw error; }
           }, 'conversation-index', { timeoutMs: 5000 });
-        });
+        }, { backgroundGate });
       } finally { db.close(); }
     })().then(value => { preparationError = null; return value; }).catch(error => { preparationError = error.code ?? 'SEMANTIC_FAILED'; return 0; }).finally(() => { preparing = null; });
   }
@@ -307,5 +307,8 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     getConversationPreferences, configureConversationPreferences,
     prepareConversationSearch,
     relocateConversationPreferenceDirectories: preferences.relocate,
+    unloadConversationSearch: () => semanticEncoder.unload?.(),
+    /** Hay una preparación o un calentamiento semántico en curso: descargar ahora lo abortaría. */
+    isConversationSearchBusy: () => Boolean(preparing || warming),
     async closeConversationSearch() { closing = true; await semanticEncoder.close(); await preparing; await warming; } });
 }

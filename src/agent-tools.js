@@ -452,7 +452,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const answer = await consent.askFolder({ folderPath: canonical, requested, current, reason, clientInfo: connection?.clientInfo });
       if (answer.status === 'pending') return pendingAnswer(answer);
       if (answer.status !== 'approved') return { estado: answer.status === 'declined' ? 'rechazado' : 'cancelado' };
-      const folder = existing ?? await motor.authorizeFolder(canonical);
+      const folder = await motor.authorizeFolder(canonical);
       if (answer.exclusions?.length > 0) {
         const current = (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [];
         await motor.setFolderExclusions(folder.id, [...current, ...answer.exclusions]);

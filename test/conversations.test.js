@@ -167,14 +167,22 @@ test('herramientas requieren continuidad y una referencia no concede lectura de 
 
 test('MCP real expone las herramientas, persiste entre procesos y recupera solo lo importante', { timeout: 30000 }, async t => {
   const { startMcp } = await import('./helpers/mcp-client.js');
-  const { base } = await fixture(t);
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-conversations-'));
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-conversations-work-'));
   const clients = [];
   t.after(async () => {
-    for (const client of clients) { if (client.child.exitCode === null) await client.close(); }
-    assert.equal(path.dirname(workspace), os.tmpdir());
-    assert.ok(path.basename(workspace).startsWith('mind-conversations-work-'));
-    await fs.rm(workspace, { recursive: true, force: true });
+    try {
+      for (const client of clients) { if (client.child.exitCode === null) await client.close(); }
+      const { stopCentralMotor } = await import('../src/connector.js');
+      await stopCentralMotor(base).catch(() => {});
+    } finally {
+      assert.equal(path.dirname(base), os.tmpdir());
+      assert.ok(path.basename(base).startsWith('mind-conversations-'));
+      await fs.rm(base, { recursive: true, force: true });
+      assert.equal(path.dirname(workspace), os.tmpdir());
+      assert.ok(path.basename(workspace).startsWith('mind-conversations-work-'));
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
   });
   const start = () => {
     const client = startMcp({ args: ['--base',base,'--carpeta',workspace], capabilities: {} });

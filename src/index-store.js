@@ -191,5 +191,9 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
       cache.delete(scopeId);
       return removeJson(filename(scopeId));
     },
+
+    clearCache() {
+      cache.clear();
+    },
   };
 }

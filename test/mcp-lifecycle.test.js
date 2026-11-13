@@ -28,7 +28,7 @@ async function fixture(t) {
   await fs.writeFile(path.join(folder, 'antiguo.txt'), 'Se eliminará con Mind cerrado\n');
   const start = (options = {}) => {
     const client = startMcp({
-      args: ['--base', base],
+      args: ['--direct', '--base', base],
       onElicit: () => ({ action: 'accept', content: { acceso: 'completo' } }),
       ...options,
     });

@@ -1,11 +1,11 @@
-import { contains } from './paths.js';
+import { contains, currentDirectory } from './paths.js';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { validateCandidateFolder } from './consent.js';
 import { ACCESS_LEVELS } from './access-policy.js';
 
 /** El ámbito procede del cliente MCP o del iniciador, nunca de una herramienta. */
-export function createWorkspaceAccess(session, { paths = [], cwd = process.cwd(), log = () => {} } = {}) {
+export function createWorkspaceAccess(session, { paths = [], cwd = currentDirectory(), log = () => {} } = {}) {
   let active = paths.length > 0;
   let grants = new Map();
   const reduced = new Set();

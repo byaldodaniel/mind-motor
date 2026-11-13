@@ -85,6 +85,13 @@ function trashOut(folder, entry) {
   };
 }
 
+/** Revalida carpeta y permiso tras liberar la cola durante una confirmación humana. */
+async function revalidateOrganize(folderId, resolveFolder, requireAccess) {
+  const currentFolder = await resolveFolder(folderId);
+  await requireAccess(currentFolder, 'organizar');
+  return currentFolder;
+}
+
 export function createOrganizeTools({ session, connection }) {
   const handlers = {
     async crear_carpeta(args, context) {
@@ -151,10 +158,11 @@ export function createOrganizeTools({ session, connection }) {
       });
       if (outcome.status === 'pending') return pendingAnswer(outcome, 'el borrado');
       if (outcome.status !== 'approved') return { estado: 'rechazado', nota: 'El usuario no confirmó el borrado: no se tocó nada.' };
-      const deleted = await deleteEntry(session, { requester, folder, entry, by: `${source}, confirmado por el usuario`, reason, source });
+      const currentFolder = await revalidateOrganize(folder.id, resolveFolder, requireAccess);
+      const deleted = await deleteEntry(session, { requester, folder: currentFolder, entry, by: `${source}, confirmado por el usuario`, reason, source });
       return {
-        estado: 'en_papelera', carpeta: folder.id, ruta: relativePath, id: deleted.trashId,
-        tipo: TYPE_OUT[deleted.type] ?? deleted.type, ubicacion_en_papelera: absolute(folder.path, deleted.trashPath),
+        estado: 'en_papelera', carpeta: currentFolder.id, ruta: relativePath, id: deleted.trashId,
+        tipo: TYPE_OUT[deleted.type] ?? deleted.type, ubicacion_en_papelera: absolute(currentFolder.path, deleted.trashPath),
         nota: 'Se puede restaurar con "restaurar" y este id.',
       };
     },
@@ -191,8 +199,9 @@ export function createOrganizeTools({ session, connection }) {
       });
       if (outcome.status === 'pending') return pendingAnswer(outcome, 'la eliminación definitiva');
       if (outcome.status !== 'approved') return { estado: 'rechazado', nota: 'El usuario no confirmó la eliminación definitiva: no se tocó nada.' };
-      const purged = await purgeEntry(session, { requester, folder, trashId, by: `${source}, confirmado dos veces por el usuario`, source });
-      return { estado: 'eliminado', carpeta: folder.id, id: trashId, ruta: entry.path, elementos: purged.removed };
+      const currentFolder = await revalidateOrganize(folder.id, resolveFolder, requireAccess);
+      const purged = await purgeEntry(session, { requester, folder: currentFolder, trashId, by: `${source}, confirmado dos veces por el usuario`, source });
+      return { estado: 'eliminado', carpeta: currentFolder.id, id: trashId, ruta: purged.entry.path, elementos: purged.removed };
     },
   };
   return DEFINITIONS.map((definition) => ({ definition, handler: handlers[definition.name] }));
