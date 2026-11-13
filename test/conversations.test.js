@@ -172,6 +172,8 @@ test('MCP real expone las herramientas, persiste entre procesos y recupera solo 
   const clients = [];
   t.after(async () => {
     for (const client of clients) { if (client.child.exitCode === null) await client.close(); }
+    const { stopCentralMotor } = await import('../src/connector.js');
+    await stopCentralMotor(base).catch(() => {});
     assert.equal(path.dirname(workspace), os.tmpdir());
     assert.ok(path.basename(workspace).startsWith('mind-conversations-work-'));
     await fs.rm(workspace, { recursive: true, force: true });

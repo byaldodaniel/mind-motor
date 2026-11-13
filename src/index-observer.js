@@ -226,6 +226,7 @@ export function createIndexObserver({
   const starting = new Map();
   const inFlight = new Set();
   let closed = false;
+  let paused = false;
   let baseWatcher = null;
   let authorizationTimer = null;
   let authorizationCheck = null;
@@ -331,7 +332,7 @@ export function createIndexObserver({
     clearTimeout(state.periodic);
     state.periodic = null;
     const interval = state.mode === 'polling' ? config.fallbackIntervalMs : config.safetyIntervalMs;
-    if (state.stopped || interval === 0) return;
+    if (paused || state.stopped || interval === 0) return;
     state.periodic = unref(setTimeout(() => {
       state.periodic = null;
       mark(state, state.mode === 'polling' ? 'poll' : 'safety');
@@ -387,7 +388,7 @@ export function createIndexObserver({
       degrade(state, 'WATCH_PATH_UNSUPPORTED');
       return 0;
     }
-    const wanted = state.strategy === 'recursive' ? [''] : watchedDirectories(state.entries);
+    const wanted = state.strategy === 'recursive' ? [''] : (state.watchedDirs ?? ['']);
     if (wanted.length > config.maxWatchedDirectories) {
       degrade(state, 'WATCH_LIMIT');
       return 0;
@@ -448,13 +449,21 @@ export function createIndexObserver({
           // Retirada y nueva autorización de la misma ruta: no se hereda la observación.
           return stop(state, 'authorization-changed');
         }
-        const consecutive = state.entries !== null && result.changes !== null
+        const hasDeltas = result.changes?.removedEntries instanceof Map && result.changes?.addedEntries instanceof Map;
+        const consecutive = hasDeltas && state.indexGeneration !== null && result.changes !== null
           && index.generation === result.generation && result.generation === state.indexGeneration + 1;
         const changes = result.changes === null ? null
-          : consecutive ? pairRenames(result.changes, state.entries, index.entries)
+          : consecutive ? pairRenames(
+              result.changes,
+              [...result.changes.removedEntries.values()],
+              [...result.changes.addedEntries.values()],
+            )
             : { ...result.changes, renamed: [] };
+        if (changes && result.changes?.removedEntries instanceof Map) {
+          Object.defineProperty(changes, 'removedEntries', { value: result.changes.removedEntries, configurable: true });
+        }
         state.authorization = index.authorizationGeneration;
-        state.entries = index.entries;
+        state.watchedDirs = state.strategy === 'recursive' ? null : watchedDirectories(index.entries);
         state.indexGeneration = index.generation;
         state.lastReconciledAt = result.indexedAt;
         state.failures = 0;
@@ -546,7 +555,7 @@ export function createIndexObserver({
   }
 
   function ensureAuthorizationWatch() {
-    if (!authorizationTimer) {
+    if (!paused && !closed && !authorizationTimer) {
       const tick = () => {
         authorizationTimer = unref(setTimeout(tick, config.authorizationCheckMs));
         if (!baseWatcher) openBaseWatcher();
@@ -613,7 +622,8 @@ export function createIndexObserver({
       firstEventAt: 0, lastEventAt: 0, lastRunEndedAt: 0, failures: 0,
       stopped: false, stopReason: null, rootIdentity: undefined,
       authorization: baseline ? baseline.authorizationGeneration : undefined,
-      entries: baseline?.entries ?? null, indexGeneration: baseline?.generation ?? null,
+      watchedDirs: mode === 'recursive' ? null : watchedDirectories(baseline?.entries),
+      indexGeneration: baseline?.generation ?? null,
       lastReconciledAt: baseline?.updatedAt ?? null,
     };
     state.rootIdentity = await rootIdentity(state);
@@ -671,6 +681,30 @@ export function createIndexObserver({
 
     list() {
       return [...folders.values()].map(status);
+    },
+
+    /** Pausa los sondeos periódicos durante el reposo ligero manteniendo `fs.watch` del SO. */
+    pausePeriodic() {
+      paused = true;
+      clearTimeout(authorizationTimer);
+      authorizationTimer = null;
+      for (const state of folders.values()) {
+        clearTimeout(state.periodic);
+        state.periodic = null;
+      }
+    },
+
+    /** Reanuda los sondeos periódicos al despertar del reposo ligero. */
+    resumePeriodic() {
+      if (closed || !paused) return;
+      paused = false;
+      if (folders.size > 0) {
+        ensureAuthorizationWatch();
+        checkAll();
+      }
+      for (const state of folders.values()) {
+        if (!state.stopped && !state.running) armPeriodic(state);
+      }
     },
 
     /** Deja de observar; el índice publicado se conserva. */

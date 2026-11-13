@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { stopCentralMotor } from '../src/connector.js';
 import { startMcp } from './helpers/mcp-client.js';
 
 async function fixture(t) {
@@ -16,6 +17,7 @@ async function fixture(t) {
   const clients = [];
   t.after(async () => {
     for (const client of clients) { await client.close(); }
+    await stopCentralMotor(path.join(root, 'Base')).catch(() => {});
     await fs.rm(root, { recursive: true, force: true });
   });
   return { a, b, start(options = {}) {
@@ -78,7 +80,7 @@ test('la carpeta abierta queda observada desde la primera sesión', async t => {
   const f = await fixture(t);
   const client = f.start({ cwd: f.a, commandArgs: [
     '--import', new URL('./fixtures/idle-resources.mjs', import.meta.url).href,
-    fileURLToPath(new URL('../bin/mind.js', import.meta.url)), 'mcp',
+    fileURLToPath(new URL('../bin/mind.js', import.meta.url)), 'mcp', '--direct',
   ] });
   await client.initialize();
   assert.equal((await client.call('leer', { ruta: 'nota.txt' })).isError, false);

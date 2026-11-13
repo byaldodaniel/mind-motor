@@ -228,7 +228,7 @@ export async function updateManagedClientConnections({ root, runtime, manifest, 
     ['Codex', path.join(codexHome, 'config.toml'), codexHome, 'toml'],
     ['Claude Code', path.join(home, '.claude.json'), home, 'json'],
     ['Gemini CLI', path.join(home, '.gemini', 'settings.json'), home, 'json'],
-    ['Antigravity', path.join(home, '.gemini', 'antigravity', 'mcp_config.json'), home, 'json'],
+    ['Antigravity', path.join(home, '.gemini', 'config', 'mcp_config.json'), home, 'json'],
   ];
   const results = [];
   for (const [client, file, anchor, format] of candidates) {

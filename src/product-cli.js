@@ -13,6 +13,8 @@ Para el usuario:
   preparar                   Prepara la conexión y el inicio automático en los agentes detectados.
   inicio                     Lee instrucciones y destinos al iniciar una conversación.
   estado                     Resumen de la Base, las carpetas y sus permisos.
+  despertar                  Enciende o reutiliza el Motor Central en segundo plano.
+  apagar                     Detiene el Motor Central activo de forma limpia.
   autorizar [ruta]           Revisa y aprueba solicitudes de agentes; con una ruta,
                              autoriza esa carpeta (pregunta qué permisos conceder).
   permisos [retirar <id>]    Lista permisos o retira una carpeta de Mind.
@@ -51,6 +53,10 @@ function parse(args) {
     } else if (value === '--base') {
       options.base = args[++index];
       if (!options.base) throw new MotorError('INVALID_ARGUMENTS', 'Falta la ruta después de --base.');
+    } else if (value === '--direct') {
+      options.direct = true;
+    } else if (value === '--headers') {
+      options.headers = true;
     } else {
       rest.push(value);
     }
@@ -94,30 +100,11 @@ async function withSession(options, task, { observe = false } = {}) {
   }
 }
 
-/** Ejecuta una herramienta como lo haría un agente sin MCP: sin formularios de consentimiento. */
-async function runTool(session, name, args) {
-  const { createAgentTools } = await import('./agent-tools.js');
-  const { toolResult, toolError } = await import('./mcp-server.js');
-  const connection = { clientInfo: { name: 'mind-herramienta' }, supportsFormElicitation: () => false, protocolVersion: null };
-  const tools = createAgentTools({ session, connection });
-  if (!tools.definitions.some((tool) => tool.name === name)) {
-    throw new MotorError('INVALID_ARGUMENTS', `Herramienta desconocida: ${name}. Disponibles: ${tools.definitions.map((tool) => tool.name).join(', ')}.`);
-  }
-  if (!args || typeof args !== 'object' || Array.isArray(args)) throw new MotorError('INVALID_ARGUMENTS', 'Los argumentos deben ser un objeto JSON.');
-  let result;
-  try {
-    result = toolResult(await tools.call(name, args, {}));
-  } catch (error) {
-    result = toolError(error);
-  }
-  return { value: result.structuredContent, text: result.content[0].text, isError: result.isError === true };
-}
-
 export async function main(args) {
   try {
     const { options, command, parameters } = parse(args);
     options.autoWorkspace = ['estado', 'herramienta', 'inicio'].includes(command);
-    if (!['version', '--version', 'actualizar', 'corregir'].includes(command)) {
+    if (!['version', '--version', 'actualizar', 'corregir', 'despertar', 'apagar', 'motor'].includes(command)) {
       const { prepareProductMcp } = await import('./product-mcp.js');
       try {
         const result = await prepareProductMcp();
@@ -159,37 +146,90 @@ export async function main(args) {
         });
         return 0;
       }
-      case 'mcp': {
-        const { runMcpSession } = await import('./mcp-session.js');
-        return await runMcpSession({ layout: await resolveLayout({ base: options.base }), parameters, workspacePaths: options.workspacePaths });
+      case 'motor': {
+        if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `motor no admite argumentos (${parameters[0]}).`);
+        const layout = await resolveLayout({ base: options.base });
+        const { releaseQuarantine } = await import('./quarantine.js');
+        const quarantine = await releaseQuarantine(layout);
+        if (quarantine.aviso) process.stderr.write(`Aviso: ${quarantine.aviso}\n`);
+        const { runCentralMotorDaemon } = await import('./motor-central.js');
+        await runCentralMotorDaemon({ layout, motorVersion: MOTOR_VERSION, observe: true });
+        return 0;
       }
-      case 'inicio':
-        return await withSession(options, async (session) => {
-          const result = await runTool(session,'destinos_consultar',{});
-          const { AGENT_INSTRUCTIONS } = await import('./agent-tools.js');
-          print({mind:MOTOR_VERSION,instrucciones:AGENT_INSTRUCTIONS,destinos:result.value});
-          return result.isError ? 1 : 0;
+      case 'despertar': {
+        if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `despertar no admite argumentos (${parameters[0]}).`);
+        const layout = await resolveLayout({ base: options.base });
+        const { ensureCentralMotor } = await import('./connector.js');
+        const conn = await ensureCentralMotor({ layout, baseDirectory: layout.baseDirectory });
+        if (options.headers) {
+          process.stdout.write(`${JSON.stringify({ Authorization: `Bearer ${conn.token}` })}\n`);
+        } else {
+          print({ ok: true, pid: conn.health.pid, port: conn.state.port, url: conn.url, despertado: conn.spawned });
+        }
+        return 0;
+      }
+      case 'apagar': {
+        if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `apagar no admite argumentos (${parameters[0]}).`);
+        const layout = await resolveLayout({ base: options.base });
+        const { stopCentralMotor } = await import('./connector.js');
+        const stopped = await stopCentralMotor({ baseDirectory: layout.baseDirectory });
+        print({ ok: true, apagado: stopped });
+        return 0;
+      }
+      case 'mcp': {
+        const layout = await resolveLayout({ base: options.base });
+        if (options.direct) {
+          const { runMcpSession } = await import('./mcp-session.js');
+          return await runMcpSession({ layout, parameters, workspacePaths: options.workspacePaths });
+        }
+        if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `mcp no admite argumentos (${parameters[0]}).`);
+        const { runMcpBridge } = await import('./mcp-bridge.js');
+        await runMcpBridge({ layout, workspacePaths: options.workspacePaths });
+        return 0;
+      }
+      case 'inicio': {
+        const layout = await resolveLayout({ base: options.base });
+        const { callCentralRpc } = await import('./connector.js');
+        const res = await callCentralRpc({
+          layout,
+          baseDirectory: layout.baseDirectory,
+          payload: { accion: 'inicio', paths: options.workspacePaths, cwd: process.cwd() },
         });
-      case 'estado':
-        return await withSession(options, async (session) => {
-          const result = await runTool(session, 'estado', {});
-          print(result.value);
-          return 0;
+        print({ mind: res.mind, instrucciones: res.instrucciones, destinos: res.destinos });
+        return 0;
+      }
+      case 'estado': {
+        const layout = await resolveLayout({ base: options.base });
+        const { callCentralRpc } = await import('./connector.js');
+        const res = await callCentralRpc({
+          layout,
+          baseDirectory: layout.baseDirectory,
+          payload: { accion: 'estado', paths: options.workspacePaths, cwd: process.cwd() },
         });
+        print(res.value);
+        return res.isError ? 1 : 0;
+      }
       case 'herramienta': {
         const [name, json = '{}'] = parameters;
         if (!name || parameters.length > 2) throw new MotorError('INVALID_ARGUMENTS', 'Uso: mind herramienta <nombre> [json]');
-        let args;
+        let parsedArgs;
         try {
-          args = JSON.parse(json);
+          parsedArgs = JSON.parse(json);
         } catch {
           throw new MotorError('INVALID_ARGUMENTS', 'Los argumentos deben ser un objeto JSON.');
         }
-        return await withSession(options, async (session) => {
-          const result = await runTool(session, name, args);
-          print(result.text);
-          return result.isError ? 1 : 0;
+        if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
+          throw new MotorError('INVALID_ARGUMENTS', 'Los argumentos deben ser un objeto JSON.');
+        }
+        const layout = await resolveLayout({ base: options.base });
+        const { callCentralRpc } = await import('./connector.js');
+        const res = await callCentralRpc({
+          layout,
+          baseDirectory: layout.baseDirectory,
+          payload: { accion: 'herramienta', tool: name, args: parsedArgs, paths: options.workspacePaths, cwd: process.cwd() },
         });
+        print(res.text);
+        return res.isError ? 1 : 0;
       }
       case 'autorizar':
       case 'permisos':

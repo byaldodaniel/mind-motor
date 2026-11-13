@@ -119,7 +119,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, userDataDirectory } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, userDataDirectory, backgroundGate = null } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -159,12 +159,13 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
-  const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder });
+  const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder, backgroundGate });
   const indexer = createFolderIndexer({
     baseDirectory: base,
     pythonExecutable,
     signal,
     resourceSample,
+    backgroundGate,
     resolveScope: async (id) => {
       const folder = await loadAuthorizedFolder(id);
       if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'La carpeta no está autorizada o fue retirada.');
@@ -257,6 +258,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     updateContinuity: coordinated(continuity.updateContinuity),
     relateContinuity: coordinated(continuity.relateContinuity),
     retireContinuity: coordinated(continuity.retireContinuity),
+    // Liberación de caché en reposo ligero.
+    clearCache: indexer.clearCache,
     listContinuityIds: coordinated(continuity.listContinuityIds),
     exportContinuity: coordinated(continuity.exportContinuity),
     importContinuity: coordinated(continuity.importContinuity),

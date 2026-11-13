@@ -47,15 +47,27 @@ function compare(previous, current) {
   const before = new Map(previous.map((entry) => [entry.path, entry]));
   const now = new Set(current.map((entry) => entry.path));
   const changes = { added: [], modified: [], removed: [] };
+  const addedEntries = new Map();
+  const removedEntries = new Map();
   for (const entry of current) {
     if (entry.state === 'unverified') continue;
     const old = before.get(entry.path);
-    if (!old || old.type === 'unknown') changes.added.push(entry.path);
-    else if (changed(old, entry)) changes.modified.push(entry.path);
+    if (!old || old.type === 'unknown') {
+      changes.added.push(entry.path);
+      addedEntries.set(entry.path, entry);
+    } else if (changed(old, entry)) changes.modified.push(entry.path);
   }
   for (const entry of previous) {
-    if (!now.has(entry.path)) changes.removed.push(entry.path);
+    if (!now.has(entry.path)) {
+      changes.removed.push(entry.path);
+      removedEntries.set(entry.path, entry);
+    }
   }
+  // Metadatos no enumerables por delta para que observador y sesión no retengan todo el índice en RAM.
+  Object.defineProperties(changes, {
+    addedEntries: { value: addedEntries, configurable: true },
+    removedEntries: { value: removedEntries, configurable: true },
+  });
   return changes;
 }
 
@@ -110,7 +122,7 @@ function requireSameScanScope(before, after) {
 export function createFolderIndexer({
   baseDirectory, resolveScope, maxEntries = DEFAULT_MAX_ENTRIES,
   pythonExecutable = process.platform === 'win32' ? 'python' : 'python3',
-  signal: lifecycleSignal, resourceSample,
+  signal: lifecycleSignal, resourceSample, backgroundGate = null,
 } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica la ruta absoluta de la Base del Motor.');
@@ -227,8 +239,14 @@ export function createFolderIndexer({
       const signal = signals.length ? AbortSignal.any(signals) : undefined;
       signal?.throwIfAborted();
       const requestedScope = await authorized(scopeId);
+      if (priority === 'background') {
+        await backgroundGate?.waitForForegroundIdle?.({ signal });
+      }
       return governor.run(() => exclusive(scopeId, async () => {
         signal?.throwIfAborted();
+        if (priority === 'background') {
+          await backgroundGate?.yieldIfNeeded?.({ signal });
+        }
         let scope;
         const previous = await store.exclusive(scopeId, async () => {
           // A queued request keeps its authorization identity, but must use
@@ -246,6 +264,9 @@ export function createFolderIndexer({
         // El recorrido no retiene el bloqueo. Se descarta si cambió su base.
         requireSameScanScope(scope, await authorized(scopeId));
         signal?.throwIfAborted();
+        if (priority === 'background') {
+          await backgroundGate?.yieldIfNeeded?.({ signal });
+        }
         return store.exclusive(scopeId, async () => {
           requireSameScanScope(scope, await authorized(scopeId));
           const latest = boundIndex(await store.load(scopeId), scope);
@@ -499,5 +520,8 @@ export function createFolderIndexer({
         return revoke ? revoked : removed;
       }));
     },
+
+    /** Libera los índices en caché de RAM cuando el Motor entra en reposo ligero. */
+    clearCache: store.clearCache,
   });
 }

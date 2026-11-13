@@ -50,7 +50,7 @@ function createAudit(baseDirectory) {
  * @param {{ layout: object, motorVersion: string, log?: Function, observe?: boolean, functionExecutors?: object }} options
  */
 export async function openSession({ layout, motorVersion, log = () => {}, observe = true, functionExecutors = {},
-  motorFactory = openMotor }) {
+  motorFactory = openMotor, backgroundGate = null }) {
   const releaseStartup = layout.product ? await lockInstallation(layout.root, { pythonExecutable: layout.pythonExecutable }) : async () => {};
   try {
   await ensureUserDataDirectory(layout);
@@ -63,6 +63,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     userDataDirectory: layout.userDataDirectory,
     functionExecutors,
     signal: lifecycle.signal,
+    backgroundGate,
   });
   const policy = createAccessPolicy({ baseDirectory: motor.baseDirectory, getAuthorizedFolder: motor.getAuthorizedFolder });
   const requests = createConsentRequests(motor.baseDirectory);
@@ -126,26 +127,22 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     return state;
   }
 
-  async function indexedEntries(folderId) {
-    const index = await motor.readFolderIndex(folderId).catch(() => null);
-    return index ? new Map(index.entries.map((entry) => [entry.path, entry])) : null;
-  }
-
-  /** Anota lo desaparecido usando el índice anterior y avanza al nuevo, en orden por carpeta. */
-  function trackRemovals(folderId, removed) {
+  /** Anota lo desaparecido usando las entradas salientes del delta sin retener todo el índice en RAM. */
+  function trackRemovals(folderId, changes) {
+    const removed = changes?.removed ?? [];
+    const previous = changes?.removedEntries ?? null;
     const state = track(folderId);
     state.chain = state.chain.then(async () => {
-      if (removed.length > 0 && state.entries) await removals.record(folderId, removed, state.entries);
+      if (removed.length > 0 && previous) await removals.record(folderId, removed, previous);
       // Lo que desapareció ya no tiene propiedades: un elemento nuevo con ese nombre no las hereda.
       if (removed.length > 0) await motor.dropProperties(folderId, removed).catch(() => {});
-      state.entries = await indexedEntries(folderId);
     }).catch((error) => log('aviso', 'No se pudo anotar lo eliminado', { carpeta: folderId, error: String(error) }));
     return state.chain;
   }
 
   function onReport(report) {
     const state = track(report.folderId);
-    if (report.type === 'reconciled') trackRemovals(report.folderId, report.changes?.removed ?? []);
+    if (report.type === 'reconciled') trackRemovals(report.folderId, report.changes);
     state.lastReport = { type: report.type, at: new Date().toISOString(), ...(report.code ? { code: report.code } : {}) };
     if (report.type === 'error' || report.type === 'degraded') {
       state.lastError = report.code ?? null;
@@ -198,7 +195,6 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     // El índice anterior permite describir lo que desapareció mientras Mind estuvo cerrado.
     state.ready = scanSlot(async () => {
       state.configuration = JSON.stringify(await motor.getAuthorizedFolder(folderId));
-      state.entries ??= await indexedEntries(folderId);
       lifecycle.signal.throwIfAborted();
       return observer.observe(folderId);
     }).then((status) => {
@@ -260,6 +256,21 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     return syncing;
   }
 
+  function ensureSyncTimer() {
+    if (syncTimer || !observe || !started || closed) return;
+    syncTimer = setInterval(() => {
+      if (!observer || Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) {
+        sync().catch((error) => log('aviso', 'Sincronización del registro fallida', { error: String(error) }));
+      }
+    }, OWNER_CHECK_MS);
+    syncTimer.unref?.();
+  }
+
+  async function clearCaches() {
+    motor.clearCache?.();
+    await motor.unloadConversationSearch?.();
+  }
+
   const extensions = [];
   const api = Object.freeze({
     id: sessionId,
@@ -288,14 +299,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
         started = false;
         throw error;
       }
-      if (observe && !closed) {
-        syncTimer = setInterval(() => {
-          if (!observer || Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) {
-            sync().catch((error) => log('aviso', 'Sincronización del registro fallida', { error: String(error) }));
-          }
-        }, OWNER_CHECK_MS);
-        syncTimer.unref?.();
-      }
+      ensureSyncTimer();
     },
 
     sync,
@@ -339,10 +343,9 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
         }
         if (await motor.readFolderIndex(folderId)) return { status: 'current' };
       }
-      const state = track(folderId);
-      state.entries ??= await indexedEntries(folderId);
+      track(folderId);
       const indexed = await motor.indexFolder(folderId);
-      await trackRemovals(folderId, indexed.changes?.removed ?? []);
+      await trackRemovals(folderId, indexed.changes);
       return { status: 'reconciled', generation: indexed.generation };
     },
 
@@ -354,9 +357,8 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       const state = track(folderId);
       state.halted = null;
       state.ready = null;
-      state.entries ??= await indexedEntries(folderId);
       const indexed = await motor.indexFolder(folderId);
-      await trackRemovals(folderId, indexed.changes?.removed ?? []);
+      await trackRemovals(folderId, indexed.changes);
       return indexed;
     },
 
@@ -388,11 +390,37 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       await observer?.unobserve(folderId).catch(() => {});
     },
 
+    /** Libera cachés de índices en RAM y descarga el subproceso semántico sin cerrar la sesión. */
+    clearCaches,
+
+    /** Pausa sondeos periódicos y libera cachés en RAM durante el reposo ligero. */
+    async pauseIdle() {
+      clearInterval(syncTimer);
+      syncTimer = null;
+      clearTimeout(registryWake);
+      registryWake = null;
+      observer?.pausePeriodic?.();
+      await clearCaches();
+    },
+
+    /** Reanuda la observación periódica al salir del reposo ligero. */
+    resumeIdle() {
+      if (closed) return;
+      observer?.resumePeriodic?.();
+      if (started && observe) {
+        ensureSyncTimer();
+        if (!observer || Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) {
+          sync().catch((error) => log('aviso', 'Sincronización del registro fallida', { error: String(error) }));
+        }
+      }
+    },
+
     async close() {
       if (closing) return closing;
       closed = true;
       lifecycle.abort(new MotorError('SESSION_CLOSED', 'La sesión se cerró.'));
       clearInterval(syncTimer);
+      syncTimer = null;
       clearTimeout(registryWake);
       registryWatcher?.close();
       registryWatcher = null;

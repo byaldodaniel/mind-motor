@@ -9,12 +9,24 @@ import { lockInstallation } from './installation-lock.js';
 import { acquireOwnerFileLock, recoverAbandonedOwnerFile } from './process-identity.js';
 import { liveSessions } from './session.js';
 import { productPaths, productRuntime } from './layout.js';
+import { stopCentralMotor } from './connector.js';
 import { readManifestFile, hashFile, scanTree, verifyTree, comparePackageVersions, supportsProductTarget, validateManifest } from './product-files.js';
 
 const error = (code, message) => new MotorError(code, message);
 const has = async p => !!(await fs.lstat(p).catch(e => { if(e.code === 'ENOENT') return null; throw e; }));
 const within = (a,b) => { const r = path.relative(a,b); return r === '' || (!r.startsWith('..'+path.sep) && r !== '..' && !path.isAbsolute(r)); };
 const manifestPath = m => m.layoutVersion === 2 ? 'Sistema/mind-producto.json' : 'mind-producto.json';
+
+async function drainIdleCentralMotor(baseDirectory, root, current) {
+  const candidates = new Set([baseDirectory, productPaths(root, current).baseDirectory].filter(Boolean));
+  for (const dir of candidates) {
+    try {
+      await stopCentralMotor(dir, { onlyIfIdle: true, timeoutMs: 8_000 });
+    } catch {
+      // Si el drenado no aplica o falla, sessionState decide si hay sesiones activas reales.
+    }
+  }
+}
 function relativePath(root,p) {
   const r = path.relative(root,p).split(path.sep).join('/');
   if (!r || r.split('/').some(s => s === '..' || s === '.' || !s) || path.isAbsolute(r)) throw error('UPDATE_JOURNAL_INVALID','Ruta fuera de la instalación.');
@@ -251,6 +263,7 @@ export async function runUpdateTransaction(options,h){
     const summary={from:current.mindVersion,to:incoming.mindVersion,fromRevision:current.packageRevision??0,toRevision:incoming.packageRevision??0,platform:`${target.platform}-${target.arch}`,files:Object.keys(incoming.files).length,downgrade:order<0,reinstall:order===0,base:stored===null?'sin crear':`formato ${stored}`,supportedBase:supported};
     if(!(await confirm(summary))){await safeRemove(root,work);await fs.rm(journalFile);return {status:'cancelada',...summary};}
     unlockGate=await lockInstallation(root,{pythonExecutable});
+    await drainIdleCentralMotor(baseDirectory,root,current);
     try{await sessionState(baseDirectory,root,current,pythonExecutable);}catch(e){if(['MIND_IN_USE','SESSION_IDENTITY_UNKNOWN'].includes(e.code)){e.prepared=true;report(e.message);}throw e;}
     const keep=new Set();for(const g of groups(incoming))if(await unchanged(root,current,incoming,g))keep.add(g);
     let previousMcp;

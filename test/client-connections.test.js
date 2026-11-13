@@ -71,7 +71,7 @@ const basic = f => `[mcp_servers.mind]\ncommand = ${JSON.stringify(f.legacy.node
  });
 
  test('JSON conocidos actualizan solo command/args y preservan texto, env y servidores ajenos',async t=>{
- const f=await fixture(t),files=[['Claude Code','.claude.json'],['Gemini CLI','.gemini/settings.json'],['Antigravity','.gemini/antigravity/mcp_config.json']];
+ const f=await fixture(t),files=[['Claude Code','.claude.json'],['Gemini CLI','.gemini/settings.json'],['Antigravity','.gemini/config/mcp_config.json']];
  const text='{\n "mcpServers": {\n "mind": { "command": '+JSON.stringify(f.legacy.nodeExecutable)+', "args": ['+JSON.stringify(f.oldEntry)+', "mcp", "--base", "externa"], "env": { "TOKEN": "secreto-ficticio-json" }, "disabled": true },\n "other": { "command": "otro", "env": {"KEEP": "igual"} }\n }, "personal": 42\n}\n';
  for(const [,relative]of files){const file=path.join(f.home,relative);await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,text);}
  const results=await updateManagedClientConnections(f.options);

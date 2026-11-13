@@ -1,12 +1,19 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { parentPort, workerData } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 
 let extractor;
+const directory = process.argv[2];
+
+async function send(message) {
+  if (typeof process.send === 'function' && process.connected) {
+    process.send(message);
+  }
+}
+
 async function load() {
-  const directory = workerData.directory;
+  if (!directory) throw new Error('Falta la ruta del componente semántico.');
   const manifest = JSON.parse(await fs.readFile(path.join(directory, 'manifest.json'), 'utf8'));
   // Código y pesos pertenecen al programa de confianza, nunca a la Base del usuario.
   for (const file of manifest.files) {
@@ -40,10 +47,11 @@ async function load() {
     dtype: 'uint8', device: 'auto', session_options: { executionProviders: ['wasm'] },
   });
 }
-parentPort.on('message', async ({ id, texts }) => {
+process.on('disconnect', () => process.exit(0));
+process.on('message', async ({ id, texts }) => {
   try {
     if (!extractor) await load();
     const tensor = await extractor(texts, { pooling: 'mean', normalize: true, truncation: true, max_length: 512 });
-    parentPort.postMessage({ id, vectors: tensor.tolist() });
-  } catch (error) { parentPort.postMessage({ id, error: String(error.message).slice(0, 300) }); }
+    await send({ id, vectors: tensor.tolist() });
+  } catch (error) { await send({ id, error: String(error.message).slice(0, 300) }); }
 });

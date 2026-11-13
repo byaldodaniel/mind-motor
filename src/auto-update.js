@@ -236,7 +236,7 @@ export async function launch(args) {
     filtered.push(args[index]);
   }
   const command = filtered[0];
-  if (!process.env.MIND_UPDATE_RESTART && !['version', '--version', 'actualizar', 'corregir', 'preparar', 'ayuda', '--help', '-h'].includes(command ?? args[0])) {
+  if (!process.env.MIND_UPDATE_RESTART && !['version', '--version', 'actualizar', 'corregir', 'preparar', 'despertar', 'apagar', 'mcp', 'inicio', 'estado', 'herramienta', 'ayuda', '--help', '-h'].includes(command ?? args[0])) {
     const baseIndex = args.lastIndexOf('--base');
     const result = await checkForUpdate({ baseDirectory: baseIndex >= 0 ? args[baseIndex + 1] : undefined, report: message => process.stderr.write(`${message}\n`) });
     if (result.status === 'actualizada') {
