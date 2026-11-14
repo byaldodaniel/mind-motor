@@ -50,8 +50,8 @@ function createAudit(baseDirectory) {
  * @param {{ layout: object, motorVersion: string, log?: Function, observe?: boolean, functionExecutors?: object }} options
  */
 export async function openSession({ layout, motorVersion, log = () => {}, observe = true, functionExecutors = {},
-  motorFactory = openMotor, backgroundGate = null }) {
-  const releaseStartup = layout.product ? await lockInstallation(layout.root, { pythonExecutable: layout.pythonExecutable }) : async () => {};
+  motorFactory = openMotor, backgroundGate = null, installationLeaseHeld = false }) {
+  const releaseStartup = layout.product && !installationLeaseHeld ? await lockInstallation(layout.root, { pythonExecutable: layout.pythonExecutable }) : async () => {};
   try {
   await ensureUserDataDirectory(layout);
   const base = await ensureBase(layout.baseDirectory, { motorVersion, protectedFrom: layout.motorDirectory });

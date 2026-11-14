@@ -303,6 +303,9 @@ export async function run({ parameters, layout, print }) {
 }
 
 
+/** prepareOnly deja el paquete verificado con el Motor vivo. assistedVerification exige un
+ * verificador de la Base real que cierre su Motor antes de devolver; recibe contexto
+ * {baseDirectory, previousBaseFormat, supportedBaseFormat}. */
 export async function updateMind(options) {
   return runUpdateTransaction(options, { prepare, protectBase, supportedBaseFormat, baseFormat, smokeTest, moveEntry });
 }

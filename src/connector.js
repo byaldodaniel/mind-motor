@@ -4,12 +4,15 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MotorError } from './errors.js';
 import { FOLD_CASE } from './paths.js';
 import { classifyToolPriority, QUEUE_PRIORITY } from './smart-queue.js';
+import { launchIndependent } from './independent-launch.js';
+import { waitForHandoff } from './update-handoff-state.js';
+import { productPaths, productRuntime } from './layout.js';
+import { readManifestFile } from './product-files.js';
 
 export const CONNECTOR_STATE_FILE = 'conector.json';
 export const CONNECTOR_SECRET_FILE = 'conector-secreto.json';
@@ -282,6 +285,9 @@ export async function checkHealthyConnector(baseDirectory) {
 function daemonEnvironment(errorFile) {
   const env = { ...process.env, NODE_OPTIONS: '', MIND_MOTOR_ERROR_FILE: errorFile };
   delete env.MIND_BRIDGE_RELAYED;
+  delete env.MIND_CONEXION;
+  // El puente se aligera con un solo hilo de libuv; el Motor trabaja con disco en paralelo.
+  if (env.MIND_PUENTE_LIGERO === '1') { delete env.UV_THREADPOOL_SIZE; delete env.MIND_PUENTE_LIGERO; }
   return env;
 }
 
@@ -301,39 +307,56 @@ function defaultNodeExecutable(layout) {
  * «El primero enciende»: reutiliza el Motor Central vivo en <10 ms o lo despierta en
  * segundo plano sin ventanas y espera hasta que publique su puerto y salud.
  */
-export async function ensureCentralMotor({ layout, baseDirectory, startupTimeoutMs = 20_000 } = {}) {
+export async function ensureCentralMotor({ layout, baseDirectory, startupTimeoutMs = 20_000, launch = launchIndependent, waitForUpdate = waitForHandoff } = {}) {
   const targetBase = layout?.baseDirectory ?? baseDirectory;
   if (typeof targetBase !== 'string' || !path.isAbsolute(targetBase)) {
     throw new MotorError('INVALID_BASE', 'La ruta de la Base debe ser absoluta.');
   }
+  // Un relevo que sustituye/verifica el programa es el único que puede encender
+  // el candidato. Los puentes y la consola esperan sin crear un Motor competidor.
+  async function waitForProgram() {
+    if (!layout?.root) return false;
+    const result = await waitForUpdate({ root: layout.root, pythonExecutable: layout.pythonExecutable });
+    if (result?.waited) {
+      const manifest = await readManifestFile(layout.root);
+      if (!manifest) throw new MotorError('PRODUCT_MANIFEST_INVALID', 'Falta el manifiesto después de actualizar Mind.');
+      layout = { ...layout, ...productPaths(layout.root, manifest), manifest, runtime: productRuntime(layout.root, manifest) };
+      layout.pythonExecutable = layout.runtime.pythonExecutable;
+    }
+    return result?.waited === true;
+  }
+  await waitForProgram();
   const existing = await checkHealthyConnector(targetBase);
   if (existing) return { ...existing, spawned: false };
+  // La quietud pudo empezar durante la comprobación HTTP anterior.
+  if (await waitForProgram()) {
+    const ready = await checkHealthyConnector(targetBase);
+    if (ready) return { ...ready, spawned: false };
+  }
 
   const nodeExecutable = defaultNodeExecutable(layout);
   const entrypoint = defaultEntrypoint(layout);
   const args = [entrypoint, 'motor', '--base', targetBase];
   const errorFile = newStartupErrorFile();
-  const child = spawn(nodeExecutable, args, {
-    detached: true,
-    windowsHide: true,
+  // El Motor sirve a todos los chats: no debe morir cuando se cierra el cliente que
+  // lo encendió (en Windows, el Job Object del cliente lo arrastraría).
+  const motorEnvironment = daemonEnvironment(errorFile);
+  // Un relevista usa Python de su snapshot. El Motor normal debe conservar el
+  // ejecutor de la instalación que seguirá existiendo tras limpiar ese snapshot.
+  if (layout?.pythonExecutable) motorEnvironment.MIND_PYTHON = layout.pythonExecutable;
+  const launched = await launch({
+    executable: nodeExecutable,
+    args,
     cwd: os.tmpdir(),
-    stdio: 'ignore',
-    env: daemonEnvironment(errorFile),
+    env: motorEnvironment,
   });
-  let exited = null;
-  child.once('error', (error) => {
-    exited = { error };
-  });
-  child.once('exit', (code, signal) => {
-    if (!exited) exited = { code, signal };
-  });
-  child.unref();
 
   const deadline = Date.now() + startupTimeoutMs;
   try {
     while (Date.now() < deadline) {
       const ready = await checkHealthyConnector(targetBase);
-      if (ready) return { ...ready, spawned: true };
+      if (ready) return { ...ready, spawned: true, launch: { mecanismo: launched.mecanismo, independencia: launched.independencia, aviso: launched.aviso ?? null } };
+      const exited = launched.exited();
       if (exited !== null) {
         await delay(25);
         const raceWinner = await checkHealthyConnector(targetBase);
@@ -347,7 +370,7 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
         }
         throw new MotorError(
           'MOTOR_START_FAILED',
-          `El Motor Central no pudo iniciar (${exited.code ?? exited.signal}).`,
+          `El Motor Central no pudo iniciar (${exited.code ?? exited.signal ?? 'terminó al arrancar'}).`,
         );
       }
       await delay(STARTUP_POLL_MS);
@@ -438,7 +461,7 @@ export async function callCentralRpc({ layout, baseDirectory, payload, startupTi
 
 /** Solicita el apagado limpio del Motor Central vivo y espera a que libere sus archivos e índices. */
 export async function stopCentralMotor(target = {}, options = {}) {
-  const { baseDirectory, timeoutMs = 10_000, onlyIfIdle = false } = typeof target === 'string'
+  const { baseDirectory, timeoutMs = 10_000, onlyIfIdle = false, onlyIfQuiet = false, reason = null } = typeof target === 'string'
     ? { baseDirectory: target, ...options }
     : target;
   const healthy = await checkHealthyConnector(baseDirectory);
@@ -453,13 +476,18 @@ export async function stopCentralMotor(target = {}, options = {}) {
     response = await postRpc({
       port: healthy.state.port,
       token: healthy.token,
-      payload: onlyIfIdle ? { accion: 'apagar', soloSiInactivo: true } : { accion: 'apagar' },
+      payload: {
+        accion: 'apagar',
+        ...(onlyIfIdle ? { soloSiInactivo: true } : {}),
+        ...(onlyIfQuiet ? { soloSiQuieto: true } : {}),
+        ...(reason ? { motivo: reason } : {}),
+      },
       timeoutMs: Math.min(timeoutMs, 5_000),
     });
   } catch {
     // Puede cerrar el socket inmediatamente al aceptar apagar.
   }
-  if (onlyIfIdle && response?.busy === true) {
+  if ((onlyIfIdle || onlyIfQuiet) && response?.busy === true) {
     return false;
   }
   const deadline = Date.now() + timeoutMs;

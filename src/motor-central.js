@@ -4,14 +4,22 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MOTOR_VERSION } from './version.js';
 import { MotorError } from './errors.js';
-import { ensureBase } from './base-format.js';
+import { ensureBase, readBaseMarker } from './base-format.js';
+import { releaseOf } from './package-descriptor.js';
+import { takeUpdateReport } from './update-handoff.js';
 import { openSession } from './session.js';
 import { createWorkspaceAccess } from './workspace-access.js';
 import { createAgentTools, AGENT_INSTRUCTIONS } from './agent-tools.js';
 import { acquireOwnerFileLock } from './process-identity.js';
 import { createMcpProcessor, MAX_MESSAGE_BYTES, formatError, rpcError, INVALID_REQUEST, PARSE_ERROR, toolResult, toolError } from './mcp-core.js';
 import { createSmartQueue, QUEUE_PRIORITY, classifyToolPriority, resolveToolResourceKeys } from './smart-queue.js';
+import { LAUNCH_ENV, independenceOf } from './independent-launch.js';
 import {
+  CONNECTION_ID, QUIET_MS, createConnectionRegistry, connectionSummary, listPresence, quietness,
+} from './connections.js';
+import { takeNotice } from './update-assistant.js';
+import {
+  readConnectorState,
   baseIdOf,
   preferredPort,
   canonicalBaseDirectory,
@@ -38,6 +46,11 @@ const DEFAULT_SESSION_IDLE_MS = 15 * 60_000;
 // Al apagar, lo ya admitido dispone de este margen para terminar antes de cerrar la sesión.
 const DEFAULT_SHUTDOWN_DRAIN_MS = 5_000;
 const SSE_HEARTBEAT_MS = 25_000;
+// Descubrir actualizaciones: un rato después de encender (la primera llamada del chat
+// va antes) y luego cada 6 h mientras el Motor siga vivo. El propio estado respeta
+// su intervalo, así que encender muchas veces al día no multiplica las consultas.
+const DEFAULT_DISCOVER_DELAY_MS = 20_000;
+const DISCOVER_INTERVAL_MS = 6 * 60 * 60_000;
 const LOCK_WAIT_TIMEOUT_MS = 20_000;
 
 function serverInfo(motorVersion) {
@@ -104,7 +117,7 @@ function parseBody(req, maxBytes = MAX_MESSAGE_BYTES) {
  * Sin cabecera válida no hay ámbito: nunca se hereda el directorio del Motor.
  */
 export function parseWorkspaceHeader(raw) {
-  const empty = { cwd: null, paths: [] };
+  const empty = { cwd: null, paths: [], conexion: null, declared: false };
   if (typeof raw !== 'string' || !raw.trim()) return empty;
   try {
     const parsed = JSON.parse(Buffer.from(raw.trim(), 'base64url').toString('utf8'));
@@ -112,6 +125,9 @@ export function parseWorkspaceHeader(raw) {
     return {
       cwd: typeof parsed.cwd === 'string' && parsed.cwd.trim() ? parsed.cwd : null,
       paths: parseRpcPaths(parsed.paths),
+      // Identificador estable del chat (lo genera su puente); ampliación compatible del contrato.
+      conexion: typeof parsed.conexion === 'string' && CONNECTION_ID.test(parsed.conexion) ? parsed.conexion : null,
+      declared: true,
     };
   } catch {
     return empty;
@@ -182,10 +198,19 @@ export async function startCentralMotor({
   sessionIdleMs = DEFAULT_SESSION_IDLE_MS,
   shutdownDrainMs = DEFAULT_SHUTDOWN_DRAIN_MS,
   observe = true,
+  verificationToken = null,
+  publishConnector = true,
   errorFile = null,
   sessionFactory = openSession,
   log = () => {},
   onShutdown,
+  launchMechanism = process.env[LAUNCH_ENV] ?? 'directo',
+  discoverDelayMs = DEFAULT_DISCOVER_DELAY_MS,
+  discoverUpdates = null,
+  updateRoot = undefined,
+  // Ventana sin peticiones reales que exige la regla de quietud (las pruebas la acortan).
+  quietMs = Number.isSafeInteger(Number(process.env.MIND_QUIETUD_MS)) && Number(process.env.MIND_QUIETUD_MS) >= 0 && process.env.MIND_QUIETUD_MS !== ''
+    ? Number(process.env.MIND_QUIETUD_MS) : QUIET_MS,
 } = {}) {
   let canonicalBase = await canonicalBaseDirectory(layout.baseDirectory);
   try {
@@ -215,8 +240,10 @@ export async function startCentralMotor({
   let activityState = 'active';
   let lastActivityAt = Date.now();
   let sessionSweep = null;
+  let discoverTimer = null;
   const idleTimers = { light: null, shutdown: null };
   const mcpSessions = new Map();
+  const connections = createConnectionRegistry();
   const inFlight = new Set();
 
   function clearIdleTimers() {
@@ -269,6 +296,7 @@ export async function startCentralMotor({
       shuttingDown = true;
       clearIdleTimers();
       clearInterval(sessionSweep);
+      clearTimeout(discoverTimer);
       await removeConnectorState(canonicalBase);
       const drainDeadline = Date.now() + shutdownDrainMs;
       while (activeWork > 0 && Date.now() < drainDeadline) await delay(25);
@@ -324,6 +352,16 @@ export async function startCentralMotor({
     return items.length > 0 && items.every((item) => item && typeof item === 'object' && item.method === 'ping');
   }
 
+  // Un `conector.json` que sobrevive a su Motor significa que este no se apagó en
+  // orden (cliente cerrado, equipo apagado, proceso terminado a la fuerza). Se
+  // registra para poder medirlo; la Base ya está protegida por sus propios bloqueos.
+  const previous = await readConnectorState(canonicalBase);
+  const previousEnd = previous && previous.pid !== process.pid
+    ? { cierre: 'abrupto', pid: previous.pid, iniciado: previous.startedAt ?? null, version: previous.motorVersion ?? null }
+    : { cierre: 'ordenado' };
+  if (previousEnd.cierre === 'abrupto') log('aviso', 'El Motor anterior terminó sin cierre ordenado', previousEnd);
+  const launch = { mecanismo: launchMechanism, independencia: independenceOf(launchMechanism) };
+
   try {
     const smartQueue = createSmartQueue();
     session = await sessionFactory({ layout, motorVersion, log, observe, backgroundGate: smartQueue });
@@ -372,28 +410,64 @@ export async function startCentralMotor({
      * leyendo y escribiendo en ella, como cuando cada chat era un proceso aparte. La
      * exclusión se recupera antes de que la herramienta continúe.
      */
-    function releasingLocksWhileAsking(connection) {
+    function releasingLocksWhileAsking(connection, sessionId = null) {
       return new Proxy(connection, {
         get(target, property, receiver) {
           if (property !== 'request') return Reflect.get(target, property, receiver);
-          return (method, params, options) => smartQueue.suspendWhile(() => target.request(method, params, options));
+          return (method, params, options) => smartQueue.suspendWhile(async () => {
+            // Un formulario abierto en un chat impide sustituir el programa: el usuario está decidiendo.
+            const done = method === 'elicitation/create' && sessionId ? connections.asking(sessionId) : () => {};
+            try { return await target.request(method, params, options); } finally { done(); }
+          });
         },
       });
     }
 
+    /** Conexiones de los chats: sesiones del Motor más puentes abiertos sin sesión ahora. */
+    async function connectionReport({ asking = null, ownWork = 0 } = {}) {
+      const presence = await listPresence(layout).catch(() => []);
+      const entries = connections.list({ asking });
+      // `activeWork` cuenta las peticiones de las sesiones y las de /rpc (consola,
+      // agentes sin MCP). Lo que no es de ninguna sesión, menos la propia llamada, es /rpc.
+      const rpcWork = Math.max(0, activeWork - totalSessionWork() - ownWork);
+      return {
+        conexiones: connectionSummary(entries, presence, { quietMs }),
+        quietud: quietness(entries, { activeWork: rpcWork, quietMs }),
+      };
+    }
+
+    function totalSessionWork() {
+      let total = 0;
+      for (const entry of connections.list()) total += entry.enCurso;
+      return total;
+    }
+
     /** Ejecuta una herramienta de un ámbito por la cola. `estado` añade quién la atiende. */
-    async function runTool({ tools, workspace, fallbackDir }, name, args, context) {
-      const value = await executeToolWithQueue(name, args, async () => {
+    async function runTool({ tools, workspace, fallbackDir, sessionId = null, conexion = null }, name, args, context) {
+      let value = await executeToolWithQueue(name, args, async () => {
         await workspace.beforeCall(name, args);
         return tools.call(name, args, context);
       }, { signal: context?.signal, fallbackDir });
-      if (name !== 'estado' || !value || typeof value !== 'object' || Array.isArray(value)) return value;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+      const acta = await takeUpdateReport({ layout, conexion }).catch(error => ({ estado: 'error-acta', error: { codigo: error.code, mensaje: error.message } }));
+      if (acta) value = { ...value, acta_actualizacion: acta };
+      // La consulta con la que empieza cada conversación lleva, una vez, el aviso de una entrega nueva.
+      if (name === 'destinos_consultar') {
+        const aviso = await takeNotice({ layout, conexion });
+        return aviso ? { ...value, aviso_actualizacion: aviso } : value;
+      }
+      if (name !== 'estado') return value;
+      const report = await connectionReport({ asking: sessionId, ownWork: sessionId ? 0 : 1 });
       // Permite detectar un puente de una versión hablando con un Motor de otra.
-      return { ...value, motor_central: { version: motorVersion, pid: process.pid, estado: activityState, sesiones: mcpSessions.size } };
+      return { ...value, motor_central: { version: motorVersion, pid: process.pid, estado: activityState, sesiones: mcpSessions.size,
+        independencia: launch.independencia, lanzamiento: launch.mecanismo, cierre_anterior: previousEnd },
+      conexiones: report.conexiones, quietud: report.quietud };
     }
 
-    function createIsolatedMcpSession({ workspacePaths = [], cwd = null } = {}) {
+    function createIsolatedMcpSession({ workspacePaths = [], cwd = null, conexion = null, declared = false } = {}) {
       const id = randomUUID();
+      // Con cabecera de ámbito habla un puente de Mind; sin ella, un cliente por HTTP directo.
+      connections.open(id, { conexion, transporte: declared ? 'puente' : 'http', carpeta: cwd ?? workspacePaths[0] ?? null });
       const workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
       const sseStreams = new Set();
       const pendingSse = [];
@@ -420,9 +494,12 @@ export async function startCentralMotor({
         instructions: AGENT_INSTRUCTIONS,
         tools(connection) {
           const scope = {
-            tools: createAgentTools({ session: workspace.session, connection: releasingLocksWhileAsking(connection), log }),
+            tools: createAgentTools({ session: workspace.session, connection: releasingLocksWhileAsking(connection, id), log }),
             workspace,
             fallbackDir: workspacePaths[0] ?? cwd,
+            sessionId: id,
+            // Sin puente (HTTP directo) la conversación es la sesión MCP.
+            conexion: conexion ?? `sesion:${id}`,
           };
           return {
             definitions: scope.tools.definitions,
@@ -430,12 +507,14 @@ export async function startCentralMotor({
           };
         },
         onInitialized: async (connection) => {
+          connections.identify(id, connection.clientInfo, connection.clientCapabilities);
           await session.start();
           await session.sync();
           await workspace.initialize(connection);
         },
         onRootsChanged: (connection) => workspace.refresh(connection),
         onClose: async () => {
+          connections.close(id);
           for (const stream of sseStreams) {
             try { stream.end(); } catch {}
           }
@@ -488,7 +567,7 @@ export async function startCentralMotor({
         }
       } else if (!Array.isArray(body) && body?.method === 'initialize') {
         const declared = parseWorkspaceHeader(req.headers['x-mind-workspace']);
-        mcpSession = createIsolatedMcpSession({ workspacePaths: declared.paths, cwd: declared.cwd });
+        mcpSession = createIsolatedMcpSession({ workspacePaths: declared.paths, cwd: declared.cwd, conexion: declared.conexion, declared: declared.declared });
       } else {
         return sendJson(res, 400, formatError(body?.id ?? null, rpcError(INVALID_REQUEST, 'Falta cabecera Mcp-Session-Id.')));
       }
@@ -537,7 +616,10 @@ export async function startCentralMotor({
       try {
         replies = isKeepaliveMcpBody(body)
           ? await runMessages()
-          : await trackWork(runMessages);
+          : await trackWork(async () => {
+            const done = connections.begin(mcpSession.id);
+            try { return await runMessages(); } finally { done(); }
+          });
       } finally {
         mcpSession.activeRequests -= 1;
         mcpSession.lastSeenAt = Date.now();
@@ -612,6 +694,20 @@ export async function startCentralMotor({
         return sendJson(res, 400, { ok: false, error: { codigo: 'INVALID_RPC', mensaje: 'Se requiere una acción RPC válida.' } });
       }
 
+      if (body.accion === 'verificar-actualizacion' && verificationToken) {
+        const marker = await readBaseMarker(canonicalBase);
+        const folders = await session.motor.listAuthorizedFolders();
+        const continuity = await session.motor.listContinuityIds();
+        for (const id of continuity) {
+          if (!(await session.motor.getContinuity(id))) throw new MotorError('UPDATE_BASE_READ_FAILED', 'No se pudo leer un registro de continuidad.');
+        }
+        const functions = await session.motor.listFunctions();
+        return sendJson(res, 200, { ok: true, baseDirectory: canonicalBase, baseId: marker.baseId,
+          baseFormatVersion: marker.version, release: releaseOf(layout.manifest),
+          carpetas: folders.length, continuidad: continuity.length, funciones: functions.length, node: process.execPath, python: layout.pythonExecutable });
+      }
+      if (verificationToken) return sendJson(res, 503, { error: 'UPDATE_VERIFICATION_ONLY' });
+
       if (body.accion === 'ping') {
         return sendJson(res, 200, {
           ok: true,
@@ -624,7 +720,17 @@ export async function startCentralMotor({
         });
       }
 
+      // Para quien va a sustituir el programa: ¿hay algún chat trabajando o decidiendo?
+      if (body.accion === 'quietud') {
+        const report = await connectionReport();
+        return sendJson(res, 200, { ok: true, ...report.quietud, conexiones: report.conexiones, quietMs });
+      }
+
       if (body.accion === 'apagar') {
+        if (body.soloSiQuieto === true) {
+          const { quietud } = await connectionReport();
+          if (!quietud.quieto) return sendJson(res, 200, { ok: false, busy: true, impiden: quietud.impiden });
+        }
         if (body.soloSiInactivo === true && activeWork > 0) {
           return sendJson(res, 200, {
             ok: false,
@@ -633,10 +739,11 @@ export async function startCentralMotor({
             sessions: mcpSessions.size,
           });
         }
-        sendJson(res, 200, { ok: true, apagando: true });
-        setImmediate(() => {
-          shutdown('rpc').catch((error) => log('error', 'Error al apagar Motor Central por RPC', { error: String(error) }));
-        });
+        // El apagado empieza antes de responder: desde este instante, lo que llegue
+        // recibe 503 y se repite contra el Motor siguiente.
+        const motivo = typeof body.motivo === 'string' && /^[a-z-]{1,40}$/u.test(body.motivo) ? body.motivo : 'rpc';
+        shutdown(motivo).catch((error) => log('error', 'Error al apagar Motor Central por RPC', { error: String(error) }));
+        sendJson(res, 200, { ok: true, apagando: true }, { Connection: 'close' });
         return;
       }
 
@@ -672,13 +779,15 @@ export async function startCentralMotor({
           };
 
           if (body.accion === 'inicio') {
-            const formatted = toolResult(await runTool(scope, 'destinos_consultar', {}, context));
+            const { aviso_actualizacion: aviso = null, ...destinos } = await runTool(scope, 'destinos_consultar', {}, context);
+            const formatted = toolResult(destinos);
             return sendJson(res, 200, {
               ok: true,
               mind: layout?.manifest?.mindVersion ?? motorVersion,
               motor: motorVersion,
               instrucciones: AGENT_INSTRUCTIONS,
               destinos: formatted.structuredContent,
+              ...(aviso ? { aviso_actualizacion: aviso } : {}),
             });
           }
 
@@ -735,6 +844,7 @@ export async function startCentralMotor({
           ...(nonce && HEALTH_NONCE_PATTERN.test(nonce) ? { proof: healthProof(token, nonce, baseId, boundPort) } : {}),
           pid: process.pid,
           motorVersion,
+          packageRevision: layout.manifest?.packageRevision ?? 0,
           startedAt,
           state: activityState,
           activeRequests: activeWork,
@@ -742,10 +852,16 @@ export async function startCentralMotor({
           sessions: mcpSessions.size,
           backgroundBusy: session.isBackgroundBusy?.() === true,
           queue: smartQueue.status(),
+          independence: launch.independencia,
+          launch: launch.mecanismo,
+          previousEnd: previousEnd.cierre,
         });
         return;
       }
 
+      if (verificationToken && (url.pathname !== '/rpc' || req.headers['x-mind-update-verification'] !== verificationToken)) {
+        return sendJson(res, 503, { error: 'UPDATE_VERIFICATION_ONLY' }, { Connection: 'close' });
+      }
       if (!constantTimeTokenMatch(req.headers.authorization, token)) {
         sendJson(res, 401, { error: 'UNAUTHORIZED' }, { 'WWW-Authenticate': 'Bearer' });
         return;
@@ -799,7 +915,7 @@ export async function startCentralMotor({
 
     boundPort = await bindLoopbackPort(httpServer, explicitPort ?? preferredPort(baseId));
 
-    await writeConnectorState(canonicalBase, {
+    if (publishConnector) await writeConnectorState(canonicalBase, {
       baseId,
       port: boundPort,
       pid: process.pid,
@@ -809,6 +925,31 @@ export async function startCentralMotor({
     });
 
     scheduleIdleTimers();
+
+    // Descubrir actualizaciones: solo el canal firmado (unos KB), nunca el paquete,
+    // siempre después de estar atendiendo y sin contar como actividad. No mantiene el
+    // Motor despierto: sus temporizadores no retienen el proceso.
+    const discoverRoot = updateRoot === undefined ? (layout?.product ? layout.root : null) : updateRoot;
+    if (discoverRoot && discoverDelayMs >= 0) {
+      const discover = async () => {
+        if (shuttingDown) return;
+        try {
+          const run = discoverUpdates ?? (await import('./auto-update.js')).discoverUpdate;
+          const result = await run({ root: discoverRoot });
+          if (result?.status === 'disponible') log('info', 'Hay una entrega nueva de Mind disponible', { version: result.mindVersion ?? result.release?.mindVersion ?? null });
+        } catch (error) {
+          log('aviso', 'No se pudo comprobar si hay actualizaciones', { codigo: error?.code ?? null, error: String(error?.message ?? error) });
+        }
+      };
+      discoverTimer = setTimeout(function tick() {
+        discover().finally(() => {
+          if (shuttingDown) return;
+          discoverTimer = setTimeout(tick, DISCOVER_INTERVAL_MS);
+          discoverTimer.unref?.();
+        });
+      }, discoverDelayMs);
+      discoverTimer.unref?.();
+    }
 
     // Sesiones abandonadas: su puente murió sin enviar DELETE.
     if (Number.isFinite(sessionIdleMs) && sessionIdleMs > 0) {
@@ -844,6 +985,7 @@ export async function startCentralMotor({
     await writeStartupError(errorFile, error);
     clearIdleTimers();
     clearInterval(sessionSweep);
+    clearTimeout(discoverTimer);
     if (httpServer) {
       try { httpServer.closeAllConnections?.(); httpServer.close(); } catch {}
     }

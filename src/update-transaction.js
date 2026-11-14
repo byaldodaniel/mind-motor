@@ -21,7 +21,9 @@ async function drainIdleCentralMotor(baseDirectory, root, current) {
   const candidates = new Set([baseDirectory, productPaths(root, current).baseDirectory].filter(Boolean));
   for (const dir of candidates) {
     try {
-      await stopCentralMotor(dir, { onlyIfIdle: true, timeoutMs: 8_000 });
+      // Solo si ningún chat trabaja, espera al usuario ni pidió algo en los últimos 30 s;
+      // si no, el Motor sigue vivo y la comprobación de sesiones deja la actualización preparada.
+      await stopCentralMotor(dir, { onlyIfIdle: true, onlyIfQuiet: true, reason: 'actualizacion', timeoutMs: 8_000 });
     } catch {
       // Si el drenado no aplica o falla, sessionState decide si hay sesiones activas reales.
     }
@@ -144,8 +146,88 @@ async function durableMove(root,journalFile,journal,from,to,testing,{copy=false}
   op.done=true;await writeJson(journalFile,journal);
   await testing.afterMove?.(journal.phase==='base'?'base':journal.phase==='placing'?'placed':'aside',relativePath(root,from));
 }
-async function rollback(root,file,j){
+// El verificador abre la Base real; únicamente estos archivos describen procesos, no datos.
+const transientBasePath = relative => relative.split('/').some(part => part.endsWith('.lock') || part.includes('.lock.abandonado-'))
+  || relative==='sesiones'||relative.startsWith('sesiones/')||relative.endsWith('.mind-recuperando')
+  || /^(?:conector\.json|motor-central\.log(?:\.1)?)$/u.test(relative);
+async function persistentBaseFiles(base){
+  const result=[];
+  for(const entry of await scanTree(base)){
+    if(transientBasePath(entry.path))continue;
+    if(entry.type!=='file')throw error('UPDATE_BASE_LINK','La Base contiene un enlace o un archivo especial; no se prepara una recuperación incompleta.');
+    resolve(base,entry.path);await noLinks(base,resolve(base,entry.path));result.push(entry);
+  }
+  return result;
+}
+async function durableCopy(from,to,expected){
+  await fs.mkdir(path.dirname(to),{recursive:true,mode:0o700});
+  const temporary=to+'.mind-recuperando';
+  const info=await fs.lstat(temporary).catch(e=>{if(e.code==='ENOENT')return null;throw e;});
+  if(info && (!info.isFile()||info.isSymbolicLink()))throw error('UPDATE_BASE_LINK','Un temporal de recuperación no es un archivo normal.');
+  await fs.copyFile(from,temporary);
+  if(await hashFile(temporary)!==expected)throw error('UPDATE_BASE_SNAPSHOT_ALTERED','La copia previa de la Base no coincide.');
+  const handle=await fs.open(temporary,'r+');try{await handle.sync();}finally{await handle.close();}
+  await fs.rename(temporary,to);
+}
+async function snapshotBase(root,file,j,{statfs=fs.statfs,testing={}}={}){
+  const base=j.baseDirectory,entries=await persistentBaseFiles(base),bytes=entries.reduce((total,entry)=>total+entry.size,0);
+  const disk=await statfs(root),available=Number(disk.bavail)*Number(disk.bsize),required=bytes+64*1024**2;
+  if(!Number.isFinite(available)||available<required)throw Object.assign(error('UPDATE_DISK_SPACE','No hay espacio para la copia previa obligatoria de la Base.'),{available,required});
+  const destination=resolve(root,j.work+'/base-previa');await noLinks(root,destination);
+  const snapshot={path:j.work+'/base-previa',files:Object.create(null),ready:false};
+  j.baseSnapshot=snapshot;j.phase='snapshotting';await writeJson(file,j);
+  await fs.mkdir(destination,{recursive:true,mode:0o700});
+  for(const entry of entries){
+    const hash=await hashFile(resolve(base,entry.path));
+    await durableCopy(resolve(base,entry.path),resolve(destination,entry.path),hash);snapshot.files[entry.path]=hash;await testing.afterSnapshot?.(entry.path);
+  }
+  snapshot.ready=true;j.phase='snapshotted';await writeJson(file,j);await testing.afterPhase?.('snapshot');
+}
+function validateBaseSnapshot(root,j){
+  const snapshot=j.baseSnapshot;
+  if(!snapshot)return;
+  validateManifest(j.currentManifest);validateManifest(j.incomingManifest);
+  if(!j.assistedVerification||snapshot.path!==j.work+'/base-previa'||typeof snapshot.ready!=='boolean'
+    ||!snapshot.files||typeof snapshot.files!=='object'||Array.isArray(snapshot.files)
+    ||typeof j.baseDirectory!=='string'||!path.isAbsolute(j.baseDirectory))throw error('UPDATE_JOURNAL_INVALID','La copia previa de la Base no es válida.');
+  for(const [relative,hash]of Object.entries(snapshot.files)){
+    resolve(j.baseDirectory,relative);
+    if(transientBasePath(relative)||!/^[a-f0-9]{64}$/u.test(hash))throw error('UPDATE_JOURNAL_INVALID','El inventario de la Base no es válido.');
+  }
+  const base=j.baseDirectory;
+  if(within(base,root)||groups(j.currentManifest).some(group=>within(resolve(root,group),base)))throw error('UPDATE_JOURNAL_INVALID','La Base de recuperación se solapa con el programa.');
+}
+async function restoreBaseSnapshot(root,file,j,testing={}){
+  if(!j.baseSnapshot?.ready)return;
+  validateBaseSnapshot(root,j);
+  const snapshot=j.baseSnapshot,source=resolve(root,snapshot.path),base=j.baseDirectory;
+  await noLinks(root,source);
+  // Acreditar toda la copia antes de tocar un solo dato de la Base.
+  const expected=Object.entries(snapshot.files);
+  for(const [relative,hash]of expected){
+    const stored=resolve(source,relative);await noLinks(source,stored);
+    if(await hashFile(stored)!==hash)throw error('UPDATE_BASE_SNAPSHOT_ALTERED','La copia previa de la Base cambió; se conserva la recuperación.');
+  }
+  j.phase='restoring-base';await writeJson(file,j);
+  await fs.mkdir(base,{recursive:true,mode:0o700});
+  const physical=await fs.realpath(base);
+  if(path.resolve(physical)!==path.resolve(base))throw error('UPDATE_BASE_LINK','La ruta física de la Base cambió; se conserva la recuperación.');
+  for(const entry of await persistentBaseFiles(base)){
+    if(Object.hasOwn(snapshot.files,entry.path)||entry.path.endsWith('.mind-recuperando'))continue;
+    const target=resolve(base,entry.path);await noLinks(base,target);await fs.unlink(target);await testing.afterRestore?.(entry.path);
+  }
+  for(const [relative,hash]of expected){
+    const target=resolve(base,relative);await noLinks(base,target);
+    await durableCopy(resolve(source,relative),target,hash);await testing.afterRestore?.(relative);
+  }
+  const after=await persistentBaseFiles(base);
+  if(after.length!==expected.length)throw error('UPDATE_BASE_RESTORE_FAILED','La Base restaurada conserva archivos inesperados.');
+  for(const entry of after)if(await hashFile(resolve(base,entry.path))!==snapshot.files[entry.path])throw error('UPDATE_BASE_RESTORE_FAILED','La Base restaurada no coincide con su copia previa.');
+  snapshot.restored=true;await writeJson(file,j);
+}
+async function rollback(root,file,j,testing={}){
   for(const op of [...j.operations].reverse()){
+    if(op.rolledBack===true)continue;
     const a=resolve(root,op.from), b=resolve(root,op.to);await noLinks(root,a);await noLinks(root,b);
     const ah=await has(a),bh=await has(b);
     if(op.kind==='copy'){
@@ -159,7 +241,9 @@ async function rollback(root,file,j){
       if(await hashFile(a)!==op.hash)throw error('UPDATE_ROLLBACK_FAILED','La preparación cambió.');
     }else if(ah&&bh)throw error('UPDATE_ROLLBACK_FAILED','Ambos extremos existen; se conserva la recuperación.');
     else if(!ah&&!bh)throw error('UPDATE_ROLLBACK_FAILED','Faltan ambos extremos de una operación.');
+    op.rolledBack=true;await writeJson(file,j);await testing.afterRollback?.(op.from);
   }
+  await restoreBaseSnapshot(root,file,j,testing);
   j.phase='rolled-back';j.operations=[];await writeJson(file,j);
 }
 export async function checkPreparationSpace(root,source,{statfs=fs.statfs,workerBytes=0}={}){
@@ -224,7 +308,7 @@ async function cleanLegacy(root){
   }
   return preserved;
 }
-async function recoverTransactionLocked(root,{pythonExecutable}={}){
+async function recoverTransactionLocked(root,{pythonExecutable,testing={}}={}){
   root=await fs.realpath(root);const directory=path.join(root,'Sistema','Actualizaciones');const file=path.join(directory,'transaccion.json');
   const stored=await readJson(file);if(!stored)return {status:'sin-operacion'};
   const j=stored.data;
@@ -241,13 +325,14 @@ async function recoverTransactionLocked(root,{pythonExecutable}={}){
     allowed.add(`${j.work}/configuracion/.mcp.json=>.mcp.json`);
     for(const op of j.operations)if(!allowed.has(`${op.from}=>${op.to}`))throw error('UPDATE_JOURNAL_INVALID','Una operación no pertenece al paquete.');
   }
+  if(j.baseSnapshot)validateBaseSnapshot(root,j);
   let releaseGate;
   if(!['prepared','committed','cleanup-pending','rolled-back'].includes(j.phase)){
     releaseGate=await lockInstallation(root,{pythonExecutable});
     try{
       const manifests=[j.currentManifest,j.incomingManifest].filter(Boolean);
       for(const manifest of manifests)for(const base of new Set([j.baseDirectory,productPaths(root,manifest).baseDirectory].filter(Boolean)))await sessionState(base,root,manifest,pythonExecutable);
-      await rollback(root,file,j);
+      await rollback(root,file,j,testing);
     }finally{await releaseGate();}
   }
   if(j.phase==='prepared')return {status:'preparada',journal:j};
@@ -264,7 +349,7 @@ export async function recoverUpdateTransaction(root,options={}){
   }finally{await release?.();}
 }
 export async function runUpdateTransaction(options,h){
-  let {root,source,baseDirectory,confirm=()=>true,force=false,report=()=>{},verifyInstalled=h.smokeTest,testing={},expectedRelease,expectedManifestSha256,pythonExecutable}=options;
+  let {root,source,baseDirectory,confirm=()=>true,force=false,report=()=>{},verifyInstalled=h.smokeTest,testing={},expectedRelease,expectedManifestSha256,pythonExecutable,prepareOnly=false,assistedVerification=false}=options;
   root=await fs.realpath(path.resolve(root));let current=await readManifestFile(root);
   if(current)pythonExecutable??=process.env.MIND_PYTHON??productRuntime(root,current).pythonExecutable;
   const directory=path.join(root,'Sistema','Actualizaciones');await noLinks(root,directory);await fs.mkdir(directory,{recursive:true});
@@ -279,8 +364,9 @@ export async function runUpdateTransaction(options,h){
     baseDirectory=await fs.realpath(baseDirectory).catch(e=>{if(e.code==='ENOENT')return baseDirectory;throw e;});
     if(recovered.status==='preparada'){
       j=recovered.journal;tree=path.join(work,'paquete');incoming=await readManifestFile(tree);
+      if(path.resolve(j.baseDirectory)!==baseDirectory)throw error('UPDATE_BASE_CHANGED','La actualización preparada pertenece a otra Base.');
       if(!incoming || !(await verifyTree(tree,incoming)).ok)throw error('UPDATE_PREPARED_INVALID','El paquete preparado ya no coincide; se conserva para revisión.');
-      if(source && path.resolve(source)!==j.source)throw error('UPDATE_PREPARED_EXISTS','Ya existe otra actualización preparada.');
+      if(source && await fs.realpath(path.resolve(source))!==j.source)throw error('UPDATE_PREPARED_EXISTS','Ya existe otra actualización preparada.');
     }else{
       if(!source) return {status:'sin-operacion'};
       source=await fs.realpath(path.resolve(source));
@@ -304,6 +390,8 @@ export async function runUpdateTransaction(options,h){
     if(stored!==null&&stored>supported)throw error('UPDATE_BASE_INCOMPATIBLE','El paquete no admite el formato de esta Base.');
     const summary={from:current.mindVersion,to:incoming.mindVersion,fromRevision:current.packageRevision??0,toRevision:incoming.packageRevision??0,platform:`${target.platform}-${target.arch}`,files:Object.keys(incoming.files).length,downgrade:order<0,reinstall:order===0,base:stored===null?'sin crear':`formato ${stored}`,supportedBase:supported};
     if(!(await confirm(summary))){await safeRemove(root,work);await fs.rm(journalFile);return {status:'cancelada',...summary};}
+    if(prepareOnly)return {status:'preparada',...summary,baseDirectory,preparedPath:tree};
+    if(assistedVerification&&verifyInstalled===h.smokeTest)throw error('UPDATE_REAL_BASE_REQUIRED','La actualización asistida exige verificar el Motor nuevo sobre la Base real.');
     unlockGate=await lockInstallation(root,{pythonExecutable});
     await drainIdleCentralMotor(baseDirectory,root,current);
     try{await sessionState(baseDirectory,root,current,pythonExecutable);}catch(e){if(['MIND_IN_USE','SESSION_IDENTITY_UNKNOWN'].includes(e.code)){e.prepared=true;report(e.message);}throw e;}
@@ -315,8 +403,11 @@ export async function runUpdateTransaction(options,h){
     }
     if(order===0){await safeRemove(root,work);await fs.rm(journalFile);return {status:'al-dia',...summary};}
     const baseTarget=incoming.layoutVersion===2&&baseDirectory===path.join(root,'Base')?path.join(root,'Sistema','Base'):baseDirectory;
-    const beforeBase=await has(baseDirectory)?await scanTree(baseDirectory):[];
-    const baseHashes={};for(const e of beforeBase)if(e.type==='file')baseHashes[e.path]=await hashFile(path.join(baseDirectory,e.path));
+    j.assistedVerification=assistedVerification;
+    j.baseFormatChanged=stored!==supported||(current.baseFormatVersion??stored)!==supported;
+    if(assistedVerification)await snapshotBase(root,journalFile,j,{statfs:testing.snapshotStatfs,testing});
+    const beforeBase=await has(baseDirectory)?(assistedVerification?await persistentBaseFiles(baseDirectory):await scanTree(baseDirectory)):[];
+    const baseHashes=Object.create(null);for(const e of beforeBase)if(e.type==='file')baseHashes[e.path]=await hashFile(path.join(baseDirectory,e.path));
     let stagedMcp;
     if(previousMcp){
       const old=previousMcp.data,entry=old.mcpServers?.mind;
@@ -350,8 +441,11 @@ export async function runUpdateTransaction(options,h){
     }
     if(stagedMcp)await durableMove(root,journalFile,j,stagedMcp,path.join(root,'.mcp.json'),testing);
     j.phase='verifying';await writeJson(journalFile,j);await testing.afterPhase?.('verifying');
-    await verifyInstalled(root,incoming);
-    for(const [r,hash]of Object.entries(baseHashes))if(await hashFile(path.join(baseTarget,r))!==hash)throw error('UPDATE_BASE_CHANGED','La Base cambió durante la instalación.');
+    await verifyInstalled(root,incoming,{baseDirectory:baseTarget,previousBaseFormat:stored,supportedBaseFormat:supported});
+    if(!assistedVerification||!j.baseFormatChanged){
+      if(assistedVerification&&(await persistentBaseFiles(baseTarget)).length!==Object.keys(baseHashes).length)throw error('UPDATE_BASE_CHANGED','La Base cambió durante la verificación sin un cambio de formato.');
+      for(const [r,hash]of Object.entries(baseHashes))if(await hashFile(path.join(baseTarget,r)).catch(e=>{if(e.code==='ENOENT')return null;throw e;})!==hash)throw error('UPDATE_BASE_CHANGED','La Base cambió durante la instalación.');
+    }
     j.phase='committed';await writeJson(journalFile,j);committed=true;await testing.afterPhase?.('committed');
     let preservedLegacy=[];
     let retired=false;
@@ -360,7 +454,7 @@ export async function runUpdateTransaction(options,h){
     return {status:'actualizada',...summary,cleanupPending:false,retiredPending:retired,baseDirectory:baseTarget,baseMigration:baseTarget!==baseDirectory?{from:baseDirectory,to:baseTarget}:null,reusedComponents:keep.size,preservedLegacy};
   }catch(e){
     if(j&&!committed&&j.phase!=='prepared'){
-      try{await rollback(root,journalFile,j);await removeWork(root,work);await fs.rm(journalFile);}catch(failure){throw Object.assign(error('UPDATE_ROLLBACK_FAILED',`Se conserva la recuperación: ${failure.message}`),{cause:e});}
+      try{await sessionState(baseDirectory,root,current,pythonExecutable);if(incoming)await sessionState(productPaths(root,incoming).baseDirectory,root,incoming,pythonExecutable);await rollback(root,journalFile,j,testing);await removeWork(root,work);await fs.rm(journalFile);}catch(failure){throw Object.assign(error('UPDATE_ROLLBACK_FAILED',`Se conserva la recuperación: ${failure.message}`),{cause:e});}
     }else if(!e.prepared && createdJournal && j?.phase==='prepared'){
       await safeRemove(root,work);await fs.rm(journalFile);
     }else if(!j&&createdWork&&await has(work))await safeRemove(root,work);

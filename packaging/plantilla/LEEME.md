@@ -40,11 +40,21 @@ instrucciones de `AGENTS.md`.
 
 ## Actualizaciones
 
-Mind comprueba las nuevas versiones estables al iniciar. Si hay una para tu equipo,
-la descarga, verifica su firma y la instala cuando no haya sesiones activas.
+Mind comprueba las versiones estables en segundo plano. El agente te avisa una vez
+por conversación y puedes preguntarle qué cambia, pedirle que lo recuerde después
+o solicitar que la aplique. La instalación pide tu confirmación en un formulario;
+si el cliente no admite formularios, el agente espera tu confirmación en dos pasos.
+
+La descarga y preparación ocurren mientras Mind funciona. Cuando todos los chats
+llevan treinta segundos sin trabajo ni formularios pendientes, un relevista
+independiente aplica la entrega. Los clientes esperan durante el cambio. Solo se
+confirma después de que el Motor nuevo haya servido la Base real con sus propios
+componentes. Ante un fallo se recupera el programa y, cuando corresponde, la copia
+previa de la Base. El acta informa el resultado en la siguiente llamada.
+
 Sin conexión continúa con la versión instalada. Los archivos personales y la Base
-se conservan. La recuperación se mantiene solo durante la transacción; después
-de comprobar la nueva instalación se eliminan sus temporales. My Mind no acumula versiones anteriores.
+se conservan. Las copias temporales se retiran después de verificar; un fallo de
+recuperación conserva sus archivos para poder continuar.
 
 Si ya tienes una copia anterior, pídele a tu agente aplicar esta entrega corregida a esa copia conservando tus datos. El agente usa el paquete nuevo verificado y mantiene tu ruta; no necesitas configurar conexiones ni guardar versiones anteriores. Las sesiones que estén trabajando terminan normalmente antes de sustituir el programa.
 

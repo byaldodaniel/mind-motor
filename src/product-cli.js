@@ -197,6 +197,10 @@ export async function main(args) {
             peticiones_activas: health.activeRequests,
             trabajo_de_fondo: health.backgroundBusy === true,
             cola: health.queue,
+            independencia: health.independence ?? 'desconocida',
+            lanzamiento: health.launch ?? null,
+            cierre_anterior: health.previousEnd ?? null,
+            ...(conn.launch?.aviso ? { aviso_lanzamiento: conn.launch.aviso } : {}),
           });
         }
         return 0;
@@ -238,7 +242,7 @@ export async function main(args) {
           baseDirectory: layout.baseDirectory,
           payload: { accion: 'inicio', paths: options.workspacePaths, cwd: currentDirectory() },
         });
-        print({ mind: res.mind, instrucciones: res.instrucciones, destinos: res.destinos });
+        print({ mind: res.mind, instrucciones: res.instrucciones, destinos: res.destinos, ...(res.aviso_actualizacion ? { aviso_actualizacion: res.aviso_actualizacion } : {}) });
         return 0;
       }
       case 'estado': {
