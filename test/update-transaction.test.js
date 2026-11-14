@@ -11,6 +11,8 @@ import {updateMind} from '../src/commands/actualizar.js';
 import {checkPreparationSpace,recoverUpdateTransaction} from '../src/update-transaction.js';
 import {readManifestFile,scanTree,UNIVERSAL_TARGETS,hashFile} from '../src/product-files.js';
 import {BASE_FORMAT_VERSION} from '../src/base-format.js';
+import {startCentralMotor} from '../src/motor-central.js';
+import {checkHealthyConnector} from '../src/connector.js';
 const sha=x=>createHash('sha256').update(x).digest('hex');
 const run=promisify(execFile);
 const moduleUrl=new URL('../src/commands/actualizar.js',import.meta.url).href;
@@ -34,7 +36,7 @@ async function fixture(t,{legacy=false}={}){
  const temp=await fs.mkdtemp(path.join(os.tmpdir(),'mind-transaccion-'));t.after(()=>fs.rm(temp,{recursive:true,force:true}));
  const root=path.join(temp,'My Mind');await packageAt(root,0,{legacy});
  const base=path.join(root,legacy?'Base':'Sistema/Base');await fs.mkdir(base,{recursive:true});
- await fs.writeFile(path.join(base,'mind-base.json'),JSON.stringify({format:'mind-base',version:BASE_FORMAT_VERSION}));
+ await fs.writeFile(path.join(base,'mind-base.json'),JSON.stringify({format:'mind-base',version:BASE_FORMAT_VERSION,baseId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',createdAt:'2026-01-01T00:00:00.000Z'}));
  await fs.writeFile(path.join(base,'continuidad.md'),'decisión ficticia persistente');
  await write(root,'Conversaciones/recurso.bin',Buffer.from([0,255,12]));
  const source=path.join(temp,'paquete');await packageAt(source,1);
@@ -115,4 +117,109 @@ test('sin espacio no prepara ni sustituye componentes',async t=>{
  await assert.rejects(updateMind({...f.options,testing:{statfs:async()=>{checks++;return {bavail:0,bsize:4096};}}}),e=>e.code==='UPDATE_DISK_SPACE'&&e.available===0&&e.required>=64*1024**2);
  assert.equal(checks,1);assert.equal((await readManifestFile(f.root)).packageRevision,0);
  assert.equal((await fs.stat(path.join(f.root,componentFile),{bigint:true})).ino,beforeComponent);assert.deepEqual(await hashes(f.base),beforeBase);await assertClean(f.root);
+});
+
+async function changeBaseFormat(source,version){
+ const filename=path.join(source,'Sistema','mind-producto.json');
+ const manifest=JSON.parse(await fs.readFile(filename,'utf8'));manifest.baseFormatVersion=version;
+ await fs.writeFile(filename,JSON.stringify(manifest));
+}
+
+test('preparar con Motor vivo no lo apaga ni abre la Base y permite continuar la misma transacción',async t=>{
+ const f=await fixture(t);let verifications=0;
+ const motor=await startCentralMotor({layout:{product:false,root:f.root,baseDirectory:f.base,motorDirectory:path.resolve('src'),pythonExecutable:f.options.pythonExecutable,protectedDirectories:[]},observe:false,discoverDelayMs:-1,updateRoot:null,quietMs:0});
+ t.after(()=>motor.stop());
+ const before=await hashes(f.base);
+ const prepared=await updateMind({...f.options,prepareOnly:true,verifyInstalled:async()=>{verifications++;}});
+ assert.equal(prepared.status,'preparada');assert.equal(prepared.toRevision,1);assert.equal(verifications,0);
+ assert.equal((await readManifestFile(f.root)).packageRevision,0);assert.ok(await checkHealthyConnector(f.base));
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'Sistema/Actualizaciones/transaccion.json'),'utf8')).phase,'prepared');
+ assert.deepEqual(await hashes(f.base),before);
+ await motor.stop();
+ assert.equal((await updateMind(f.options)).status,'actualizada');await assertClean(f.root);
+});
+
+test('verificación asistida recibe la Base real y acepta una migración con copia previa verificada',async t=>{
+ const f=await fixture(t);await changeBaseFormat(f.source,BASE_FORMAT_VERSION+1);
+ const result=await updateMind({...f.options,assistedVerification:true,verifyInstalled:async(root,manifest,context)=>{
+  assert.equal(root,await fs.realpath(f.root));assert.equal(context.baseDirectory,await fs.realpath(f.base));assert.equal(context.previousBaseFormat,BASE_FORMAT_VERSION);assert.equal(context.supportedBaseFormat,BASE_FORMAT_VERSION+1);
+  const journal=JSON.parse(await fs.readFile(path.join(f.root,'Sistema/Actualizaciones/transaccion.json'),'utf8'));
+  assert.equal(journal.baseSnapshot.ready,true);
+  assert.equal(await fs.readFile(path.join(f.root,journal.baseSnapshot.path,'continuidad.md'),'utf8'),'decisión ficticia persistente');
+  const marker=JSON.parse(await fs.readFile(path.join(f.base,'mind-base.json'),'utf8'));marker.version=manifest.baseFormatVersion;
+  await fs.writeFile(path.join(f.base,'mind-base.json'),JSON.stringify(marker));await write(f.base,'migracion.json','formato nuevo ficticio');
+ }});
+ assert.equal(result.status,'actualizada');assert.equal(JSON.parse(await fs.readFile(path.join(f.base,'mind-base.json'),'utf8')).version,BASE_FORMAT_VERSION+1);await assertClean(f.root);
+});
+
+test('fallo del verificador después de migrar restaura programa y todos los persistentes de la Base',async t=>{
+ const f=await fixture(t);await write(f.base,'__proto__','nombre ficticio válido');const before=await hashes(f.base);await changeBaseFormat(f.source,BASE_FORMAT_VERSION+1);
+ await assert.rejects(updateMind({...f.options,assistedVerification:true,verifyInstalled:async()=>{
+  await fs.writeFile(path.join(f.base,'continuidad.md'),'modificación ficticia');await write(f.base,'nueva/capa.json','migración parcial');
+  throw Object.assign(new Error('El Motor no sirve la Base'),{code:'UPDATE_REAL_BASE_FAILED'});
+ }}),{code:'UPDATE_REAL_BASE_FAILED'});
+ assert.deepEqual(await hashes(f.base),before);assert.equal((await readManifestFile(f.root)).packageRevision,0);await assertClean(f.root);
+});
+
+test('sin cambio de formato rechaza cambios persistentes y los revierte, sin confundir metadatos del proceso',async t=>{
+ const f=await fixture(t);const before=await hashes(f.base);
+ await assert.rejects(updateMind({...f.options,assistedVerification:true,verifyInstalled:async()=>{await fs.writeFile(path.join(f.base,'continuidad.md'),'cambio no permitido');}}),{code:'UPDATE_BASE_CHANGED'});
+ assert.deepEqual(await hashes(f.base),before);await assertClean(f.root);
+ const result=await updateMind({...f.options,assistedVerification:true,verifyInstalled:async()=>{await write(f.base,'conector.json','metadatos ficticios de proceso');await write(f.base,'motor-central.log','log ficticio');}});
+ assert.equal(result.status,'actualizada');await assertClean(f.root);
+});
+
+async function crashAssisted(f,body,testing='{}'){
+ const script='import fs from "node:fs/promises"; import path from "node:path"; import {updateMind} from '+JSON.stringify(moduleUrl)+'; const config=JSON.parse(process.env.MIND_TEST_UPDATE_OPTIONS); await updateMind({...config,confirm:()=>true,assistedVerification:true,verifyInstalled:async(root,manifest,context)=>{'+body+'},testing:'+testing+'});';
+ await assert.rejects(run(process.execPath,['--input-type=module','-e',script],{env:{...process.env,MIND_TEST_UPDATE_OPTIONS:JSON.stringify({root:f.root,source:f.source,baseDirectory:f.base,pythonExecutable:f.options.pythonExecutable})}}),error=>error.code===74);
+}
+for(const phase of ['snapshot','verifying','committed'])test('corte asistido en '+phase+' conserva copia previa y recupera la Base',async t=>{
+ const f=await fixture(t);const before=await hashes(f.base);
+ await crashAssisted(f,'','{afterPhase:async phase=>{if(phase==='+JSON.stringify(phase)+')process.exit(74)}}');
+ const result=await recoverUpdateTransaction(f.root,{pythonExecutable:f.options.pythonExecutable});assert.equal(result.status,'recuperada');
+ assert.equal((await readManifestFile(f.root)).packageRevision,phase==='committed'?1:0);assert.deepEqual(await hashes(f.base),before);await assertClean(f.root);
+});
+
+test('corte tras migración y nuevo corte al restaurar permiten repetir recuperación en Base externa',async t=>{
+ const f=await fixture(t);const external=path.join(f.temp,'Base externa');await fs.rename(f.base,external);f.base=external;f.options.baseDirectory=external;
+ const before=await hashes(f.base);await changeBaseFormat(f.source,BASE_FORMAT_VERSION+1);
+ await crashAssisted(f,'await fs.writeFile(path.join(context.baseDirectory,"continuidad.md"),"migración parcial");await fs.writeFile(path.join(context.baseDirectory,"creado.json"),"nuevo");process.exit(74);');
+ const recoverModule=new URL('../src/update-transaction.js',import.meta.url).href;
+ const script='import {recoverUpdateTransaction} from '+JSON.stringify(recoverModule)+';await recoverUpdateTransaction(process.env.MIND_TEST_ROOT,{pythonExecutable:process.env.MIND_TEST_PYTHON,testing:{afterRestore:async()=>process.exit(74)}});';
+ await assert.rejects(run(process.execPath,['--input-type=module','-e',script],{env:{...process.env,MIND_TEST_ROOT:f.root,MIND_TEST_PYTHON:f.options.pythonExecutable}}),error=>error.code===74);
+ assert.equal((await recoverUpdateTransaction(f.root,{pythonExecutable:f.options.pythonExecutable})).status,'recuperada');assert.deepEqual(await hashes(f.base),before);
+ assert.equal((await readManifestFile(f.root)).packageRevision,0);await assertClean(f.root);
+});
+
+test('copia previa alterada se conserva y no se usa para sobrescribir datos',async t=>{
+ const f=await fixture(t);await changeBaseFormat(f.source,BASE_FORMAT_VERSION+1);
+ await crashAssisted(f,'await fs.writeFile(path.join(context.baseDirectory,"continuidad.md"),"migración parcial");process.exit(74);');
+ const journal=JSON.parse(await fs.readFile(path.join(f.root,'Sistema/Actualizaciones/transaccion.json'),'utf8'));
+ await fs.writeFile(path.join(f.root,journal.baseSnapshot.path,'continuidad.md'),'copia alterada');
+ await assert.rejects(recoverUpdateTransaction(f.root,{pythonExecutable:f.options.pythonExecutable}),{code:'UPDATE_BASE_SNAPSHOT_ALTERED'});
+ assert.equal(await fs.readFile(path.join(f.base,'continuidad.md'),'utf8'),'migración parcial');
+ assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'Sistema/Actualizaciones/transaccion.json'),'utf8')).baseSnapshot.ready,true);
+});
+
+test('sin espacio para la copia previa no sustituye programa ni Base',async t=>{
+ const f=await fixture(t),before=await hashes(f.base);
+ await assert.rejects(updateMind({...f.options,assistedVerification:true,testing:{snapshotStatfs:async()=>({bavail:0,bsize:4096})}}),{code:'UPDATE_DISK_SPACE'});
+ assert.equal((await readManifestFile(f.root)).packageRevision,0);assert.deepEqual(await hashes(f.base),before);await assertClean(f.root);
+});
+
+
+test('corte copiando la Base antes de completar snapshot no altera originales',async t=>{
+ const f=await fixture(t),before=await hashes(f.base);
+ await crashAssisted(f,'','{afterSnapshot:async()=>process.exit(74)}');
+ const journal=JSON.parse(await fs.readFile(path.join(f.root,'Sistema/Actualizaciones/transaccion.json'),'utf8'));assert.equal(journal.baseSnapshot.ready,false);
+ assert.equal((await recoverUpdateTransaction(f.root,{pythonExecutable:f.options.pythonExecutable})).status,'recuperada');assert.deepEqual(await hashes(f.base),before);assert.equal((await readManifestFile(f.root)).packageRevision,0);await assertClean(f.root);
+});
+
+test('segundo corte deshaciendo programa continúa sin repetir operaciones inversas confirmadas',async t=>{
+ const f=await fixture(t),before=await hashes(f.base);await changeBaseFormat(f.source,BASE_FORMAT_VERSION+1);
+ await crashAssisted(f,'await fs.writeFile(path.join(context.baseDirectory,"continuidad.md"),"migración parcial");process.exit(74);');
+ const module=new URL('../src/update-transaction.js',import.meta.url).href;
+ const script='import {recoverUpdateTransaction} from '+JSON.stringify(module)+';await recoverUpdateTransaction(process.env.MIND_TEST_ROOT,{pythonExecutable:process.env.MIND_TEST_PYTHON,testing:{afterRollback:async()=>process.exit(74)}});';
+ await assert.rejects(run(process.execPath,['--input-type=module','-e',script],{env:{...process.env,MIND_TEST_ROOT:f.root,MIND_TEST_PYTHON:f.options.pythonExecutable}}),error=>error.code===74);
+ assert.equal((await recoverUpdateTransaction(f.root,{pythonExecutable:f.options.pythonExecutable})).status,'recuperada');assert.deepEqual(await hashes(f.base),before);assert.equal((await readManifestFile(f.root)).packageRevision,0);await assertClean(f.root);
 });

@@ -11,6 +11,7 @@ import {
   checkConnectorHealth,
   checkHealthyConnector,
   healthProof,
+  ensureCentralMotor,
   newStartupErrorFile,
   readOrCreateSecret,
   readSecret,
@@ -26,13 +27,14 @@ const TOKEN = 'a1'.repeat(32);
  * local en el puerto anunciado. `knowsSecret` decide si responde la prueba de
  * identidad como el Motor real o como un programa ajeno que ocupó el puerto.
  */
-async function fakeMotor(t, { knowsSecret, onRpc }) {
+async function fakeMotor(t, { knowsSecret, onRpc, onHealth }) {
   const base = await canonicalBaseDirectory(await fs.mkdtemp(path.join(os.tmpdir(), 'mind-connector-')));
   const baseId = baseIdOf(base);
   const rpc = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/health') {
+      onHealth?.();
       const nonce = url.searchParams.get('nonce');
       const port = server.address().port;
       res.setHeader('Content-Type', 'application/json');
@@ -188,4 +190,57 @@ test('el archivo del error de inicio tiene nombre impredecible y solo se acepta 
     await fs.rm(one, { force: true });
     await fs.rm(two, { force: true });
   }
+});
+
+test('un puente espera al relevista antes de reutilizar siquiera un Motor sano', async t => {
+  const { writeHandoff } = await import('../src/update-handoff-state.js');
+  const { identifyCurrentProcess } = await import('../src/process-identity.js');
+  const { randomUUID } = await import('node:crypto');
+  let healthRequests = 0, launched = false;
+  const f = await fakeMotor(t, { knowsSecret: true, onHealth: () => healthRequests++ });
+  const pythonExecutable = process.env.MIND_TEST_BUNDLED_PYTHON || process.env.MIND_TEST_PYTHON;
+  const owner = await identifyCurrentProcess({ pythonExecutable });
+  assert.ok(owner.processBirth, 'el ensayo requiere identidad nativa fuerte');
+  const manifest = { format: 'mind-product', version: 1, mindVersion: '1.0.5', platform: 'win32', arch: 'x64',
+    packageRevision: 1, layoutVersion: 2, updateProtocolVersion: 2, files: {} };
+  await fs.mkdir(path.join(f.base, 'Sistema'), { recursive: true });
+  await fs.writeFile(path.join(f.base, 'Sistema/mind-producto.json'), JSON.stringify(manifest));
+  const record = { id: randomUUID(), phase: 'aplicando', owner, release: manifest };
+  const snapshotPython = path.join(f.base, 'Sistema/Actualizaciones/Relevos', record.id, 'Python', process.platform === 'win32' ? 'python.exe' : 'bin/python3');
+  await fs.mkdir(path.dirname(snapshotPython), { recursive: true });
+  await fs.writeFile(snapshotPython, 'snapshot ficticio: owner es esta misma instancia');
+  await writeHandoff(f.base, record);
+  const request = ensureCentralMotor({ layout: { root: f.base, baseDirectory: f.base, pythonExecutable },
+    launch: async () => { launched = true; assert.fail('ya hay Motor sano'); } });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(healthRequests, 0);
+  assert.equal(launched, false);
+  await writeHandoff(f.base, { ...record, phase: 'completada' });
+  assert.equal((await request).spawned, false);
+  assert.ok(healthRequests > 0);
+});
+
+test('el segundo control bloquea un arranque y relee el ejecutable después del relevo', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-connector-handoff-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const manifest = { format: 'mind-product', version: 1, mindVersion: '1.0.5', platform: 'win32', arch: 'x64',
+    packageRevision: 1, layoutVersion: 2, updateProtocolVersion: 2, files: {} };
+  const { productRuntime } = await import('../src/layout.js');
+  const runtime = productRuntime(root, manifest);
+  await fs.mkdir(path.dirname(runtime.nodeExecutable), { recursive: true });
+  await fs.writeFile(runtime.nodeExecutable, 'ejecutable ficticio');
+  await fs.writeFile(path.join(root, 'Sistema/mind-producto.json'), JSON.stringify(manifest));
+  let openGate, controls = 0, launched = false;
+  const gate = new Promise(resolve => { openGate = resolve; });
+  const expected = Object.assign(new Error('lanzamiento observado'), { code: 'ENSAYO' });
+  const request = ensureCentralMotor({ layout: { root, baseDirectory: root, runtime: { nodeExecutable: 'obsoleto' } },
+    waitForUpdate: async () => { controls++; if (controls === 1) return { waited: false }; await gate; return { waited: true }; },
+    launch: async options => { launched = true; assert.equal(options.executable, runtime.nodeExecutable); assert.equal(options.env.MIND_PYTHON, runtime.pythonExecutable); throw expected; } });
+  const observed = assert.rejects(request, expected);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(controls, 2);
+  assert.equal(launched, false);
+  openGate();
+  await observed;
+  assert.equal(launched, true);
 });

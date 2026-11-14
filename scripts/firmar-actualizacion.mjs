@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// <versión pública> <clave.pem> <paquetes> <stable.json>; --verificar <versión> <paquetes>
+// <versión pública> <clave.pem> <paquetes> <stable.json> --novedades <archivo.json> [--anterior <zip>]
+// --verificar <versión> <paquetes> [--novedades <archivo.json>] [--anterior <zip>]
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -10,8 +11,17 @@ import { readManifestFile, hashFile, isVersion, validUniversalTargets } from '..
 import { productPaths, productRuntime } from '../src/layout.js';
 import { verifyPackageDescriptor, releaseOf } from '../src/package-descriptor.js';
 import { fileURLToPath } from 'node:url';
+import { validateAuthorNotes, validateBaseImpact, deriveComprobado, buildNovedades } from '../src/release-notes.js';
 
 const args = process.argv.slice(2), verifyOnly = args[0] === '--verificar';
+// Opciones con valor, en cualquier posición; se retiran antes de interpretar los argumentos posicionales.
+function takeOption(name) {
+  const at = args.indexOf(name);
+  if (at < 0) return undefined;
+  if (!args[at + 1] || args[at + 1].startsWith('--')) throw new Error(`${name} necesita un valor.`);
+  const [, value] = args.splice(at, 2); return value;
+}
+const notesFile = takeOption('--novedades'), previousFile = takeOption('--anterior');
 let testPublicKeyFile;
 const testAt = args.indexOf('--clave-ensayo');
 if (testAt >= 0) {
@@ -21,6 +31,12 @@ if (testAt >= 0) {
 const [version, keyFile, directory, output] = verifyOnly ? [args[1], null, args[2]] : args;
 if (!isVersion(version) || version.includes('-') || !directory || (!verifyOnly && (!keyFile || !output))) {
   throw new Error('Usa <versión> <clave.pem> <paquetes> <stable.json> o --verificar <versión> <paquetes>.');
+}
+if (!verifyOnly && !notesFile) throw new Error('Firmar exige --novedades <archivo.json> con las novedades de la entrega (ver packaging/novedades.ejemplo.json).');
+let authorNotes;
+if (notesFile) {
+  try { authorNotes = validateAuthorNotes(JSON.parse(await fs.readFile(notesFile, 'utf8'))); }
+  catch (error) { throw new Error(`${notesFile}: ${error.message}`); }
 }
 const root = fileURLToPath(new URL('..', import.meta.url));
 const config = JSON.parse(await fs.readFile(path.join(root, 'src', 'update-channel.json'), 'utf8'));
@@ -33,7 +49,18 @@ if (archives.length !== 1 || !archives[0].endsWith('.zip')) throw new Error('La 
 const name = archives[0], file = path.join(directory, name), { size: bytes } = await fs.stat(file);
 if (bytes <= 0 || bytes > 512 * 1024 * 1024) throw new Error('El ZIP universal excede el presupuesto de descarga.');
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-publicacion-'));
-let manifest, manifestSha256;
+/** Extrae un ZIP en una carpeta temporal y devuelve su manifiesto y el tamaño de cada archivo listado. */
+async function inspectArchive(archive) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-novedades-'));
+  try {
+    await extractEntries(readArchive(archive), directory, { links: 'record' });
+    const installation = path.join(directory, 'My Mind'), inspected = await readManifestFile(installation), sizes = {};
+    if (!inspected) throw new Error(`${archive} no contiene manifiesto de Mind.`);
+    for (const relative of Object.keys(inspected.files)) sizes[relative] = (await fs.stat(path.join(installation, ...relative.split('/')))).size;
+    return { manifest: inspected, sizes };
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+}
+let manifest, manifestSha256, sizes;
 try {
   const extracted = await extractEntries(readArchive(file), temporary, { links: 'record' });
   if ((await fs.readdir(temporary)).join() !== 'My Mind') throw new Error('El paquete debe tener una sola raíz My Mind/.');
@@ -45,6 +72,8 @@ try {
   if (name !== `Mind-${version}-universal-r${release.packageRevision}.zip`) throw new Error('El nombre del ZIP no identifica la revisión del paquete.');
   const signed = await verifyPackageDescriptor({ root: installation, publicKey: trustedPublicKey, expectedRelease: release });
   manifestSha256 = signed.manifestSha256;
+  sizes = {};
+  for (const relative of Object.keys(manifest.files)) sizes[relative] = (await fs.stat(path.join(installation, ...relative.split('/')))).size;
   if (extracted.some(entry => entry.type === 'symlink')) throw new Error('El ZIP universal no puede depender de enlaces simbólicos.');
   const paths = productPaths(installation, manifest);
   const required = [path.relative(installation, paths.entrypoint).split(path.sep).join('/'), 'Sistema/mind', 'Sistema/mind.cmd'];
@@ -61,11 +90,16 @@ try {
     throw new Error('Faltan ejecutores, iniciadores o permisos del paquete, o contiene configuración MCP del usuario.');
   }
 } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+// `comprobado` se deriva siempre del ZIP (y del anterior, si se indica); nunca del archivo del autor.
+const previousManifest = previousFile ? (await inspectArchive(previousFile)).manifest : null;
+if (authorNotes) validateBaseImpact(authorNotes, manifest, previousManifest);
+const novedades = authorNotes ? buildNovedades(authorNotes, deriveComprobado({ manifest, sizes, packageBytes: bytes, previousManifest })) : null;
 const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 2, ...releaseOf(manifest), manifestSha256,
+  ...(novedades ? { novedades } : {}),
   packages: [{ platform: 'win32', arch: 'x64', targets: publication.plataformas,
     url: `https://github.com/${config.repository}/releases/download/v${version}/${encodeURIComponent(name)}`,
     bytes, sha256: await hashFile(file) }] }));
-if (verifyOnly) process.stdout.write(`Mind ${version}, revisión ${manifest.packageRevision}: ZIP universal firmado y verificado${testPublicKeyFile ? ' con clave de ensayo (no publicable)' : ''}.\n`);
+if (verifyOnly) process.stdout.write(`Mind ${version}, revisión ${manifest.packageRevision}: ZIP universal firmado y verificado${novedades ? ', novedades válidas' : ''}${testPublicKeyFile ? ' con clave de ensayo (no publicable)' : ''}.\n`);
 else {
   const key = createPrivateKey(await fs.readFile(keyFile));
   if (key.asymmetricKeyType !== 'ed25519' || createPublicKey(key).export({ type: 'spki', format: 'pem' }) !== config.publicKey) throw new Error('La clave no corresponde al canal de confianza.');

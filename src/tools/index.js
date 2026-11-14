@@ -18,6 +18,7 @@ import { createPropertyTools } from './propiedades.js';
 import { createIndexTools } from './indices.js';
 import { createBackupTools } from './respaldo.js';
 import { createFunctionTools } from './funciones.js';
+import { createUpdateTools } from './actualizacion.js';
 
 export const TOOL_FACTORIES = Object.freeze([
   createDestinationTools,
@@ -28,4 +29,5 @@ export const TOOL_FACTORIES = Object.freeze([
   createIndexTools, // Función 01: índices personalizados en CSV.
   createBackupTools, // Respaldo cifrado (crear; configurar y restaurar son del usuario).
   createFunctionTools, // Función 04: funciones y automatizaciones.
+  createUpdateTools, // Actualización asistida: el agente informa y el usuario decide.
 ]);

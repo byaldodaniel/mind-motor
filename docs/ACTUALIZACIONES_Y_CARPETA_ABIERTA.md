@@ -8,21 +8,40 @@ Implementación sobre `d9b4a40`, en una rama separada del candidato de la PR #21
 
 ## Experiencia de uso
 
-Al iniciar Mind para trabajar, el iniciador consulta el canal estable público:
-`https://github.com/byaldodaniel/mind-updates/releases/latest/download/stable.json`.
-Si hay una versión estable posterior para su plataforma, descarga y verifica el
-paquete, lo instala sin pedir confirmación y arranca con el runtime nuevo.
-No se instala durante una sesión activa. Sin conexión, con un canal todavía sin
-versiones o ante una descarga inválida, se conserva la versión instalada.
-La consulta tiene un límite de 5 segundos; la descarga, 120 segundos y 512 MiB.
-Las órdenes de versión, ayuda y actualización manual no consultan el canal.
+Implementación de actualización asistida (rama de desarrollo, 14-nov-2026):
 
-La firma Ed25519 del canal vincula versión, plataforma, URL, tamaño y SHA-256 de
-cada paquete. La clave pública viaja con Mind. La privada permanece fuera del
-repositorio y nunca se publica. No se necesitan certificados de firma de pago.
-El actualizador comprueba además el manifiesto interno, la compatibilidad de la
-Base y el arranque del Motor. Una instalación fallida intenta restaurar la
-versión anterior. Un fallo de restauración detiene el inicio y se informa.
+1. El Motor consulta solo el canal firmado después de escuchar, a los veinte
+   segundos y después cada seis horas. El arranque no descarga el ZIP.
+2. La ficha firmada contiene nombre, resumen, cambios, importancia e impacto de
+   datos; el firmante deriva formatos, tamaños y grupos del ZIP. Con --anterior
+   rechaza declarar Base sin cambios si cambia baseFormatVersion.
+3. El aviso sale una vez por conexión y entrega; sin conexión, como máximo cada
+   doce horas. actualizacion_consultar cruza lo declarado con la Base y el disco;
+   actualizacion_posponer admite 1, 3 o 7 días (seguridad: uno como máximo).
+4. actualizacion_aplicar pide un formulario, o devuelve un código para una segunda
+   confirmación expresa. La autorización liga versión, revisión, protocolo y hashes
+   exactos del manifiesto y ZIP; el código vence a los quince minutos y se consume
+   una sola vez. El canal se vuelve a verificar antes de lanzar el relevista.
+5. El relevista copia código, Node y Python a Sistema/Actualizaciones/Relevos/<id>
+   y se enciende con launchIndependent. Descarga reanudable y prepareOnly dejan el
+   Motor atendiendo mientras se verifica y extrae el ZIP.
+6. Tras la quietud de todos los chats, relevo.json marca aplicando antes de pedir
+   apagar con soloSiQuieto. Iniciadores, puentes y consola esperan la barrera; no
+   recuperan una transacción viva ni encienden otro Motor durante la sustitución.
+7. La transacción conserva una copia durable de los persistentes de la Base antes
+   de la verificación. El programa instalado se prueba con su propio Node y Python
+   en un Motor restringido, sobre la Base real. No publica un conector ni admite
+   herramientas normales. Se cierra antes de confirmar o recuperar la transacción.
+8. Sin cambio de formato, los persistentes deben conservar exactamente sus hashes.
+   Si cambia el formato se admite migración, respaldada por la copia previa. Ante
+   fallo o corte se restaura archivo a archivo, también en una Base externa.
+9. El acta persiste fuera de la Base, aparece una vez por conexión y los fallos se
+   muestran. Los snapshots de relevista solo se limpian tras comprobar que su dueño
+   terminó; una identidad no verificable conserva la recuperación.
+
+El estado de descarga sigue en Sistema/Actualizaciones/estado.json (formato 2,
+último error separado de la fase). La publicación del candidato sigue la política
+del proyecto; estas pruebas no promueven por sí solas el canal estable.
 
 ## Abrir una carpeta
 
@@ -61,7 +80,7 @@ portables y el canal firmado. Descargar y comprobar el canal no requiere cuenta.
    Los artefactos contienen solo archivos versionados: incluir el commit completo
    de esta implementación antes de construir.
 2. Firmar con:
-   `node scripts/firmar-actualizacion.mjs <versión> <clave-privada.pem> <carpeta-paquetes> <stable.json>`.
+   `node scripts/firmar-actualizacion.mjs <versión> <clave-privada.pem> <carpeta-paquetes> <stable.json> --novedades <ficha.json> --anterior <estable.zip>`.
    El script verifica cada paquete, su versión, los destinos publicados y la clave.
 3. Crear una release en borrador con tag `v<versión>` en `byaldodaniel/mind-updates`;
    subir los paquetes de las plataformas publicadas y `stable.json`. Revisar y publicar como versión

@@ -18,6 +18,9 @@ import { classifyToolPriority, QUEUE_PRIORITY } from './smart-queue.js';
 import { MotorError } from './errors.js';
 import { currentDirectory } from './paths.js';
 import { MOTOR_VERSION } from './version.js';
+import { CONNECTION_ID, announcePresence, clientLabel, newConnectionId } from './connections.js';
+
+const CONNECTION_ENV = 'MIND_CONEXION';
 
 /** Fallos de arranque deterministas: repetir no los resuelve, el usuario debe intervenir. */
 const STARTUP_GUIDANCE = Object.freeze({
@@ -261,12 +264,17 @@ export async function runMcpBridge({
   output = process.stdout,
   relaunch = null,
   log = () => {},
+  // Identificador estable de este chat. Un puente relevo recibe el de su puente padre.
+  connectionId = CONNECTION_ID.test(process.env[CONNECTION_ENV] ?? '') ? process.env[CONNECTION_ENV] : newConnectionId(),
+  presence = !process.env[RELAY_ENV],
 } = {}) {
   // Cabecera de ámbito: base64url(UTF-8 JSON). Una ruta puede tener cualquier
   // carácter Unicode (日本語, acentos NFD de macOS) y las cabeceras HTTP no.
   const workspaceHeader = {
-    'X-Mind-Workspace': Buffer.from(JSON.stringify({ cwd, paths: workspacePaths }), 'utf8').toString('base64url'),
+    'X-Mind-Workspace': Buffer.from(JSON.stringify({ cwd, paths: workspacePaths, conexion: connectionId }), 'utf8').toString('base64url'),
   };
+  // Presencia fuera de la Base: el chat se ve abierto aunque el Motor esté apagado.
+  const announced = presence && layout ? await announcePresence({ layout, id: connectionId, cwd }) : null;
 
   let closed = false;
   let buffer = '';
@@ -306,7 +314,7 @@ export async function runMcpBridge({
       const child = spawn(relaunch.command, relaunch.args, {
         stdio: ['pipe', 'pipe', 'inherit'],
         windowsHide: true,
-        env: { ...process.env, [RELAY_ENV]: '1' },
+        env: { ...process.env, [RELAY_ENV]: '1', [CONNECTION_ENV]: connectionId },
       });
       const handle = {
         child,
@@ -455,8 +463,12 @@ export async function runMcpBridge({
     for (let attempt = 0; ; attempt += 1) {
       const conn = await ensureCentralMotor({ layout, baseDirectory: layout.baseDirectory });
       const motorVersion = conn.health?.motorVersion;
-      if (hadSession && motorVersion && motorVersion !== MOTOR_VERSION) {
-        if (canRelay()) throw new MotorError('BRIDGE_OUTDATED', 'Mind se actualizó mientras este chat estaba abierto.', { motor: motorVersion, puente: MOTOR_VERSION });
+      const motorRevision = conn.health?.packageRevision;
+      const bridgeRevision = layout?.manifest?.packageRevision ?? 0;
+      const changedRelease = (motorVersion && motorVersion !== MOTOR_VERSION)
+        || (Number.isSafeInteger(motorRevision) && motorRevision !== bridgeRevision);
+      if (hadSession && changedRelease) {
+        if (canRelay()) throw new MotorError('BRIDGE_OUTDATED', 'Mind se actualizó mientras este chat estaba abierto.', { motor: motorVersion, revisionMotor: motorRevision, puente: MOTOR_VERSION, revisionPuente: bridgeRevision });
         log('aviso', 'El Motor Central es de otra versión que este puente', { motor: motorVersion, puente: MOTOR_VERSION });
       }
       const base = { port: conn.state.port, token: conn.token, sessionId: null };
@@ -582,6 +594,7 @@ export async function runMcpBridge({
   async function handleInitialize(message) {
     invalidate(remote);
     initMessage = message;
+    void announced?.update({ cliente: clientLabel(message.params?.clientInfo) });
     clientInitialized = false;
     permanentFailure = null;
     toolsReduced = false;
@@ -803,6 +816,7 @@ export async function runMcpBridge({
       const state = remote;
       remote = null;
       if (state) await deleteSession(state);
+      await announced?.remove();
       resolve();
     };
     input.on('end', end);

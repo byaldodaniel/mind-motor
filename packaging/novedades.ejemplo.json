@@ -1,0 +1,23 @@
+{
+  "nombre": "Actualización asistida",
+  "resumen": "Mind ahora te explica cada actualización antes de instalarla: qué cambia, qué tan importante es y que tus datos no se tocan.",
+  "cambios": [
+    {
+      "titulo": "Novedades verificadas en cada entrega",
+      "detalle": "El agente puede contarte qué trae la actualización con datos firmados por Mind, no con suposiciones.",
+      "tipo": "mejora"
+    },
+    {
+      "titulo": "Instalación más segura con sesiones abiertas",
+      "detalle": "Si hay chats usando Mind, la instalación espera a que terminen en lugar de interrumpirlos.",
+      "tipo": "correccion"
+    }
+  ],
+  "importancia": "recomendada",
+  "impacto_datos": {
+    "base": "sin-cambios",
+    "conversaciones": "intactas",
+    "carpetas_autorizadas": "intactas",
+    "nota": "Tu Base, tus conversaciones y tus carpetas autorizadas se conservan tal como están."
+  }
+}

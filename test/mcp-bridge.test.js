@@ -55,7 +55,7 @@ async function createTempRoot(t, prefix = 'mind-puente-') {
  * comportamiento ante tools/call decide cada prueba. Publica conector.json y
  * conector-secreto.json en la Base temporal como lo haría el Motor Central.
  */
-async function startFakeMotor(env, { onToolCall, onInitialized } = {}) {
+async function startFakeMotor(env, { onToolCall, onInitialized, healthRelease = {} } = {}) {
   const canonical = await canonicalBaseDirectory(env.base);
   const baseId = baseIdOf(canonical);
   const token = randomBytes(32).toString('hex');
@@ -73,7 +73,7 @@ async function startFakeMotor(env, { onToolCall, onInitialized } = {}) {
     };
     if (url.pathname === '/health') {
       const nonce = url.searchParams.get('nonce');
-      return sendJson(200, { ok: true, baseId, port, ...(nonce ? { proof: healthProof(token, nonce, baseId, port) } : {}) });
+      return sendJson(200, { ok: true, baseId, port, ...healthRelease, ...(nonce ? { proof: healthProof(token, nonce, baseId, port) } : {}) });
     }
     if (req.headers.authorization !== `Bearer ${token}`) return sendJson(401, { error: 'UNAUTHORIZED' });
     if (url.pathname !== '/mcp') return sendJson(404, { error: 'NOT_FOUND' });
@@ -151,7 +151,7 @@ async function startFakeMotor(env, { onToolCall, onInitialized } = {}) {
 }
 
 /** Ejecuta el puente en proceso con streams en memoria, como lo usaría un cliente stdio. */
-function startBridge(env, { cwd = env.root, workspacePaths = [] } = {}) {
+function startBridge(env, { cwd = env.root, workspacePaths = [], relaunch = null, log } = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const waiting = new Map();
@@ -159,7 +159,7 @@ function startBridge(env, { cwd = env.root, workspacePaths = [] } = {}) {
   const stray = [];
   let nextId = 1;
   let buffer = '';
-  const finished = runMcpBridge({ layout: env.layout, cwd, workspacePaths, input, output });
+  const finished = runMcpBridge({ layout: env.layout, cwd, workspacePaths, input, output, relaunch, log });
   output.setEncoding('utf8');
   output.on('data', (chunk) => {
     buffer += chunk;
@@ -267,7 +267,10 @@ test('puente: envía el ámbito en X-Mind-Workspace solo en initialize y nada an
     const reply = await bridge.call('buscar', { consulta: 'x' });
     assert.equal(reply.result.isError ?? false, false, 'la herramienta adelantó a notifications/initialized');
     const init = fake.received.find((entry) => entry.body.method === 'initialize');
-    assert.deepEqual(decodeWorkspace(init.headers), { cwd, paths: [cwd] });
+    const declared = decodeWorkspace(init.headers);
+    assert.match(declared.conexion, /^[a-f0-9-]{36}$/u, 'el puente identifica su chat');
+    delete declared.conexion;
+    assert.deepEqual(declared, { cwd, paths: [cwd] });
     assert.equal(init.headers['x-mind-cwd'], undefined);
     const others = fake.received.filter((entry) => entry.body.method !== 'initialize');
     assert.ok(others.length >= 2);
@@ -400,4 +403,31 @@ test('puente: ping no despierta un Motor apagado', { timeout: 30_000 }, async (t
   } finally {
     await bridge.close();
   }
+});
+
+test('puente: una revisión nueva de la misma versión también cede al programa instalado', { timeout: 30_000 }, async t => {
+  const { MOTOR_VERSION } = await import('../src/version.js');
+  const env = await createTempRoot(t);
+  env.layout.manifest = { packageRevision: 1 };
+  const original = await startFakeMotor(env, { healthRelease: { motorVersion: MOTOR_VERSION, packageRevision: 1 } });
+  const runner = path.join(env.root, 'puente-r2.mjs');
+  await fs.writeFile(runner, [
+    'import readline from "node:readline";',
+    'const input=readline.createInterface({input:process.stdin});',
+    'input.on("line",line=>{const m=JSON.parse(line);if(!Object.hasOwn(m,"id"))return;',
+    'const result=m.method==="initialize"?{protocolVersion:"2025-11-25",capabilities:{},serverInfo:{name:"puente-r2"}}:{content:[{type:"text",text:"relevo r2"}],structuredContent:{revision:2}};',
+    'process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result})+"\\n");});',
+  ].join('\n'));
+  const logs = [];
+  const bridge = startBridge(env, { relaunch: { command: process.execPath, args: [runner] }, log: (...args) => logs.push(args) });
+  try {
+    await bridge.initialize();
+    assert.equal((await bridge.call('buscar')).result.structuredContent.ok, true);
+    await original.close();
+    const updated = await startFakeMotor(env, { healthRelease: { motorVersion: MOTOR_VERSION, packageRevision: 2 } });
+    const reply = await bridge.call('buscar');
+    assert.deepEqual(reply.result.structuredContent, { revision: 2 });
+    assert.equal(updated.calls('buscar'), 0, 'el puente viejo no ejecuta herramientas contra la revisión nueva');
+    assert.ok(logs.some(([, message]) => message.includes('cede el trabajo al programa instalado')));
+  } finally { await bridge.close(); }
 });

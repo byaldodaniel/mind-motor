@@ -18,6 +18,24 @@ export async function ensureUpdateDirectory(root, create = false) {
   }
 }
 
+export const UPDATE_PHASES = ['al-dia', 'disponible', 'descargando', 'descargada', 'instalando', 'actualizada', 'limpieza-pendiente',
+  'requiere-reparacion', 'fallida', 'espera-sesiones', 'espera-verificacion'];
+const LEGACY_KEYS = ['reason', 'code', 'kind', 'retryable', 'source', 'packageSha256', 'installedPackageSha256'];
+
+/** Convierte en memoria un estado versión 1 (fase mezclada con el último error) a la versión 2. */
+function upgradeState(value) {
+  const { reason, code, kind, retryable, source, packageSha256, installedPackageSha256, ...rest } = value;
+  let phase = rest.phase;
+  if (phase === 'comprobando') phase = rest.envelope ? 'disponible' : 'al-dia';
+  else if (phase === 'preparada') phase = 'descargada';
+  if (!UPDATE_PHASES.includes(phase)) phase = rest.envelope ? 'disponible' : 'al-dia';
+  const sha = packageSha256 ?? installedPackageSha256;
+  const hasError = Boolean(kind || code || reason);
+  return { ...rest, format: 'mind-update-state', version: 2, phase,
+    package: rest.package ?? (/^[a-f0-9]{64}$/u.test(sha ?? '') ? { url: null, bytes: null, sha256: sha } : null),
+    lastError: hasError ? { code: code ?? null, kind: kind ?? null, retryable: retryable === true, message: reason ?? null, at: rest.updatedAt ?? null } : null };
+}
+
 export async function readUpdateState(root) {
   await ensureUpdateDirectory(root);
   const { file } = updateStatePaths(root);
@@ -27,8 +45,8 @@ export async function readUpdateState(root) {
     let value;
     try { value = JSON.parse(await fs.readFile(file, 'utf8')); }
     catch (error) { throw Object.assign(new Error('El estado de actualizacion no se puede interpretar.'), { code: 'UPDATE_STATE_INVALID', cause: error }); }
-    if (value.format !== 'mind-update-state' || value.version !== 1) throw Object.assign(new Error('El estado de actualización no es válido.'), { code: 'UPDATE_STATE_INVALID' });
-    return value;
+    if (value?.format !== 'mind-update-state' || ![1, 2].includes(value.version)) throw Object.assign(new Error('El estado de actualización no es válido.'), { code: 'UPDATE_STATE_INVALID' });
+    return value.version === 1 ? upgradeState(value) : { ...value, lastError: value.lastError ?? null };
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
@@ -38,10 +56,13 @@ export async function readUpdateState(root) {
 export async function writeUpdateState(root, value) {
   const { directory, file } = updateStatePaths(root);
   await ensureUpdateDirectory(root, true);
+  const clean = { ...value };
+  for (const key of LEGACY_KEYS) delete clean[key];
+  clean.lastError ??= null;
   const temporary = path.join(directory, `.estado-${randomUUID()}.tmp`);
   const handle = await fs.open(temporary, 'wx', 0o600);
   try {
-    await handle.writeFile(JSON.stringify({ ...value, format: 'mind-update-state', version: 1 }) + '\n');
+    await handle.writeFile(JSON.stringify({ ...clean, format: 'mind-update-state', version: 2 }) + '\n');
     await handle.sync();
   } finally { await handle.close(); }
   try { await fs.rename(temporary, file); }
@@ -57,7 +78,7 @@ export function classifyUpdateError(error) {
   if (['ENOSPC','UPDATE_DISK_SPACE'].includes(code)) return { code, kind: 'espacio', retryable: false };
   if (['MIND_IN_USE', 'SESSION_IDENTITY_UNKNOWN', 'PROCESS_IDENTITY_UNKNOWN'].includes(code)) return { code, kind: code === 'MIND_IN_USE' ? 'sesiones' : 'sesiones-no-verificables', retryable: true };
   if (error?.status) return { code: `HTTP_${error.status}`, kind: 'http', retryable: error.status === 429 || error.status >= 500 };
-  if (/SIGNATURE|ALTERED|HASH|DESCRIPTOR|MANIFEST/u.test(code)) return { code, kind: 'integridad', retryable: false };
+  if (/SIGNATURE|ALTERED|HASH|DESCRIPTOR|MANIFEST|NOTES/u.test(code)) return { code, kind: 'integridad', retryable: false };
   if (/INCOMPATIBLE|MISMATCH|PLATFORM|PROTOCOL|RELEASE_INVALID/u.test(code)) return { code, kind: 'compatibilidad', retryable: false };
   return { code, kind: 'actualizador', retryable: false };
 }

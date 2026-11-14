@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const { bootstrap } = require('../packaging/iniciadores/arranque.cjs');
 const source = fileURLToPath(new URL('../packaging/iniciadores/arranque.cjs', import.meta.url));
-const mutable = ['aside', 'placing', 'base', 'verifying'];
+const mutable = ['snapshotting', 'snapshotted', 'restoring-base', 'aside', 'placing', 'base', 'verifying'];
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mind-bootstrap-test-'));
   t.after(async () => {
@@ -153,4 +153,108 @@ test('a missing module outside an update preserves its original diagnosis', asyn
   await assert.rejects(bootstrap({ systemDirectory: f.system, importProgram: async () => {
     throw Object.assign(new Error('missing module'), { code: 'ERR_MODULE_NOT_FOUND' });
   } }), { code: 'ERR_MODULE_NOT_FOUND' });
+});
+
+async function handoffFixture(f, phase = 'aplicando') {
+  const { randomUUID } = await import('node:crypto');
+  const id = randomUUID(), marker = path.join(f.system, 'Actualizaciones/relevo.json');
+  const worker = path.join(f.system, 'Actualizaciones/Relevos', id);
+  const helper = path.join(worker, 'Motor/src/update-handoff-state.js');
+  const python = path.join(worker, 'Python', process.platform === 'win32' ? 'python.exe' : 'bin/python3');
+  await fs.mkdir(path.dirname(helper), { recursive: true });
+  await fs.mkdir(path.dirname(python), { recursive: true });
+  await fs.writeFile(python, 'python ficticio');
+  await fs.writeFile(path.join(worker, 'Motor/package.json'), '{"type":"module"}');
+  // El bootstrap usa un helper estable fuera de Programa; la identidad/recuperación
+  // nativa del helper real se ensaya en update-handoff-state.test.js.
+  await fs.writeFile(helper, [
+    'import fs from "node:fs/promises";',
+    'import path from "node:path";',
+    'export async function waitForHandoff({root,pythonExecutable}) {',
+    'if (!pythonExecutable.includes("Relevos")) throw Error("Python del programa mutable");',
+    'const file=path.join(root,"Sistema/Actualizaciones/relevo.json");',
+    'while (["aplicando","verificando"].includes(JSON.parse(await fs.readFile(file,"utf8")).phase)) await new Promise(r=>setTimeout(r,10));',
+    'return {waited:true};}',
+  ].join('\n'));
+  const record = { format: 'mind-update-handoff', version: 1, id, phase };
+  async function write(next) { await fs.writeFile(marker, JSON.stringify({ ...record, phase: next })); }
+  await write(phase);
+  return { marker, worker, helper, write };
+}
+
+test('bootstrap espera al relevista vivo antes de tocar un diario mutable o importar Programa', async t => {
+  const f = await fixture(t);
+  await f.journal('placing');
+  await f.ready();
+  const handoff = await handoffFixture(f);
+  let imported = false, recovered = false;
+  const request = bootstrap({ systemDirectory: f.system,
+    runRecovery: async () => { recovered = true; assert.fail('el relevista todavía vive'); },
+    importProgram: async () => { imported = true; } });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(imported, false);
+  assert.equal(recovered, false);
+  await f.journal('committed');
+  await handoff.write('completada');
+  await request;
+  assert.equal(imported, true);
+});
+
+test('marca terminal no requiere snapshot; marca rota se conserva y no importa Programa', async t => {
+  const f = await fixture(t);
+  await f.ready();
+  const { randomUUID } = await import('node:crypto');
+  const file = path.join(f.system, 'Actualizaciones/relevo.json');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  for (const phase of ['iniciando', 'descargando', 'preparando', 'espera-quietud', 'completada', 'fallida']) {
+    await fs.writeFile(file, JSON.stringify({ format: 'mind-update-handoff', version: 1, id: randomUUID(), phase }));
+    let imported = false;
+    await bootstrap({ systemDirectory: f.system, importProgram: async () => { imported = true; } });
+    assert.equal(imported, true, phase);
+  }
+  for (const broken of ['{roto', JSON.stringify({ format: 'mind-update-handoff', version: 1, id: '../otro', phase: 'aplicando' })]) {
+    await fs.writeFile(file, broken);
+    await assert.rejects(bootstrap({ systemDirectory: f.system, importProgram: async () => assert.fail() }), { code: 'UPDATE_HANDOFF_INVALID' });
+    assert.equal(await fs.readFile(file, 'utf8'), broken);
+  }
+});
+
+test('snapshot ausente nunca deja que bootstrap importe un programa que se está sustituyendo', async t => {
+  const f = await fixture(t);
+  await f.ready();
+  const handoff = await handoffFixture(f, 'verificando');
+  await fs.rm(handoff.helper);
+  await assert.rejects(bootstrap({ systemDirectory: f.system, importProgram: async () => assert.fail() }), { code: 'ENOENT' });
+  assert.equal(JSON.parse(await fs.readFile(handoff.marker, 'utf8')).phase, 'verificando');
+});
+
+test('si el relevo empieza durante import, bootstrap espera y reabre un proceso sin módulos viejos', async t => {
+  const f = await fixture(t);
+  await f.ready();
+  const node = path.join(f.system, 'Componentes/Node', process.platform + '-' + process.arch,
+    process.platform === 'win32' ? 'node.exe' : 'bin/node');
+  await fs.mkdir(path.dirname(node), { recursive: true });
+  await fs.writeFile(node, 'node ficticio');
+  const launcher = path.join(f.system, 'arranque.cjs');
+  await fs.writeFile(launcher, 'launcher ficticio');
+  let imports = 0, relays = 0, complete;
+  const result = await bootstrap({ systemDirectory: f.system,
+    importProgram: async () => {
+      imports++;
+      const handoff = await handoffFixture(f);
+      complete = new Promise((resolve, reject) => setTimeout(() => handoff.write('completada').then(resolve, reject), 70));
+      throw Object.assign(new Error('cambio concurrente de Programa'), { code: 'ERR_MODULE_NOT_FOUND' });
+    },
+    runUpdated: async (executable, entry, args) => {
+      relays++;
+      assert.equal(executable, node);
+      assert.equal(entry, launcher);
+      assert.deepEqual(args, process.argv.slice(2));
+      return 0;
+    },
+  });
+  await complete;
+  assert.equal(result, 0);
+  assert.equal(imports, 1);
+  assert.equal(relays, 1);
 });

@@ -15,6 +15,55 @@ solo.
 | Núcleo MCP | `src/mcp-core.js` | Protocolo MCP sin transporte, compartido por el Motor Central y por `mind mcp --direct`. |
 | Cola | `src/smart-queue.js` | Lecturas en paralelo, escrituras ordenadas por carpeta, trabajo de fondo que cede. |
 | Registro | `src/motor-log.js` | `motor-central.log` en la Base (una rotación). El Motor no tiene terminal. |
+| Lanzador | `src/independent-launch.js` | Enciende el Motor y el relevista de una actualización sin que dependa del cliente que lo pide. |
+
+## Independencia del cliente
+
+El Motor sirve a todos los chats, así que no puede morir cuando se cierra el cliente
+que lo encendió. Un solo contrato, un mecanismo por sistema:
+
+- **Windows.** Los clientes de agentes ponen sus procesos en un Job Object que mata a
+  todos sus descendientes al cerrarse; un proceso desacoplado lo hereda y la salida
+  del job no está permitida. El Motor se crea mediante el servicio del sistema
+  (WMI, `Win32_Process.Create`): nace fuera de todo job, en la misma sesión y con el
+  mismo usuario, sin ventana. Cuesta unos 0,5 s, solo al encender en frío.
+- **macOS y Linux.** No hay Job Objects: basta un proceso desacoplado en sesión nueva.
+
+Si el mecanismo de Windows falla, se lanza desacoplado como antes y Mind funciona
+igual. `estado` (`motor_central`) y `mind despertar` publican `independencia`
+(`plena`, `heredada` o `desconocida`), `lanzamiento` y `cierre_anterior`.
+`MIND_LANZAMIENTO_DIRECTO=1` fuerza el lanzamiento desacoplado.
+
+**Cierre abrupto.** Un `conector.json` que sobrevive a su Motor significa que este no
+se apagó en orden. El Motor siguiente lo registra («El Motor anterior terminó sin
+cierre ordenado») y lo publica en `cierre_anterior`.
+
+## Conexiones de los chats
+
+Cada chat tiene un identificador de conexión estable mientras su cliente siga abierto.
+Lo genera el puente al arrancar y lo envía en `X-Mind-Workspace` (`conexion`); un
+puente relevo hereda el de su padre (`MIND_CONEXION`). Un cliente por HTTP directo no
+tiene puente: su conexión es la sesión MCP.
+
+- **Presencia.** Cada puente deja `Sistema/Estado/conexiones/conexion-<id>.json` (en
+  desarrollo, en el temporal) y lo retira al cerrarse. Se ve aunque el Motor esté
+  apagado; el de un puente muerto se descarta por su PID.
+- **Registro del Motor.** Cliente y versión que declara el chat, transporte (`puente`
+  o `http`), carpeta, peticiones en curso, formularios esperando al usuario y última
+  petición real (`ping` no cuenta).
+- `estado` añade `conexiones` (con `actividad`: `trabajando`, `esperando-al-usuario`,
+  `activa`, `inactiva` o `sin-sesion`) y `quietud`.
+
+**Regla de quietud.** Para sustituir el programa: nadie trabajando (tampoco por `/rpc`),
+ningún formulario abierto y ninguna petición real en los últimos 30 s
+(`MIND_QUIETUD_MS` la cambia). `/rpc` admite `{accion:'quietud'}` y
+`{accion:'apagar', soloSiQuieto:true}`; si no hay quietud responde `busy` con los chats
+que la impiden. La actualización solo apaga el Motor con quietud; si no, sus sesiones
+dejan la entrega preparada y se reintenta.
+
+**Actualizaciones.** El Motor solo descubre: 20 s después de encender, y luego cada
+6 h mientras siga vivo, consulta el canal firmado (unos KB). No descarga ni instala;
+no cuenta como actividad ni lo mantiene despierto.
 
 `mind mcp --direct` conserva la sesión completa en el propio proceso, sin Motor Central.
 
@@ -122,3 +171,26 @@ se apaga antes de la actualización. Después:
 - `test/mcp-bridge.test.js`: rutas de cualquier idioma, reintentos, recuperación.
 - `test/smart-queue.test.js`: exclusión, suspensión, cancelación, multiclave.
 - `test/update-open-bridge.test.js`: actualización real con un chat abierto.
+- `test/independent-launch.test.js`: comillas de Windows, caída al modo anterior, datos
+  fuera del guion de PowerShell, y en Windows un Job Object real que mata al puente y
+  a un hijo desacoplado mientras el proceso lanzado por Mind sobrevive.
+
+## Relevo asistido y verificación de la Base
+
+actualizacion_aplicar obtiene consentimiento ligado a la entrega firmada. El
+relevista usa una copia independiente de programa y runtimes, prepara con el Motor
+vivo y espera /rpc quietud. Antes del apagado condicionado publica relevo.json con
+fase aplicando; los clientes esperan esa barrera. Una carrera con trabajo nuevo
+hace volver a espera-quietud.
+
+La verificación abre un Motor con el Node y Python instalados, sobre la Base real,
+sin publicar conector. Solo un encabezado aleatorio de verificación admite la
+acción RPC verificar-actualizacion: lee identidad, formato, carpetas y continuidad.
+El hijo se cierra antes del commit y vigila la identidad de su relevista. La
+transacción conserva la copia previa hasta ese commit; al recuperar, comprueba
+sesiones y no restaura mientras haya otro proceso vivo sobre la Base.
+
+El acta queda en relevo.json y se entrega una vez por conexión, incluso si la
+actualización falló. actualizacion_consultar expone fase y resultado. La recuperación
+por corte reconoce también snapshotting, snapshotted y restoring-base; nunca trata
+un propietario desconocido como muerto.

@@ -22,6 +22,7 @@ const READ_TOOLS = new Set([
   'conversacion_leer',
   'conversacion_preferencias',
   'destinos_consultar',
+  'actualizacion_consultar',
   'papelera',
   'propiedades',
   'indices_personalizados',

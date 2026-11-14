@@ -32,6 +32,106 @@ import { startMcp } from './helpers/mcp-client.js';
 const execFileAsync = promisify(execFile);
 const BIN_MIND = fileURLToPath(new URL('../bin/mind.js', import.meta.url));
 
+test('un Motor que murió sin cerrar se detecta y se informa; uno que cerró en orden, no', async (t) => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mind-central-corte-')));
+  const base = path.join(root, 'Base');
+  let motor = null;
+  t.after(async () => { await motor?.stop('test-end').catch(() => {}); await fs.rm(root, { recursive: true, force: true }); });
+  const layout = await resolveLayout({ base });
+  const logs = [];
+  motor = await startCentralMotor({ layout, preferredPort: 0, observe: false, log: (level, message, data) => logs.push({ level, message, data }) });
+  let health = await rawHttp({ port: motor.port, pathName: '/health' });
+  assert.equal(health.json.previousEnd, 'ordenado');
+  assert.equal(health.json.launch, process.env.MIND_LANZAMIENTO ?? 'directo');
+  await motor.stop('test');
+  assert.equal(await fs.stat(connectorPaths(motor.baseDirectory).stateFile).then(() => true, () => false), false, 'un cierre ordenado retira conector.json');
+
+  // Simula un Motor que murió a la fuerza: queda su conector.json con un PID que ya no existe.
+  await fs.writeFile(connectorPaths(motor.baseDirectory).stateFile, JSON.stringify({ version: 1, baseId: motor.baseId, port: 1, pid: 999_999_999, motorVersion: '0.0.1', startedAt: '2026-01-01T00:00:00.000Z' }));
+  motor = await startCentralMotor({ layout, preferredPort: 0, observe: false, log: (level, message, data) => logs.push({ level, message, data }) });
+  health = await rawHttp({ port: motor.port, pathName: '/health' });
+  assert.equal(health.json.previousEnd, 'abrupto');
+  assert.ok(logs.some((entry) => entry.message === 'El Motor anterior terminó sin cierre ordenado' && entry.data.pid === 999_999_999));
+});
+
+test('apagar por RPC deja de admitir trabajo antes de responder', async (t) => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mind-central-apagar-')));
+  let motor = null;
+  t.after(async () => { await motor?.stop('test-end').catch(() => {}); await fs.rm(root, { recursive: true, force: true }); });
+  motor = await startCentralMotor({ layout: await resolveLayout({ base: path.join(root, 'Base') }), preferredPort: 0, observe: false });
+  const headers = { Authorization: `Bearer ${motor.token}` };
+  const off = await rawHttp({ port: motor.port, method: 'POST', pathName: '/rpc', headers, body: { accion: 'apagar' } });
+  assert.equal(off.json.apagando, true);
+  const after = await rawHttp({ port: motor.port, pathName: '/health' }).catch(() => ({ status: 0 }));
+  assert.notEqual(after.status, 200, 'tras aceptar apagar ya no se anuncia sano');
+});
+
+test('el Motor descubre actualizaciones en segundo plano, sin bloquear ni contar como actividad', async (t) => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mind-central-descubrir-')));
+  let motor = null;
+  t.after(async () => { await motor?.stop('test-end').catch(() => {}); await fs.rm(root, { recursive: true, force: true }); });
+  const layout = await resolveLayout({ base: path.join(root, 'Base') });
+  const calls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  motor = await startCentralMotor({
+    layout, preferredPort: 0, observe: false, discoverDelayMs: 0, updateRoot: root,
+    discoverUpdates: async (options) => { calls.push(options); await gate; return { status: 'al-dia' }; },
+  });
+  // Atiende mientras el descubrimiento sigue pendiente.
+  const health = await rawHttp({ port: motor.port, pathName: '/health' });
+  assert.equal(health.status, 200);
+  await until(() => calls.length === 1);
+  assert.equal(calls[0].root, root);
+  assert.equal(health.json.activeRequests, 0);
+  release();
+});
+
+test('estado ve los chats conectados y la quietud impide apagar para actualizar mientras alguien trabaja', async (t) => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mind-central-conexiones-')));
+  let motor = null;
+  t.after(async () => { await motor?.stop('test-end').catch(() => {}); await fs.rm(root, { recursive: true, force: true }); });
+  const project = path.join(root, 'Proyecto');
+  await fs.mkdir(project, { recursive: true });
+  motor = await startCentralMotor({ layout: await resolveLayout({ base: path.join(root, 'Base') }), preferredPort: 0, observe: false, quietMs: 60_000 });
+  const auth = { Authorization: `Bearer ${motor.token}` };
+  const chat = '11111111-2222-4333-8444-555555555555';
+  const header = { 'X-Mind-Workspace': Buffer.from(JSON.stringify({ cwd: project, paths: [], conexion: chat }), 'utf8').toString('base64url') };
+  const init = await rawHttp({ port: motor.port, method: 'POST', pathName: '/mcp', headers: { ...auth, ...header },
+    body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'codex', version: '0.169.0' } } } });
+  const headers = { ...auth, 'Mcp-Session-Id': init.headers['mcp-session-id'] };
+  await rawHttp({ port: motor.port, method: 'POST', pathName: '/mcp', headers, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
+  await openMcpSession(motor); // otro chat, por HTTP directo
+
+  const estado = await rawHttp({ port: motor.port, method: 'POST', pathName: '/mcp', headers, body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'estado', arguments: {} } } });
+  const content = estado.json.result.structuredContent;
+  const mine = content.conexiones.find((entry) => entry.conexion === chat);
+  assert.deepEqual({ cliente: mine.cliente, transporte: mine.transporte, carpeta: mine.carpeta }, { cliente: { nombre: 'codex', version: '0.169.0' }, transporte: 'puente', carpeta: project });
+  assert.ok(content.conexiones.some((entry) => entry.transporte === 'http'));
+  // Ambos chats pidieron algo hace un instante: con 60 s de ventana, no hay quietud.
+  assert.equal(content.quietud.quieto, false);
+
+  const rpc = await rawHttp({ port: motor.port, method: 'POST', pathName: '/rpc', headers: auth, body: { accion: 'quietud' } });
+  assert.equal(rpc.json.quieto, false);
+  assert.ok(rpc.json.impiden.some((entry) => entry.conexion === chat && entry.actividad === 'activa'));
+  const refused = await rawHttp({ port: motor.port, method: 'POST', pathName: '/rpc', headers: auth, body: { accion: 'apagar', soloSiQuieto: true } });
+  assert.equal(refused.json.busy, true);
+  assert.equal((await rawHttp({ port: motor.port, pathName: '/health' })).status, 200, 'el Motor sigue atendiendo');
+});
+
+test('con la ventana cumplida, la quietud permite apagar para actualizar', async (t) => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mind-central-quieto-')));
+  let motor = null;
+  t.after(async () => { await motor?.stop('test-end').catch(() => {}); await fs.rm(root, { recursive: true, force: true }); });
+  motor = await startCentralMotor({ layout: await resolveLayout({ base: path.join(root, 'Base') }), preferredPort: 0, observe: false, quietMs: 50 });
+  await openMcpSession(motor);
+  await delay(120);
+  const auth = { Authorization: `Bearer ${motor.token}` };
+  assert.equal((await rawHttp({ port: motor.port, method: 'POST', pathName: '/rpc', headers: auth, body: { accion: 'quietud' } })).json.quieto, true);
+  const off = await rawHttp({ port: motor.port, method: 'POST', pathName: '/rpc', headers: auth, body: { accion: 'apagar', soloSiQuieto: true, motivo: 'actualizacion' } });
+  assert.equal(off.json.apagando, true);
+});
+
 function rawHttp({ port, method = 'GET', pathName = '/health', headers = {}, body = null }) {
   return new Promise((resolve, reject) => {
     const payload = body === null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
@@ -635,6 +735,8 @@ test('Etapa 3: actualización drena Motor Central inactivo y bloquea solo si est
     },
     observe: false,
     preferredPort: 0,
+    // La quietud exige 30 s sin peticiones reales; aquí se prueba el drenado, no esa espera.
+    quietMs: 0,
   });
   try {
     await rawHttp({
@@ -1113,7 +1215,8 @@ test('sin ámbito declarado no se hereda la carpeta del Motor, y estado dice qui
       body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'estado', arguments: {} } },
     });
     assert.notEqual(estado.json.result.isError, true, estado.text);
-    assert.deepEqual(Object.keys(estado.json.result.structuredContent.motor_central).sort(), ['estado', 'pid', 'sesiones', 'version']);
+    assert.deepEqual(Object.keys(estado.json.result.structuredContent.motor_central).sort(), ['cierre_anterior', 'estado', 'independencia', 'lanzamiento', 'pid', 'sesiones', 'version']);
+    assert.equal(estado.json.result.structuredContent.motor_central.cierre_anterior.cierre, 'ordenado');
     assert.equal(estado.json.result.structuredContent.motor_central.pid, process.pid);
 
     const forbidden = new Set(await Promise.all([process.cwd(), os.tmpdir()].map((dir) => fs.realpath(dir))));
