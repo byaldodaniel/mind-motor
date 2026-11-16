@@ -33,7 +33,7 @@ Actualizaciones de Mind: si destinos_consultar o inicio devuelven aviso_actualiz
 Flujo recomendado:
 1. Llama a "estado" para ver las carpetas autorizadas, sus permisos y el estado de sus índices.
 2. La carpeta abierta que comunica el cliente o el iniciador tiene acceso completo durante la sesión, sin otro formulario. Para otras carpetas, ábrelas en el agente. Si el cliente no comunica carpetas, usa "solicitar_acceso" con su ruta absoluta y los permisos mínimos necesarios. El usuario decide en un formulario o en la consola de Mind; nunca afirmes que autorizó algo por él.
-3. Usa "buscar" y "explorar" (índices persistentes, sin recorrer el disco) antes de leer. Lee con "leer"; la respuesta incluye la versión necesaria para "modificar". "leer" también extrae el texto de documentos de oficina (docx, xlsx, pptx, odt, ods, odp) en modo solo lectura.
+3. Usa "buscar", "agrupar" (para listar #pendiente, #idea, listas de tareas [ ]/[x] o marcas por proyecto/carpeta/archivo/etiqueta al instante con alias de usuario) y "explorar" (índices persistentes, sin recorrer el disco) antes de leer. Lee con "leer"; la respuesta incluye la versión necesaria para "modificar". "leer" también extrae el texto de documentos de oficina (docx, xlsx, pptx, odt, ods, odp) en modo solo lectura.
 4. Para cambios puntuales usa "editar"; para crear, "crear". Mind no sobrescribe ni borra sin control de versión.
 5. Para organizar usa "crear_carpeta", "mover" y "renombrar" (nunca reemplazan). "borrar" mueve a la papelera de Mind y el usuario lo confirma cada vez; "restaurar" lo devuelve y "vaciar_papelera" lo elimina para siempre con una confirmación adicional. Si queda pendiente, explica al usuario que lo decide con "mind autorizar".
 6. Registra decisiones y resultados relevantes con "continuidad_registrar" y consulta trabajos anteriores con "continuidad_consultar".
@@ -97,6 +97,20 @@ export const TOOL_DEFINITIONS = Object.freeze([
       orden: { type: 'string', enum: Object.keys(SORT_IN) },
       limite: { type: 'integer', minimum: 1, maximum: 500 },
       desde: { type: 'integer', minimum: 0, description: 'Desplazamiento para paginar.' },
+    }),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'agrupar',
+    title: 'Agrupar marcas, pendientes e ideas',
+    description: 'Agrupa marcas de bloques Markdown y texto (#pendiente, #idea, listas de tareas [ ]/[x], Etiqueta:, Estado:) y propiedades de Mind entre carpetas autorizadas con permiso "leer". Respeta alias configurables (p. ej. pendiente=tarea=actividad) y responde desde SQLite sin re-escanear lo que no cambió.',
+    inputSchema: schema({
+      etiqueta: { type: 'string', description: 'Etiqueta o alias a buscar (p. ej. pendiente, pendientes, tareas, actividad, idea). Vacío: todas.' },
+      estado: { type: 'string', enum: ['abierto', 'cerrado', 'todos'], description: 'Filtra bloques abiertos, cerrados o todos; por defecto abierto.' },
+      agrupar_por: { type: 'string', enum: ['proyecto', 'carpeta', 'archivo', 'etiqueta'], description: 'Criterio de agrupación; por defecto proyecto.' },
+      carpetas: { type: 'array', items: { type: 'string' }, description: 'Ids o rutas de carpetas; por defecto todas las que permiten "leer".' },
+      propiedades: { type: 'object', description: 'Propiedades de Mind que deben coincidir.', additionalProperties: { type: ['string', 'number', 'boolean'] } },
+      alias: { type: 'object', description: 'Alias adicionales a guardar y aplicar { alias: etiqueta_canonica }.', additionalProperties: { type: 'string' } },
     }),
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -522,7 +536,14 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
           throw new MotorError('ACCESS_NOT_GRANTED', 'No hay carpetas con permiso para encontrar. Usa "solicitar_acceso".');
         }
       }
-      for (const folder of selected) await session.ensureIndex(folder.id, { timeoutMs: 30_000 });
+      const ensureOutcomes = await Promise.all(selected.map(async (folder) => {
+        try {
+          return { folder, ensure: await session.ensureIndex(folder.id, { timeoutMs: 1_500, allowStale: true }) };
+        } catch (error) {
+          return { folder, ensure: { status: 'unavailable', code: error?.code ?? 'INDEX_UNAVAILABLE' } };
+        }
+      }));
+      const byEnsure = new Map(ensureOutcomes.map((item) => [item.folder.id, item.ensure]));
       const request = { folderIds: selected.map((folder) => folder.id) };
       if (args.consulta !== undefined) request.query = text(args.consulta, 'consulta', { max: 256, allowEmpty: true });
       if (args.modo !== undefined) request.match = MATCH_IN[args.modo] ?? (() => { throw invalid('modo no válido.'); })();
@@ -558,11 +579,102 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
             ...(result.properties ? { propiedades: result.properties } : {}),
           };
         }),
-        carpetas: found.scopes.map((scope) => ({
-          carpeta: scope.folderId, estado: scope.status, indexado: scope.indexedAt, completo: scope.complete,
-          ...(scope.code ? { codigo: scope.code } : {}),
-        })),
+        carpetas: found.scopes.map((scope) => {
+          const ens = byEnsure.get(scope.folderId);
+          const estado = ens?.status === 'unavailable' ? 'no-disponible' : ens?.stale ? 'parcial' : scope.status;
+          const codigo = ens?.code ?? scope.code;
+          return {
+            carpeta: scope.folderId, estado, indexado: scope.indexedAt, completo: ens?.stale ? false : scope.complete,
+            ...(codigo ? { codigo } : {}),
+          };
+        }),
       };
+    },
+
+    async agrupar(args) {
+      only(args, ['etiqueta', 'estado', 'agrupar_por', 'carpetas', 'propiedades', 'alias']);
+      const list = await folders();
+      let selected;
+      if (args.carpetas !== undefined) {
+        selected = [];
+        for (const reference of strings(args.carpetas, 'carpetas', { max: 64, itemMax: 4096 })) {
+          const folder = await resolveFolder(reference);
+          await requireAccess(folder, 'leer');
+          selected.push(folder);
+        }
+      } else {
+        selected = [];
+        for (const folder of list) if ((await policy.get(folder.id))?.access.leer) selected.push(folder);
+        if (selected.length === 0) {
+          throw new MotorError('ACCESS_NOT_GRANTED', 'No hay carpetas con permiso para leer. Usa "solicitar_acceso".');
+        }
+      }
+
+      const tag = text(args.etiqueta, 'etiqueta', { optional: true, max: 64, allowEmpty: true })?.trim() || null;
+      const status = text(args.estado, 'estado', { optional: true, max: 32 }) ?? 'abierto';
+      const groupBy = text(args.agrupar_por, 'agrupar_por', { optional: true, max: 32 }) ?? 'proyecto';
+
+      let propertyFilter = null;
+      if (args.propiedades !== undefined) {
+        if (!args.propiedades || typeof args.propiedades !== 'object' || Array.isArray(args.propiedades)) {
+          throw invalid('propiedades debe ser un objeto { clave: valor }.');
+        }
+        propertyFilter = args.propiedades;
+      }
+
+      let customAliases = null;
+      if (args.alias !== undefined) {
+        if (!args.alias || typeof args.alias !== 'object' || Array.isArray(args.alias)) {
+          throw invalid('alias debe ser un objeto { alias: etiqueta_canonica }.');
+        }
+        for (const [k, v] of Object.entries(args.alias)) {
+          if (typeof k !== 'string' || typeof v !== 'string' || !k.trim() || !v.trim() || k.length > 64 || v.length > 64) {
+            throw invalid('Cada alias debe asignar un texto corto a su etiqueta canónica.');
+          }
+        }
+        customAliases = args.alias;
+      }
+
+      const ensuredList = await Promise.all(selected.map(async (folder) => {
+        try {
+          const ensure = await session.ensureIndex(folder.id, { timeoutMs: 1_500, allowStale: true });
+          const index = ensure.status === 'unavailable' ? null : await motor.readFolderIndex(folder.id).catch(() => null);
+          const authorized = await motor.getAuthorizedFolder(folder.id).catch(() => folder);
+          return { folder: authorized ?? folder, ensure, index };
+        } catch (error) {
+          return { folder, ensure: { status: 'unavailable', code: error?.code ?? 'INDEX_UNAVAILABLE' }, index: null };
+        }
+      }));
+
+      const scopes = [];
+      const coverageFolders = [];
+      for (const item of ensuredList) {
+        const estado = item.ensure.status === 'unavailable'
+          ? 'no-disponible'
+          : !item.index
+            ? (item.ensure.status === 'reconciling' ? 'indexando' : 'sin-indice')
+            : item.ensure.stale
+              ? 'parcial'
+              : 'buscada';
+        coverageFolders.push({
+          carpeta: item.folder.id,
+          ruta: item.folder.path,
+          estado,
+          ...(item.index ? { indexado: item.index.updatedAt } : {}),
+          ...(item.ensure.code ? { codigo: item.ensure.code } : {}),
+        });
+        if (item.index) scopes.push({ folder: item.folder, index: item.index });
+      }
+
+      return motor.groupMarks({
+        scopes,
+        tag,
+        status,
+        groupBy,
+        propertyFilter,
+        customAliases,
+        coverageFolders,
+      });
     },
 
     async explorar(args) {
@@ -572,9 +684,9 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const prefix = (text(args.ruta, 'ruta', { optional: true, allowEmpty: true }) ?? '').replace(/^\/+|\/+$/gu, '');
       const depth = integer(args.profundidad, 'profundidad', { min: 1, max: 8 }) ?? 1;
       const limit = integer(args.limite, 'limite', { min: 1, max: 1000 }) ?? 200;
-      const ensured = await session.ensureIndex(folder.id, { timeoutMs: 30_000 });
+      const ensured = await session.ensureIndex(folder.id, { timeoutMs: 1_500, allowStale: true });
       const index = await motor.readFolderIndex(folder.id);
-      if (!index) return { carpeta: folder.id, estado: ensured.status === 'reconciling' ? 'indexando' : 'sin-indice', entradas: [] };
+      if (!index) return { carpeta: folder.id, estado: ensured.status === 'unavailable' ? 'no-disponible' : ensured.status === 'reconciling' ? 'indexando' : 'sin-indice', ...(ensured.code ? { codigo: ensured.code } : {}), entradas: [] };
       const base = prefix === '' ? 0 : prefix.split('/').length;
       if (prefix !== '' && !index.entries.some((entry) => entry.path === prefix && entry.type === 'directory')) {
         throw new MotorError('PATH_NOT_INDEXED', 'La subcarpeta no figura en el índice como carpeta.');
@@ -602,8 +714,8 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       for (const folder of selected) {
         if (args.carpeta !== undefined) await requireAccess(folder, 'encontrar');
         else if (!(await policy.get(folder.id))?.access.encontrar) continue;
-        // Reconciliar antes permite detectar lo que se eliminó hace un momento.
-        await session.ensureIndex(folder.id, { timeoutMs: 30_000 });
+        // Reconciliar antes cuando esté disponible permite detectar lo eliminado hace un momento sin bloquearse.
+        await session.ensureIndex(folder.id, { timeoutMs: 1_500, allowStale: true }).catch(() => null);
         await session.settled(folder.id);
         const index = await motor.readFolderIndex(folder.id).catch(() => null);
         const existing = new Set(index?.entries.map((entry) => entry.path) ?? []);

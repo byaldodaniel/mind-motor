@@ -1,0 +1,54 @@
+{
+  "formato": "mind-nativo",
+  "version": 1,
+  "plataformas": {
+    "win32-x64": {
+      "motor": "rust",
+      "version": "1.0.4-r3",
+      "archivo": "mind-native.exe",
+      "ruta": "Sistema/Componentes/Nativo/win32-x64/mind-native.exe",
+      "bytes": 1501696,
+      "sha256": "e9504013184da27716dfed05b1a63cfe81e6eaa39d3bbed924741e4354449492"
+    },
+    "win32-arm64": {
+      "motor": "go",
+      "version": "1.0.4-r3",
+      "archivo": "mind-native.exe",
+      "ruta": "Sistema/Componentes/Nativo/win32-arm64/mind-native.exe",
+      "bytes": 6583808,
+      "sha256": "deb8fe67862b98529256e723a48896e9c6e773e6f179ff1a98134cdf08d74a36"
+    },
+    "darwin-arm64": {
+      "motor": "go",
+      "version": "1.0.4-r3",
+      "archivo": "mind-native",
+      "ruta": "Sistema/Componentes/Nativo/darwin-arm64/mind-native",
+      "bytes": 6657442,
+      "sha256": "416053486d610dca6f427a04ed6e9d211459ad642ceef7dbbd991e1c0c5c303c"
+    },
+    "darwin-x64": {
+      "motor": "go",
+      "version": "1.0.4-r3",
+      "archivo": "mind-native",
+      "ruta": "Sistema/Componentes/Nativo/darwin-x64/mind-native",
+      "bytes": 7179648,
+      "sha256": "706a4663275cc5fff77a6dccbd36dc142f17adb010c946818c87a0e9b58955e"
+    },
+    "linux-x64": {
+      "motor": "rust",
+      "version": "1.0.4-r3",
+      "archivo": "mind-native",
+      "ruta": "Sistema/Componentes/Nativo/linux-x64/mind-native",
+      "bytes": 1772368,
+      "sha256": "eb67f2ebff11f56fde35d3c5667909d47c8d4d9e245bfc1d1d5ca34db635ba79"
+    },
+    "linux-arm64": {
+      "motor": "rust",
+      "version": "1.0.4-r3",
+      "archivo": "mind-native",
+      "ruta": "Sistema/Componentes/Nativo/linux-arm64/mind-native",
+      "bytes": 1592816,
+      "sha256": "acf77ee65efc7ac4072768a6a04c77a6ed9fbd84e467004890dea3fcac798b5e"
+    }
+  }
+}

@@ -12,7 +12,7 @@ import { withIndexLock } from './index-lock.js';
  * alterarla (protección ante volver a una versión anterior del Motor).
  */
 export const BASE_MARKER = 'mind-base.json';
-export const BASE_FORMAT_VERSION = 2;
+export const BASE_FORMAT_VERSION = 3;
 
 function validMarker(data) {
   return data && typeof data === 'object' && !Array.isArray(data)

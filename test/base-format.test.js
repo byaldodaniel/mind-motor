@@ -45,21 +45,22 @@ test('consultar con el núcleo no crea marca; abrir una Base v1 conserva sus byt
   assert.deepEqual(await fs.readdir(f.base), [BASE_MARKER]);
 });
 
-test('la marca v2 se publica antes del índice v3, conservando identidad y fecha de la Base', async (t) => {
+test('la marca v3 se publica antes del catálogo SQLite, conservando identidad y fecha de la Base', async (t) => {
   const f = await fixture(t);
   await fs.writeFile(f.markerPath, JSON.stringify(f.marker));
   const motor = await openMotor({ baseDirectory: f.base });
   const scope = await motor.authorizeFolder(f.folder);
-  const target = path.join(f.base, `folder-index-${scope.id}.json`);
+  const target = path.join(f.base, 'catalog.sqlite');
   let checked = false;
   interceptRename(t, async (_source, destination) => {
-    if (destination !== target) return;
-    assert.deepEqual(JSON.parse(await fs.readFile(f.markerPath, 'utf8')), { ...f.marker, version: 2 });
+    if (destination !== f.markerPath) return;
+    await assert.rejects(fs.stat(target), { code: 'ENOENT' });
     checked = true;
   });
   await motor.indexFolder(scope.id);
   assert.equal(checked, true);
-  assert.equal(JSON.parse(await fs.readFile(target, 'utf8')).version, 3);
+  assert.deepEqual(JSON.parse(await fs.readFile(f.markerPath, 'utf8')), { ...f.marker, version: BASE_FORMAT_VERSION });
+  await fs.stat(target);
 });
 
 test('la primera publicación de un índice en una Base del núcleo añade protección global', async (t) => {
@@ -68,7 +69,7 @@ test('la primera publicación de un índice en una Base del núcleo añade prote
   const scope = await motor.authorizeFolder(f.folder);
   await assert.rejects(fs.stat(f.markerPath), { code: 'ENOENT' });
   await motor.indexFolder(scope.id);
-  assert.equal(JSON.parse(await fs.readFile(f.markerPath, 'utf8')).version, 2);
+  assert.equal(JSON.parse(await fs.readFile(f.markerPath, 'utf8')).version, BASE_FORMAT_VERSION);
 });
 
 test('las propiedades v2 también elevan la marca antes de publicarse', async (t) => {
@@ -101,6 +102,7 @@ test('un fallo al elevar la marca impide publicar el nuevo subformato', async (t
   await assert.rejects(motor.indexFolder(scope.id), { code: 'EACCES' });
   assert.equal(await fs.readFile(f.markerPath, 'utf8'), original);
   await assert.rejects(fs.stat(path.join(f.base, `folder-index-${scope.id}.json`)), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(f.base, 'catalog.sqlite')), { code: 'ENOENT' });
 });
 
 test('una marca futura impide abrir tanto producto como núcleo y no cambia datos', async (t) => {

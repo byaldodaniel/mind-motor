@@ -47,6 +47,7 @@ const UPDATE_MODES = Object.freeze(['manual', 'al_cambiar']);
 const TYPES = Object.freeze({ archivo: 'file', carpeta: 'directory' });
 
 const invalid = (message) => new MotorError('INVALID_CUSTOM_INDEX', message);
+const fold = (value) => value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 
 /** Campo válido: uno de los básicos o "propiedad:<clave>". */
 function parseField(value) {
@@ -153,7 +154,9 @@ export function createCustomIndexes({ session }) {
       }
       if (wanted) {
         const own = properties.get(entry.path) ?? {};
-        if (!Object.entries(wanted).every(([key, value]) => own[key] === value)) return false;
+        if (!Object.entries(wanted).every(([key, value]) => Object.hasOwn(own, key)
+          && typeof own[key] === typeof value
+          && (typeof value === 'string' ? fold(own[key]) === fold(value) : own[key] === value))) return false;
       }
       return true;
     }).sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));

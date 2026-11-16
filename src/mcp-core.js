@@ -194,15 +194,18 @@ export function createMcpProcessor({
           throw rpcError(INVALID_PARAMS, `Herramienta desconocida: ${String(name).slice(0, 64)}.`);
         }
         if (!isObject(args)) throw rpcError(INVALID_PARAMS, 'arguments debe ser un objeto.');
-        try {
-          await ensureInitialized();
-        } catch (error) {
-          log('error', 'Mind no pudo iniciar la sesión', { tool: name, codigo: error?.code ?? null, error: String(error?.stack ?? error) });
-          return toolError(error);
-        }
         const controller = new AbortController();
         running.set(id, controller);
         try {
+          try {
+            await ensureInitialized();
+          } catch (error) {
+            log('error', 'Mind no pudo iniciar la sesión', { tool: name, codigo: error?.code ?? null, error: String(error?.stack ?? error) });
+            return toolError(error);
+          }
+          if (controller.signal.aborted) {
+            return toolError(new MotorError('REQUEST_CANCELLED', 'La solicitud se canceló.'));
+          }
           return toolResult(await callSignal.run(controller.signal, () => toolset.call(name, args, { signal: controller.signal, connection })));
         } catch (error) {
           if (!(error instanceof MotorError)) log('error', 'Fallo inesperado en una herramienta', { tool: name, error: String(error?.stack ?? error) });

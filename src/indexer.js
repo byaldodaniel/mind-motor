@@ -6,7 +6,7 @@ import { createIndexStore, validateScopeId } from './index-store.js';
 import { createResourceGovernor } from './resource-governor.js';
 import { requestSignal as currentRequestSignal } from './request-context.js';
 
-const DEFAULT_MAX_ENTRIES = 100_000;
+const DEFAULT_MAX_ENTRIES = 1_000_000;
 
 /** @typedef {{ id: string, path: string, generation?: string | null }} IndexScope Ámbito ya validado por el Motor. */
 /**
@@ -233,7 +233,7 @@ export function createFolderIndexer({
      * @param {string} scopeId
      * @returns {Promise<IndexResult>}
      */
-    async indexFolder(scopeId, { signal: requestSignal = currentRequestSignal(), priority = 'interactive', timeoutMs } = {}) {
+    async indexFolder(scopeId, { signal: requestSignal = currentRequestSignal(), priority = 'interactive', timeoutMs, hints } = {}) {
       validateScopeId(scopeId);
       const signals = [lifecycleSignal, requestSignal].filter(Boolean);
       const signal = signals.length ? AbortSignal.any(signals) : undefined;
@@ -255,12 +255,26 @@ export function createFolderIndexer({
           requireSameAuthorization(requestedScope, scope);
           return boundIndex(await store.load(scopeId), scope);
         });
+        const useBranchHints = Boolean(
+          previous
+          && Array.isArray(hints?.paths)
+          && !hints.overflow
+          && hints.paths.length > 0
+          && hints.paths.length <= 32
+          && !hints.paths.includes('')
+        );
         // La papelera de Mind es una exclusión implícita: nunca se recorre ni se indexa.
-        const { entries, issues } = await scanFolder(scope.path, {
-          previous: previous?.entries ?? [], maxEntries, pythonExecutable,
+        const scanned = await scanFolder(scope.path, {
+          previous: previous?.entries ?? [],
+          previousIssues: previous?.issues ?? [],
+          maxEntries,
+          pythonExecutable,
           exclude: [...(scope.exclusions ?? []), TRASH_DIRECTORY],
-          signal, timeoutMs,
+          subpaths: useBranchHints ? hints.paths : undefined,
+          signal,
+          timeoutMs,
         });
+        const { entries, issues, prefixes, removedExact, upserts } = scanned;
         // El recorrido no retiene el bloqueo. Se descarta si cambió su base.
         requireSameScanScope(scope, await authorized(scopeId));
         signal?.throwIfAborted();
@@ -270,16 +284,28 @@ export function createFolderIndexer({
         return store.exclusive(scopeId, async () => {
           requireSameScanScope(scope, await authorized(scopeId));
           const latest = boundIndex(await store.load(scopeId), scope);
-          if (JSON.stringify(latest) !== JSON.stringify(previous)) {
+          if ((latest?.generation ?? null) !== (previous?.generation ?? null)
+              || (latest?.authorizationGeneration ?? null) !== (previous?.authorizationGeneration ?? null)) {
             throw new MotorError('INDEX_CONFLICT', 'Otro proceso actualizó este índice durante el recorrido.');
           }
           const indexedAt = new Date().toISOString();
           const generation = (previous?.generation ?? 0) + 1;
-          await store.save({
+          const nextIndex = {
             scopeId, root: scope.path, authorizationGeneration: scope.generation ?? null,
             generation, createdAt: previous?.createdAt ?? indexedAt,
             updatedAt: indexedAt, entries, issues,
-          });
+          };
+          if (useBranchHints && prefixes && !prefixes.includes('')) {
+            await store.saveBranch({
+              ...nextIndex,
+              prefixes,
+              removedExact: removedExact ?? [],
+              upserts: upserts ?? [],
+              mergedIndex: nextIndex,
+            });
+          } else {
+            await store.save(nextIndex);
+          }
           return {
             scopeId,
             mode: previous ? 'reconciliation' : 'initial',

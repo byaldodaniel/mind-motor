@@ -26,13 +26,17 @@ export async function runMcpSession({ layout, input = process.stdin, output = pr
     log('error', 'No se pudo abrir la Base', { codigo: error?.code ?? null, error: String(error?.message ?? error) });
     return serveStartupError({ layout, error, input, output, log });
   }
+  let workspace = null;
   let closing = null;
   const close = () => {
-    closing ??= session.close().catch((error) => log('error', 'Fallo al cerrar la sesión', { error: String(error) }));
+    closing ??= (async () => {
+      await workspace?.close?.().catch(() => {});
+      await session.close().catch((error) => log('error', 'Fallo al cerrar la sesión', { error: String(error) }));
+    })();
     return closing;
   };
 
-  const workspace = createWorkspaceAccess(session, { paths: workspacePaths, log });
+  workspace = createWorkspaceAccess(session, { paths: workspacePaths, log });
   const server = serveMcp({
     input,
     output,

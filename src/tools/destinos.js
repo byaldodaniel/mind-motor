@@ -1,5 +1,7 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {MotorError} from '../errors.js';
+import {isExcluded} from '../paths.js';
 import {only,schema} from './helpers.js';
 import {OUTPUT_TYPES,outputDirectory} from '../work-destinations.js';
 import {destinationContext,resolveWorkOutput,rememberOutput} from '../work-routing.js';
@@ -78,8 +80,16 @@ export function createDestinationTools({session}) {
         const target=await resolveWorkOutput({motor,context,destination:args.ruta,type:args.tipo,conversation:args.conversacion});
         await context.requireAccess(target.folder,'encontrar');
         await session.ensureIndex(target.folder.id);
-        const index=await motor.readFolderIndex(target.folder.id);
-        const file=index?.entries.find(item=>item.path===target.path&&item.type==='file');
+        let index=await motor.readFolderIndex(target.folder.id);
+        let file=index?.entries.find(item=>item.path===target.path&&item.type==='file');
+        if(!file && !isExcluded(target.folder.exclusions, target.path)){
+          const disk=await fs.lstat(target.absolute).catch(()=>null);
+          if(disk && !disk.isSymbolicLink() && disk.isFile()){
+            await session.reindex(target.folder.id, { relativePath: target.path }).catch(()=>{});
+            index=await motor.readFolderIndex(target.folder.id);
+            file=index?.entries.find(item=>item.path===target.path&&item.type==='file');
+          }
+        }
         if(!file)throw new MotorError('FILE_NOT_FOUND','No hay un archivo creado en ese destino.');
         return {estado:'registrado',resultado:await motor.rememberConversationResult(args.conversacion,{path:target.absolute,type:target.type,bytes:file.size})};
       }

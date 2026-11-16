@@ -441,7 +441,7 @@ export function createIndexObserver({
     state.dirty = false;
     state.running = (async () => {
       try {
-        const result = await motor.indexFolder(state.id, { priority, signal });
+        const result = await motor.indexFolder(state.id, { priority, signal, hints });
         if (state.stopped) return;
         const index = await motor.readFolderIndex(state.id);
         if (state.stopped) return;

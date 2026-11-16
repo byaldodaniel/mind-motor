@@ -292,10 +292,38 @@ class Windows:
 # Windows y macOS no distinguen mayúsculas por defecto: una exclusión debe cubrir
 # el mismo nombre escrito de otra forma.
 FOLD_CASE = os.name == 'nt' or sys.platform == 'darwin'
+IMPLICIT_EXCLUSIONS = frozenset({'.papelera-mind', '.codex', '.claude', '.gemini', '.git', 'node_modules'})
 
 
 def _key(relative):
     return relative.lower() if FOLD_CASE else relative
+
+
+def _record_from_child(relative, child):
+    return {
+        'path': relative,
+        'type': child.type,
+        'size': child.size,
+        'modifiedMs': child.modified,
+        'changedMs': child.changed,
+        'createdMs': child.created,
+        'listing': child.listing,
+        'identity': f'{os.name}:' + ':'.join(str(part) for part in child.identity) if child.identity else None,
+    }
+
+
+def _open_root_checked(backend, root):
+    try:
+        return backend.open_root(root)
+    except Refusal as error:
+        if str(error) == 'ECHANGED':
+            raise ScopeError('SCOPE_CHANGED') from error
+        raise
+    except FileNotFoundError as error:
+        raise ScopeError('SCOPE_UNAVAILABLE') from error
+    except OSError as error:
+        changed = code_of(error) in ('ELOOP', 'ENOTDIR')
+        raise ScopeError('SCOPE_CHANGED' if changed else 'SCOPE_UNAVAILABLE') from error
 
 
 def scan(root, max_entries, backend=None, before_open=None, exclude=()):
@@ -306,17 +334,7 @@ def scan(root, max_entries, backend=None, before_open=None, exclude=()):
     """
     backend = backend or (Windows() if os.name == 'nt' else Posix())
     excluded = frozenset(_key(item) for item in exclude)
-    try:
-        handle, volume = backend.open_root(root)
-    except Refusal as error:
-        if str(error) == 'ECHANGED':
-            raise ScopeError('SCOPE_CHANGED') from error
-        raise
-    except FileNotFoundError as error:
-        raise ScopeError('SCOPE_UNAVAILABLE') from error
-    except OSError as error:
-        changed = code_of(error) in ('ELOOP', 'ENOTDIR')
-        raise ScopeError('SCOPE_CHANGED' if changed else 'SCOPE_UNAVAILABLE') from error
+    handle, volume = _open_root_checked(backend, root)
     records, issues, stack = [], [], []
 
     def add(record):
@@ -338,7 +356,7 @@ def scan(root, max_entries, backend=None, before_open=None, exclude=()):
                 backend.close(parent)
                 continue
             relative = f'{base}/{child.name}' if base else child.name
-            if excluded and _key(relative) in excluded:
+            if _key(child.name) in IMPLICIT_EXCLUSIONS or (excluded and _key(relative) in excluded):
                 continue
             if child.error == 'NAME_NOT_UTF8':
                 issues.append({'path': base, 'code': child.error})
@@ -346,10 +364,7 @@ def scan(root, max_entries, backend=None, before_open=None, exclude=()):
             if child.error:
                 add({'path': relative, 'error': child.error})
                 continue
-            record = {'path': relative, 'type': child.type, 'size': child.size,
-                      'modifiedMs': child.modified, 'changedMs': child.changed,
-                      'createdMs': child.created, 'listing': child.listing,
-                      'identity': f'{os.name}:' + ':'.join(str(part) for part in child.identity) if child.identity else None}
+            record = _record_from_child(relative, child)
             add(record)
             if child.type != 'directory' or child.listing is not None:
                 continue
@@ -378,21 +393,270 @@ def scan(root, max_entries, backend=None, before_open=None, exclude=()):
             backend.close(parent)
 
 
+def _normalize_subpaths(subpaths):
+    cleaned = []
+    for raw in subpaths:
+        if '\0' in raw:
+            raise Refusal('SAFE_SCAN_FAILED')
+        parts = [part for part in raw.replace('\\', '/').split('/') if part and part != '.']
+        if any(part == '..' for part in parts):
+            raise Refusal('SAFE_SCAN_FAILED')
+        joined = '/'.join(parts)
+        if joined == '':
+            return ['']
+        cleaned.append(joined)
+    cleaned.sort(key=lambda item: (item.count('/'), _key(item)))
+    kept = []
+    kept_keys = []
+    for item in cleaned:
+        item_key = _key(item)
+        if any(item_key == k or item_key.startswith(k + '/') for k in kept_keys):
+            continue
+        kept.append(item)
+        kept_keys.append(item_key)
+    return kept
+
+
+def scan_subpaths(root, max_entries, backend=None, before_open=None, exclude=(), subpaths=()):
+    """Recorre únicamente ramas concretas desde la raíz por referencias de directorio."""
+    targets = _normalize_subpaths(subpaths)
+    if not targets:
+        return [], [], [], []
+    if targets == ['']:
+        records, issues = scan(root, max_entries, backend=backend, before_open=before_open, exclude=exclude)
+        return records, issues, [''], []
+
+    backend = backend or (Windows() if os.name == 'nt' else Posix())
+    excluded = frozenset(_key(item) for item in exclude)
+    root_handle, volume = _open_root_checked(backend, root)
+
+    records = []
+    issues = []
+    by_path_key = {}
+    scanned_prefixes = []
+    scanned_keys = set()
+    missing_prefixes = []
+    missing_keys = set()
+    stack = []
+
+    def add_unique(record):
+        key = _key(record['path'])
+        existing = by_path_key.get(key)
+        if existing is not None:
+            existing.update(record)
+            return existing
+        if len(records) + 1 > max_entries:
+            raise Refusal('INDEX_LIMIT_EXCEEDED')
+        records.append(record)
+        by_path_key[key] = record
+        return record
+
+    def add_prefix(target_list, seen_keys, value):
+        key = _key(value)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            target_list.append(value)
+
+    try:
+        try:
+            root_children = backend.children(root_handle, volume)
+        except OSError as error:
+            raise ScopeError('SCOPE_UNAVAILABLE') from error
+
+        for target in targets:
+            parts = target.split('/')
+            curr_handle = root_handle
+            parent_rel = ''
+            parent_record = None
+            try:
+                for index, seg in enumerate(parts):
+                    candidate_rel = f'{parent_rel}/{seg}' if parent_rel else seg
+                    if _key(seg) in IMPLICIT_EXCLUSIONS or (excluded and _key(candidate_rel) in excluded):
+                        add_prefix(missing_prefixes, missing_keys, candidate_rel)
+                        break
+                    try:
+                        children = root_children if curr_handle == root_handle else backend.children(curr_handle, volume)
+                    except OSError as error:
+                        if parent_record is not None:
+                            parent_record['listing'] = code_of(error)
+                        break
+
+                    matched = None
+                    for child in children:
+                        if child.error == 'NAME_NOT_UTF8':
+                            continue
+                        if child.name == seg or (FOLD_CASE and _key(child.name) == _key(seg)):
+                            matched = child
+                            break
+                    if matched is None:
+                        add_prefix(missing_prefixes, missing_keys, candidate_rel)
+                        break
+
+                    actual_rel = f'{parent_rel}/{matched.name}' if parent_rel else matched.name
+                    if actual_rel != candidate_rel:
+                        add_prefix(missing_prefixes, missing_keys, candidate_rel)
+                    if _key(matched.name) in IMPLICIT_EXCLUSIONS or (excluded and _key(actual_rel) in excluded):
+                        add_prefix(missing_prefixes, missing_keys, actual_rel)
+                        break
+                    if matched.error:
+                        add_unique({'path': actual_rel, 'error': matched.error})
+                        add_prefix(scanned_prefixes, scanned_keys, actual_rel)
+                        break
+
+                    record = add_unique(_record_from_child(actual_rel, matched))
+                    is_last = (index == len(parts) - 1)
+                    if matched.type != 'directory' or matched.listing is not None:
+                        add_prefix(scanned_prefixes, scanned_keys, actual_rel)
+                        break
+
+                    try:
+                        if before_open:
+                            before_open(actual_rel)
+                        opened = backend.open_child(curr_handle, matched)
+                    except FileNotFoundError:
+                        if records and records[-1] is record and by_path_key.get(_key(actual_rel)) is record:
+                            records.pop()
+                            by_path_key.pop(_key(actual_rel), None)
+                        add_prefix(missing_prefixes, missing_keys, actual_rel)
+                        break
+                    except (OSError, Refusal) as error:
+                        code = code_of(error)
+                        record['listing'] = 'ECHANGED' if code in ('ELOOP', 'ENOTDIR') else code
+                        add_prefix(scanned_prefixes, scanned_keys, actual_rel)
+                        break
+
+                    if is_last:
+                        try:
+                            listed = backend.children(opened, volume)
+                        except OSError as error:
+                            backend.close(opened)
+                            record['listing'] = code_of(error)
+                            add_prefix(scanned_prefixes, scanned_keys, actual_rel)
+                            break
+                        add_prefix(scanned_prefixes, scanned_keys, actual_rel)
+                        stack.append((opened, actual_rel, iter(listed)))
+                        while stack:
+                            s_parent, s_base, s_pending = stack[-1]
+                            s_child = next(s_pending, None)
+                            if s_child is None:
+                                stack.pop()
+                                backend.close(s_parent)
+                                continue
+                            s_rel = f'{s_base}/{s_child.name}' if s_base else s_child.name
+                            if _key(s_child.name) in IMPLICIT_EXCLUSIONS or (excluded and _key(s_rel) in excluded):
+                                continue
+                            if s_child.error == 'NAME_NOT_UTF8':
+                                issues.append({'path': s_base, 'code': s_child.error})
+                                continue
+                            if s_child.error:
+                                add_unique({'path': s_rel, 'error': s_child.error})
+                                continue
+                            s_record = add_unique(_record_from_child(s_rel, s_child))
+                            if s_child.type != 'directory' or s_child.listing is not None:
+                                continue
+                            try:
+                                if before_open:
+                                    before_open(s_rel)
+                                s_opened = backend.open_child(s_parent, s_child)
+                            except FileNotFoundError:
+                                if records and records[-1] is s_record and by_path_key.get(_key(s_rel)) is s_record:
+                                    records.pop()
+                                    by_path_key.pop(_key(s_rel), None)
+                                continue
+                            except (OSError, Refusal) as error:
+                                code = code_of(error)
+                                s_record['listing'] = 'ECHANGED' if code in ('ELOOP', 'ENOTDIR') else code
+                                continue
+                            try:
+                                s_listed = backend.children(s_opened, volume)
+                            except OSError as error:
+                                backend.close(s_opened)
+                                s_record['listing'] = code_of(error)
+                                continue
+                            stack.append((s_opened, s_rel, iter(s_listed)))
+                        break
+                    else:
+                        if curr_handle != root_handle:
+                            backend.close(curr_handle)
+                        curr_handle = opened
+                        parent_rel = actual_rel
+                        parent_record = record
+            finally:
+                if curr_handle != root_handle:
+                    backend.close(curr_handle)
+        return records, issues, scanned_prefixes, missing_prefixes
+    finally:
+        for parent, _, _ in stack:
+            backend.close(parent)
+        backend.close(root_handle)
+
+
+def _execute_request(request):
+    exclude = request.get('exclude', [])
+    if not isinstance(exclude, list) or not all(isinstance(item, str) and item for item in exclude):
+        raise Refusal('SAFE_SCAN_FAILED')
+    subpaths = request.get('subpaths')
+    if subpaths is not None:
+        if not isinstance(subpaths, list) or not all(isinstance(item, str) for item in subpaths):
+            raise Refusal('SAFE_SCAN_FAILED')
+        records, issues, scanned_prefixes, missing_prefixes = scan_subpaths(
+            request['root'], int(request['maxEntries']), exclude=exclude, subpaths=subpaths
+        )
+        return {
+            'records': records,
+            'issues': issues,
+            'scannedPrefixes': scanned_prefixes,
+            'missingPrefixes': missing_prefixes,
+        }
+    records, issues = scan(request['root'], int(request['maxEntries']), exclude=exclude)
+    return {'records': records, 'issues': issues}
+
+
 def run():
     try:
         expected_pid = None
-        if len(sys.argv) != 1:
-            if len(sys.argv) != 3 or sys.argv[1] != '--parent-pid':
+        daemon = False
+        args = sys.argv[1:]
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == '--daemon':
+                daemon = True
+                index += 1
+            elif arg == '--parent-pid' and index + 1 < len(args):
+                expected_pid = int(args[index + 1])
+                index += 2
+            else:
                 raise Refusal('SAFE_SCAN_PARENT_GONE')
-            expected_pid = int(sys.argv[2])
+
         guard_parent(expected_pid)
-        request = json.loads(sys.stdin.buffer.readline(65536))
-        exclude = request.get('exclude', [])
-        if not isinstance(exclude, list) or not all(isinstance(item, str) and item for item in exclude):
-            raise Refusal('SAFE_SCAN_FAILED')
-        records, issues = scan(request['root'], int(request['maxEntries']), exclude=exclude)
-        sys.stdout.write(json.dumps({'records': records, 'issues': issues}))
-        return 0
+        if not daemon:
+            line = sys.stdin.buffer.readline(65536)
+            request = json.loads(line)
+            sys.stdout.write(json.dumps(_execute_request(request)))
+            return 0
+
+        while True:
+            line = sys.stdin.buffer.readline(262144)
+            if not line:
+                return 0
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                guard_parent(expected_pid)
+                request = json.loads(text)
+                result = _execute_request(request)
+                payload = {'ok': True, **result}
+            except (Refusal, ScopeError) as error:
+                code = str(error)
+                if code == 'SAFE_SCAN_PARENT_GONE':
+                    return 1
+                payload = {'ok': False, 'error': code}
+            except Exception:
+                payload = {'ok': False, 'error': 'SAFE_SCAN_FAILED'}
+            sys.stdout.write(json.dumps(payload) + '\n')
+            sys.stdout.flush()
     except (Refusal, ScopeError) as error:
         sys.stderr.write(f'{error}\n')
         return 1

@@ -130,7 +130,7 @@ export function groupOf(relative) {
   const parts = relative.split('/');
   if (parts[0] === 'Sistema') {
     if (parts[1] === 'Programa' && parts[2] === 'Motor' && parts.length > 3) return 'Sistema/Programa/Motor';
-    if (parts[1] === 'Componentes' && ['Node', 'Python'].includes(parts[2]) && parts.length > 4) return parts.slice(0, 4).join('/');
+    if (parts[1] === 'Componentes' && ['Node', 'Python', 'Nativo'].includes(parts[2]) && parts.length > 4) return parts.slice(0, 4).join('/');
     if (parts[1] === 'Componentes' && parts[2] === 'Semantica' && parts.length > 3) return 'Sistema/Componentes/Semantica';
     if (parts[1] === 'Licencias' && parts.length > 2) return 'Sistema/Licencias';
   }

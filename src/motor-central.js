@@ -4,7 +4,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MOTOR_VERSION } from './version.js';
 import { MotorError } from './errors.js';
-import { ensureBase, readBaseMarker } from './base-format.js';
+import { BASE_FORMAT_VERSION, ensureBase, prepareBaseFormat, readBaseMarker } from './base-format.js';
 import { releaseOf } from './package-descriptor.js';
 import { takeUpdateReport } from './update-handoff.js';
 import { openSession } from './session.js';
@@ -33,8 +33,8 @@ import {
   HEALTH_NONCE_PATTERN,
 } from './connector.js';
 
-const DEFAULT_LIGHT_IDLE_MS = 3 * 60_000;
-const DEFAULT_SHUTDOWN_IDLE_MS = 10 * 60_000;
+const DEFAULT_LIGHT_IDLE_MS = 60_000;
+const DEFAULT_SHUTDOWN_IDLE_MS = 0;
 // Prórroga máxima del reposo y del autoapagado mientras hay trabajo de fondo en curso
 // (un recorrido inicial grande o la preparación semántica). Acotada: un trabajo
 // atascado no mantiene el Motor despierto para siempre.
@@ -515,6 +515,7 @@ export async function startCentralMotor({
         onRootsChanged: (connection) => workspace.refresh(connection),
         onClose: async () => {
           connections.close(id);
+          await workspace.close().catch(() => {});
           for (const stream of sseStreams) {
             try { stream.end(); } catch {}
           }
@@ -697,13 +698,20 @@ export async function startCentralMotor({
       if (body.accion === 'verificar-actualizacion' && verificationToken) {
         const marker = await readBaseMarker(canonicalBase);
         const folders = await session.motor.listAuthorizedFolders();
+        if (marker && Number(marker.version ?? 0) < BASE_FORMAT_VERSION) {
+          for (const folder of folders) {
+            await session.motor.readFolderIndex(folder.id);
+          }
+          await prepareBaseFormat(canonicalBase, BASE_FORMAT_VERSION, { motorVersion: MOTOR_VERSION });
+        }
+        const finalMarker = (await readBaseMarker(canonicalBase)) ?? marker;
         const continuity = await session.motor.listContinuityIds();
         for (const id of continuity) {
           if (!(await session.motor.getContinuity(id))) throw new MotorError('UPDATE_BASE_READ_FAILED', 'No se pudo leer un registro de continuidad.');
         }
         const functions = await session.motor.listFunctions();
-        return sendJson(res, 200, { ok: true, baseDirectory: canonicalBase, baseId: marker.baseId,
-          baseFormatVersion: marker.version, release: releaseOf(layout.manifest),
+        return sendJson(res, 200, { ok: true, baseDirectory: canonicalBase, baseId: finalMarker.baseId,
+          baseFormatVersion: finalMarker.version, release: releaseOf(layout.manifest),
           carpetas: folders.length, continuidad: continuity.length, funciones: functions.length, node: process.execPath, python: layout.pythonExecutable });
       }
       if (verificationToken) return sendJson(res, 503, { error: 'UPDATE_VERIFICATION_ONLY' });
@@ -766,11 +774,12 @@ export async function startCentralMotor({
         ok: true, value: formatted.structuredContent, text: formatted.content[0].text, isError: formatted.isError === true,
       });
 
+      let workspace = null;
       try {
         return await trackWork(async () => {
           await session.start();
           await session.sync();
-          const workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
+          workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
           await workspace.initialize({ clientCapabilities: {} });
           const scope = {
             tools: createAgentTools({ session: workspace.session, connection: conn, log }),
@@ -816,6 +825,8 @@ export async function startCentralMotor({
             ...(known && error.details ? { detalles: error.details } : {}),
           },
         });
+      } finally {
+        await workspace?.close?.().catch(() => {});
       }
     }
 

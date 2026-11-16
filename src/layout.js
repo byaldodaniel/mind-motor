@@ -53,9 +53,11 @@ export function productRuntime(root, manifest, platform = process.platform, arch
     const { componentsDirectory } = productPaths(root, manifest);
     const nodeDirectory = path.join(componentsDirectory, 'Node', target);
     const pythonDirectory = path.join(componentsDirectory, 'Python', target);
-    return { directory: componentsDirectory, directories: [nodeDirectory, pythonDirectory], nodeDirectory, pythonDirectory,
+    const nativeDirectory = path.join(componentsDirectory, 'Nativo', target);
+    return { directory: componentsDirectory, directories: [nodeDirectory, pythonDirectory], nodeDirectory, pythonDirectory, nativeDirectory,
       nodeExecutable: path.join(nodeDirectory, windows ? 'node.exe' : 'bin/node'),
-      pythonExecutable: path.join(pythonDirectory, windows ? 'python.exe' : 'bin/python3') };
+      pythonExecutable: path.join(pythonDirectory, windows ? 'python.exe' : 'bin/python3'),
+      nativeExecutable: path.join(nativeDirectory, windows ? 'mind-native.exe' : 'mind-native') };
   }
   const directory = universal && !windows ? path.join(root, 'Runtime', target) : path.join(root, 'Runtime');
   return { directory, directories: [directory], nodeDirectory: path.join(directory, 'node'), pythonDirectory: path.join(directory, 'python'),

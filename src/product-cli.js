@@ -1,3 +1,7 @@
+import fsSync from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { currentDirectory } from './paths.js';
 import { resolveLayout, productInstallation, productRuntime } from './layout.js';
@@ -40,6 +44,7 @@ const OPTIONS = `
 Opciones:
   --carpeta <ruta>           Carpeta abierta por el iniciador; acceso completo sin formulario.
   --base <ruta>              Base que se usará (en el producto: la carpeta Base).
+  --nativo                   Usa el puente MCP nativo (Rust/Go) si está disponible.
 `;
 
 function parse(args) {
@@ -58,11 +63,61 @@ function parse(args) {
       options.direct = true;
     } else if (value === '--headers') {
       options.headers = true;
+    } else if (value === '--nativo') {
+      options.nativo = true;
     } else {
       rest.push(value);
     }
   }
   return { options, command: rest[0], parameters: rest.slice(1) };
+}
+
+async function tryNativeMcpBridge({ layout, workspacePaths = [] }) {
+  const nativeExecutable = layout?.runtime?.nativeExecutable;
+  if (!nativeExecutable || !fsSync.existsSync(nativeExecutable)) return null;
+  const nodeExecutable = layout?.runtime?.nodeExecutable && fsSync.existsSync(layout.runtime.nodeExecutable)
+    ? layout.runtime.nodeExecutable
+    : process.execPath;
+  const entrypoint = layout?.entrypoint
+    ?? (layout?.motorDirectory ? path.join(layout.motorDirectory, 'bin', 'mind.js') : null)
+    ?? fileURLToPath(new URL('../bin/mind.js', import.meta.url));
+  const args = [
+    'bridge',
+    '--base', layout.baseDirectory,
+    '--cwd', currentDirectory(),
+    '--paths', JSON.stringify(workspacePaths),
+    '--launch-command', nodeExecutable,
+    '--launch-arg', entrypoint,
+    '--launch-arg', 'motor',
+    '--launch-arg', '--base',
+    '--launch-arg', layout.baseDirectory,
+    '--relaunch-command', process.execPath,
+    ...process.argv.slice(1).flatMap((arg) => ['--relaunch-arg', arg]),
+    '--motor-version', MOTOR_VERSION,
+    '--package-revision', String(layout.manifest?.packageRevision ?? 0),
+  ];
+  return await new Promise((resolve) => {
+    let spawned = false;
+    let settled = false;
+    const child = spawn(nativeExecutable, args, { stdio: 'inherit', windowsHide: true });
+    const onSigTerm = () => child.kill('SIGTERM');
+    const onSigInt = () => child.kill('SIGINT');
+    const cleanup = () => {
+      process.off('SIGTERM', onSigTerm);
+      process.off('SIGINT', onSigInt);
+    };
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(code);
+    };
+    process.once('SIGTERM', onSigTerm);
+    process.once('SIGINT', onSigInt);
+    child.once('spawn', () => { spawned = true; });
+    child.once('error', () => finish(spawned ? 1 : null));
+    child.once('exit', (code, signal) => finish(code ?? (signal ? 1 : 0)));
+  });
 }
 
 function print(value) {
@@ -89,10 +144,14 @@ async function withSession(options, task, { observe = false } = {}) {
     if (options.autoWorkspace) {
       const { createWorkspaceAccess } = await import('./workspace-access.js');
       const workspace = createWorkspaceAccess(session, { paths: options.workspacePaths });
-      await session.start();
-      await session.sync();
-      await workspace.initialize({ clientCapabilities: {} });
-      return await task(workspace.session);
+      try {
+        await session.start();
+        await session.sync();
+        await workspace.initialize({ clientCapabilities: {} });
+        return await task(workspace.session);
+      } finally {
+        await workspace.close();
+      }
     }
     await session.start();
     return await task(session);
@@ -113,7 +172,7 @@ export async function main(args) {
         let startup = {estado:'no_aplica',clientes:[]};
         if (installation.root) {
           const { prepareAgentStartup } = await import('./agent-startup.js');
-          startup = await prepareAgentStartup({root:installation.root,runtime:productRuntime(installation.root,installation.manifest)});
+          startup = await prepareAgentStartup({root:installation.root,runtime:productRuntime(installation.root,installation.manifest),createMissing:true});
         }
         if (command === 'preparar') {
           print({conexion:result,inicio:startup,indicacion:'Las instrucciones se cargan en conversaciones nuevas de los clientes detectados.'});
@@ -220,6 +279,10 @@ export async function main(args) {
           return await runMcpSession({ layout, parameters, workspacePaths: options.workspacePaths });
         }
         if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `mcp no admite argumentos (${parameters[0]}).`);
+        if (options.nativo || process.env.MIND_PUENTE_NATIVO === '1') {
+          const nativeCode = await tryNativeMcpBridge({ layout, workspacePaths: options.workspacePaths });
+          if (nativeCode !== null) return nativeCode;
+        }
         const { runMcpBridge } = await import('./mcp-bridge.js');
         await runMcpBridge({
           layout,

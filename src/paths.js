@@ -31,6 +31,7 @@ export const FOLD_CASE = process.platform === 'win32' || process.platform === 'd
  * normales de los agentes no la abren; solo la gestiona el organizador.
  */
 export const TRASH_DIRECTORY = '.papelera-mind';
+export const IMPLICIT_EXCLUSIONS = new Set([TRASH_DIRECTORY, '.codex', '.claude', '.gemini', '.git', 'node_modules']);
 
 /** true si relativePath es la papelera de Mind o está dentro de ella. */
 export function isTrashPath(relativePath) {
@@ -39,9 +40,13 @@ export function isTrashPath(relativePath) {
   return (FOLD_CASE ? first.toLowerCase() : first) === TRASH_DIRECTORY;
 }
 
-/** true si relativePath es una exclusión o está dentro de una ("/" como separador). */
+/** true si relativePath pertenece a una exclusión implícita o explícita ("/" como separador). */
 export function isExcluded(exclusions, relativePath) {
-  if (isTrashPath(relativePath)) return true;
+  if (typeof relativePath === 'string' && relativePath !== '') {
+    for (const part of relativePath.split('/')) {
+      if (IMPLICIT_EXCLUSIONS.has(FOLD_CASE ? part.toLowerCase() : part)) return true;
+    }
+  }
   if (!Array.isArray(exclusions) || exclusions.length === 0) return false;
   const target = FOLD_CASE ? relativePath.toLowerCase() : relativePath;
   return exclusions.some((item) => {

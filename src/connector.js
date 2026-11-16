@@ -10,6 +10,7 @@ import { MotorError } from './errors.js';
 import { FOLD_CASE } from './paths.js';
 import { classifyToolPriority, QUEUE_PRIORITY } from './smart-queue.js';
 import { launchIndependent } from './independent-launch.js';
+import { predatesSystemBoot, systemBootTime } from './process-identity.js';
 import { waitForHandoff } from './update-handoff-state.js';
 import { productPaths, productRuntime } from './layout.js';
 import { readManifestFile } from './product-files.js';
@@ -117,7 +118,16 @@ export async function writeJsonAtomic(filename, value, { mode = 0o600 } = {}) {
     await handle.sync().catch(() => {});
     await handle.close();
     handle = null;
-    await fs.rename(temp, filename);
+    const delaysMs = [15, 30, 60, 120, 240];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await fs.rename(temp, filename);
+        break;
+      } catch (error) {
+        if (!['EPERM', 'EBUSY', 'EACCES'].includes(error?.code) || attempt >= delaysMs.length) throw error;
+        await delay(delaysMs[attempt]);
+      }
+    }
     await fs.chmod(filename, mode).catch(() => {});
   } catch (error) {
     await handle?.close().catch(() => {});
@@ -508,4 +518,70 @@ export async function stopCentralMotor(target = {}, options = {}) {
     await delay(40);
   }
   return false;
+}
+
+const STALE_TEMP_PATTERN = /^\.(?:mind-|conector\.json\.tmp-|mind-connection-).+\.tmp(?:-[0-9a-f-]+)?$/iu;
+const QUEUE_TICKET_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/iu;
+const QUEUE_PRIORITY_PATTERN = /^priority-[a-f0-9]{64}\.json$/iu;
+
+/**
+ * Limpia archivos temporales abandonados en la Base y tickets/prioridades vencidos
+ * o dañados anteriores al arranque en `resource-queue/`. No toca archivos activos.
+ */
+export async function cleanStaleBaseTemporaries(baseDirectory, { maxAgeMs = 3_600_000, now = Date.now(), bootTime = systemBootTime({ now }) } = {}) {
+  let removedTempFiles = 0;
+  let removedQueueItems = 0;
+  const entries = await fs.readdir(baseDirectory).catch(() => []);
+  for (const name of entries) {
+    if (!STALE_TEMP_PATTERN.test(name)) continue;
+    const target = path.join(baseDirectory, name);
+    try {
+      const info = await fs.lstat(target);
+      if (info.isSymbolicLink() || !info.isFile()) continue;
+      if (predatesSystemBoot(info, { bootTime }) || info.mtimeMs < now - maxAgeMs) {
+        await fs.rm(target, { force: true });
+        removedTempFiles += 1;
+      }
+    } catch {}
+  }
+
+  const queueDir = path.join(baseDirectory, 'resource-queue');
+  const queueEntries = await fs.readdir(queueDir).catch(() => []);
+  for (const name of queueEntries) {
+    const target = path.join(queueDir, name);
+    try {
+      const info = await fs.lstat(target);
+      if (info.isSymbolicLink() || !info.isFile()) continue;
+      if (QUEUE_TICKET_PATTERN.test(name)) {
+        const raw = await fs.readFile(target, 'utf8').catch(() => null);
+        let corrupt = raw === null || raw.trim() === '' || raw.includes('\0');
+        if (!corrupt) {
+          try { JSON.parse(raw); } catch { corrupt = true; }
+        }
+        if ((corrupt && predatesSystemBoot(info, { bootTime })) || info.mtimeMs < now - maxAgeMs) {
+          await fs.rm(target, { force: true });
+          removedQueueItems += 1;
+        }
+      } else if (QUEUE_PRIORITY_PATTERN.test(name)) {
+        const raw = await fs.readFile(target, 'utf8').catch(() => null);
+        let remove = false;
+        if (raw === null || raw.trim() === '' || raw.includes('\0')) {
+          remove = predatesSystemBoot(info, { bootTime });
+        } else {
+          try {
+            const parsed = JSON.parse(raw);
+            if (!Number.isFinite(parsed?.until) || parsed.until < now) remove = true;
+          } catch {
+            remove = predatesSystemBoot(info, { bootTime });
+          }
+        }
+        if (remove) {
+          await fs.rm(target, { force: true });
+          removedQueueItems += 1;
+        }
+      }
+    } catch {}
+  }
+
+  return { removedTempFiles, removedQueueItems };
 }
