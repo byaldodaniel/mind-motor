@@ -32,7 +32,7 @@
       "archivo": "mind-native",
       "ruta": "Sistema/Componentes/Nativo/darwin-x64/mind-native",
       "bytes": 7179648,
-      "sha256": "706a4663275cc5fff77a6dccbd36dc142f17adb010c946818c87a0e9b58955e"
+      "sha256": "706a4663275cc5fff77a6dccbd36dc142f17adb010c946818c87a0e9b858955e"
     },
     "linux-x64": {
       "motor": "rust",
