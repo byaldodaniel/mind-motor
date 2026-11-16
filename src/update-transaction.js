@@ -51,7 +51,7 @@ function groups(m) {
   for(const r of [...Object.keys(m.files),...Object.keys(m.links??{})]) {
     if(m.layoutVersion !== 2 && /^(Motor|Runtime|LICENCIAS)\//u.test(r)) out.add(r.split('/')[0]);
     else if(r.startsWith('Sistema/Programa/Motor/')) out.add('Sistema/Programa/Motor');
-    else if(/^Sistema\/Componentes\/(Node|Python)\/[^/]+\//u.test(r)) out.add(r.split('/').slice(0,4).join('/'));
+    else if(/^Sistema\/Componentes\/(Node|Python|Nativo)\/[^/]+\//u.test(r)) out.add(r.split('/').slice(0,4).join('/'));
     else if(r.startsWith('Sistema/Componentes/Semantica/')) out.add('Sistema/Componentes/Semantica');
     else if(r.startsWith('Sistema/Licencias/')) out.add('Sistema/Licencias');
     else out.add(r);
@@ -427,7 +427,7 @@ export async function runUpdateTransaction(options,h){
       const stat=await fs.lstat(live);
       if(stat.isDirectory()){
         const check=await verifyTree(root,current,{prefix:item,ignoreBytecode:true});
-        if(check.problems.some(p=>p.problem==='sobrante'))throw error('UPDATE_UNMANAGED_CONTENT',`Hay archivos ajenos en ${item}; se conservan.`);
+        if(check.problems.some(p=>p.problem==='sobrante' && !Object.hasOwn(incoming.files,p.path)))throw error('UPDATE_UNMANAGED_CONTENT',`Hay archivos ajenos en ${item}; se conservan.`);
       }
       await durableMove(root,journalFile,j,live,path.join(work,'recuperacion',...item.split('/')),testing,{copy:stat.isFile()});
     }

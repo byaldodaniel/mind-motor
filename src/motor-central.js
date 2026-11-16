@@ -4,7 +4,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MOTOR_VERSION } from './version.js';
 import { MotorError } from './errors.js';
-import { ensureBase, readBaseMarker } from './base-format.js';
+import { BASE_FORMAT_VERSION, ensureBase, prepareBaseFormat, readBaseMarker } from './base-format.js';
 import { releaseOf } from './package-descriptor.js';
 import { takeUpdateReport } from './update-handoff.js';
 import { openSession } from './session.js';
@@ -698,13 +698,20 @@ export async function startCentralMotor({
       if (body.accion === 'verificar-actualizacion' && verificationToken) {
         const marker = await readBaseMarker(canonicalBase);
         const folders = await session.motor.listAuthorizedFolders();
+        if (marker && Number(marker.version ?? 0) < BASE_FORMAT_VERSION) {
+          for (const folder of folders) {
+            await session.motor.readFolderIndex(folder.id);
+          }
+          await prepareBaseFormat(canonicalBase, BASE_FORMAT_VERSION, { motorVersion: MOTOR_VERSION });
+        }
+        const finalMarker = (await readBaseMarker(canonicalBase)) ?? marker;
         const continuity = await session.motor.listContinuityIds();
         for (const id of continuity) {
           if (!(await session.motor.getContinuity(id))) throw new MotorError('UPDATE_BASE_READ_FAILED', 'No se pudo leer un registro de continuidad.');
         }
         const functions = await session.motor.listFunctions();
-        return sendJson(res, 200, { ok: true, baseDirectory: canonicalBase, baseId: marker.baseId,
-          baseFormatVersion: marker.version, release: releaseOf(layout.manifest),
+        return sendJson(res, 200, { ok: true, baseDirectory: canonicalBase, baseId: finalMarker.baseId,
+          baseFormatVersion: finalMarker.version, release: releaseOf(layout.manifest),
           carpetas: folders.length, continuidad: continuity.length, funciones: functions.length, node: process.execPath, python: layout.pythonExecutable });
       }
       if (verificationToken) return sendJson(res, 503, { error: 'UPDATE_VERIFICATION_ONLY' });

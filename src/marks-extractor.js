@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { fold } from './search.js';
 import { isExcluded } from './paths.js';
+import { prepareBaseFormat } from './base-format.js';
 import { withCatalog } from './sqlite-catalog.js';
 
 const MAX_MARK_FILE_BYTES = 512 * 1024;
@@ -268,14 +270,54 @@ function entryFingerprint(entry) {
 }
 
 async function readMarkCandidateSafe(rootPath, relativePath, expectedSize) {
-  const full = path.join(rootPath, ...relativePath.split('/'));
-  const info = await fs.lstat(full).catch(() => null);
-  if (!info || !info.isFile() || info.isSymbolicLink() || info.size > MAX_MARK_FILE_BYTES) return null;
+  const segments = String(relativePath ?? '').split('/').filter(Boolean);
+  if (segments.length === 0 || segments.some((seg) => seg === '.' || seg === '..')) return null;
+
+  let cursor = path.resolve(rootPath);
+  let info = null;
+  for (let i = 0; i < segments.length; i += 1) {
+    cursor = path.join(cursor, segments[i]);
+    const st = await fs.lstat(cursor).catch(() => null);
+    if (!st || st.isSymbolicLink()) return null;
+    if (i < segments.length - 1) {
+      if (!st.isDirectory()) return null;
+    } else {
+      info = st;
+    }
+  }
+  if (!info || !info.isFile() || info.size > MAX_MARK_FILE_BYTES) return null;
   if (expectedSize !== null && info.size !== expectedSize) {
     // Size shifted slightly after last index scan; still enforce hard limit before reading.
     if (info.size > MAX_MARK_FILE_BYTES) return null;
   }
-  return fs.readFile(full, 'utf8').catch(() => null);
+
+  const openFlags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  let handle = null;
+  try {
+    handle = await fs.open(cursor, openFlags);
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.size > MAX_MARK_FILE_BYTES) return null;
+    if (openedStat.dev !== info.dev || openedStat.ino !== info.ino || openedStat.size !== info.size) return null;
+    if (openedStat.size === 0) return '';
+    const buffer = Buffer.allocUnsafe(openedStat.size);
+    let offset = 0;
+    while (offset < openedStat.size) {
+      const { bytesRead } = await handle.read(buffer, offset, openedStat.size - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_MARK_FILE_BYTES) return null;
+    if (offset === openedStat.size) {
+      const probe = Buffer.allocUnsafe(1);
+      const tail = await handle.read(probe, 0, 1, offset);
+      if (tail.bytesRead > 0 && offset + tail.bytesRead > MAX_MARK_FILE_BYTES) return null;
+    }
+    return buffer.toString('utf8', 0, offset);
+  } catch {
+    return null;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
 }
 
 function detectProjectsForScope(folderPath, entries) {
@@ -354,6 +396,7 @@ export async function groupMarksInCatalog({
     scopeContexts.push({ folder, candidates });
   }
 
+  await prepareBaseFormat(baseDirectory, 3);
   // First read current scanned_files fingerprints & alias table from catalog (create if missing).
   const initial = await withCatalog(baseDirectory, { write: true, create: true }, (db) => {
     if (customAliases && typeof customAliases === 'object') {

@@ -27,6 +27,7 @@ import {
   hashFile, scanTree, validateManifest, validUniversalTargets, verifyTree, describeProblems, MANIFEST_NAME, MANIFEST_RELATIVE_PATH, manifestRelativePath,
 } from '../src/product-files.js';
 import { copySemanticBundle } from '../src/semantic-bundle.js';
+import { stageNativeTarget } from '../src/native-bundle.js';
 import { BASE_FORMAT_VERSION } from '../src/base-format.js';
 
 /** El manifiesto declara siempre la capacidad real del Motor que se empaqueta. */
@@ -386,7 +387,7 @@ async function stageTargetRuntime(stage, id, components, cache, modes) {
   return runtimeComponents(components,id).map(component => ({...component,target:id}));
 }
 
-async function buildTarget(id, { components, cache, output, mtime, version, keepStage, privateKey, packageRevision = 1 }) {
+async function buildTarget(id, { components, cache, output, mtime, version, keepStage, privateKey, packageRevision = 1, nativeConfig, nativeCache }) {
   const target = TARGETS[id];
   const work = path.join(output, '.construccion', id);
   await fsp.rm(work, {recursive:true,force:true});
@@ -394,6 +395,8 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
   await copySharedFiles(stage);
   const modes = new Map();
   const manifestComponents = await stageTargetRuntime(stage,id,components,cache,modes);
+  const stagedNative = await stageNativeTarget(stage, id, nativeConfig, nativeCache, modes);
+  if (stagedNative) manifestComponents.push(stagedNative);
   await copyLaunchers(stage,modes,{windows:target.platform==='win32',posix:target.platform!=='win32',mac:target.platform==='darwin'});
   await fsp.writeFile(path.join(stage,'.mcp.json'),mcpConfig(target),{flag:'wx'});
   const result = await archiveStage(stage, {modes,mtime,verifyMetadata:true,privateKey,
@@ -403,7 +406,7 @@ async function buildTarget(id, { components, cache, output, mtime, version, keep
   return result;
 }
 
-async function buildUniversal(targets, { components, cache, output, mtime, version, keepStage, privateKey, packageRevision = 1 }) {
+async function buildUniversal(targets, { components, cache, output, mtime, version, keepStage, privateKey, packageRevision = 1, nativeConfig, nativeCache }) {
   const work = await fsp.mkdtemp(path.join(output, '.mind-construccion-'));
   try {
     const stage = path.join(work, 'My Mind');
@@ -411,7 +414,16 @@ async function buildUniversal(targets, { components, cache, output, mtime, versi
     const manifestComponents = [];
     await copySharedFiles(stage);
     await copyLaunchers(stage, modes, { windows: true, posix: true, mac: true });
-    for (const id of targets) manifestComponents.push(...await stageTargetRuntime(stage,id,components,cache,modes));
+    for (const id of targets) {
+      manifestComponents.push(...await stageTargetRuntime(stage,id,components,cache,modes));
+      const stagedNative = await stageNativeTarget(stage, id, nativeConfig, nativeCache, modes);
+      if (stagedNative) manifestComponents.push(stagedNative);
+    }
+    for (const id of Object.keys(nativeConfig?.plataformas ?? {})) {
+      if (targets.includes(id)) continue;
+      const stagedExtra = await stageNativeTarget(stage, id, nativeConfig, nativeCache, modes);
+      if (stagedExtra) manifestComponents.push(stagedExtra);
+    }
     const notices = targets.map((id) => `- [${id}](${id}/AVISOS.md)`).join('\n');
     await fsp.writeFile(path.join(stage, 'Sistema', 'Licencias', 'AVISOS.md'), `# Componentes por plataforma\n\n${notices}\n`, { flag: 'wx' });
 
@@ -444,6 +456,9 @@ async function main(argv) {
 
   const components = JSON.parse(await fsp.readFile(path.join(PACKAGING, 'componentes.json'), 'utf8'));
   if (components.formato !== 'mind-componentes' || components.version !== 1) fail('packaging/componentes.json no tiene el formato esperado.');
+  const nativeConfig = JSON.parse(await fsp.readFile(path.join(PACKAGING, 'nativo.json'), 'utf8'));
+  if (nativeConfig.formato !== 'mind-nativo' || nativeConfig.version !== 1) fail('packaging/nativo.json no tiene el formato esperado.');
+  const nativeCache = path.resolve(process.env.MIND_NATIVO_SOURCE ?? path.join(ROOT, '.cache', 'nativo'));
   const declared = JSON.parse(await fsp.readFile(path.join(ROOT, 'package.json'), 'utf8')).version;
   // --version-paquete: solo para probar "mind actualizar" con un segundo paquete real (CI).
   const version = values('--version-paquete')[0] ?? declared;
@@ -460,7 +475,7 @@ async function main(argv) {
   if(!Number.isSafeInteger(packageRevision)||packageRevision<1)fail('La revisión del paquete debe ser un entero positivo.');
   const privateKeyPath = values('--clave-publicacion')[0];
   const privateKey = privateKeyPath ? await fsp.readFile(path.resolve(privateKeyPath), 'utf8') : undefined;
-  const options = { components, cache, output, mtime, version, privateKey, packageRevision, keepStage: argv.includes('--conservar-carpeta') };
+  const options = { components, cache, nativeConfig, nativeCache, output, mtime, version, privateKey, packageRevision, keepStage: argv.includes('--conservar-carpeta') };
   const built = [];
   if (requested.length === 0) built.push(await buildUniversal(targets, options));
   for (const id of requested) built.push(await buildTarget(id, options));
