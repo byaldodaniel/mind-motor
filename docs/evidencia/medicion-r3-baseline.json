@@ -1,0 +1,49 @@
+{
+  "fecha": "2026-11-16T05:32:41.690Z",
+  "rama": "gemini/1.0.4-r3",
+  "commit": "b33dfd9",
+  "baseRealCopiada": true,
+  "entradasCopiadasReales": 110912,
+  "busquedaReal": {
+    "carpetas": 9,
+    "entradas": 110912,
+    "coincidencias": 43,
+    "frioMs": 5448.53,
+    "calienteMs": 7832.45,
+    "igual": true
+  },
+  "arbol100k": {
+    "entradas": 100000,
+    "escrituraMs": 5352.27,
+    "lecturaFriaMs": 5155.12,
+    "lecturaCalienteMs": 11.9
+  },
+  "reconciliacionCambioUnArchivo": {
+    "entradas": 1020,
+    "indexacionInicialMs": 3677.44,
+    "reconciliacionUnArchivoMs": 1318.01,
+    "busquedaMs": 95.1,
+    "coincidencias": 20,
+    "generacion": 2
+  },
+  "marcasYAgrupacion": {
+    "disponible": false,
+    "proyectosAnalizados": [
+      "Aldo Daniel",
+      "Mind",
+      "ASPROCOAN",
+      "SACTEK",
+      "KEEP PACKING"
+    ],
+    "conteoManualLinea": {
+      "pendientes": 16,
+      "ideas": 3
+    }
+  },
+  "memoriaProceso": {
+    "rssMb": 119,
+    "heapUsedMb": 57.4,
+    "privateMb": 114.3
+  },
+  "duracionTotalMs": 37793.32
+}

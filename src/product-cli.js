@@ -89,10 +89,14 @@ async function withSession(options, task, { observe = false } = {}) {
     if (options.autoWorkspace) {
       const { createWorkspaceAccess } = await import('./workspace-access.js');
       const workspace = createWorkspaceAccess(session, { paths: options.workspacePaths });
-      await session.start();
-      await session.sync();
-      await workspace.initialize({ clientCapabilities: {} });
-      return await task(workspace.session);
+      try {
+        await session.start();
+        await session.sync();
+        await workspace.initialize({ clientCapabilities: {} });
+        return await task(workspace.session);
+      } finally {
+        await workspace.close();
+      }
     }
     await session.start();
     return await task(session);
@@ -113,7 +117,7 @@ export async function main(args) {
         let startup = {estado:'no_aplica',clientes:[]};
         if (installation.root) {
           const { prepareAgentStartup } = await import('./agent-startup.js');
-          startup = await prepareAgentStartup({root:installation.root,runtime:productRuntime(installation.root,installation.manifest)});
+          startup = await prepareAgentStartup({root:installation.root,runtime:productRuntime(installation.root,installation.manifest),createMissing:true});
         }
         if (command === 'preparar') {
           print({conexion:result,inicio:startup,indicacion:'Las instrucciones se cargan en conversaciones nuevas de los clientes detectados.'});

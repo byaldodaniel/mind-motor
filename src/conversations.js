@@ -198,7 +198,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     if (query.trim() && terms.length === 0) fail('INVALID_CONVERSATION_QUERY', 'La consulta debe contener palabras o números.');
     const expression = terms.map(term => '"' + term + '"').join(' AND ');
     const signal = requestSignal();
-    return withIndexLock(baseDirectory, 'all', async () => {
+    const synced = await withIndexLock(baseDirectory, 'all', async () => {
       const db = await openIndex();
       try {
         db.exec('BEGIN');
@@ -258,50 +258,53 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
         const excerpt = expression ? "snippet(conversations,4,'','',' … ',32)" : 'substr(important,1,300)';
         const rows = db.prepare(`SELECT id,revision,updated,title,project,${excerpt} AS excerpt
           FROM conversations${where} ORDER BY ${expression ? 'rank,' : ''} updated DESC,id LIMIT ?`).all(...args, mode === 'hibrida' ? 200 : limit);
+        const pending = db.prepare('SELECT count(*) AS n FROM conversations WHERE id NOT IN (SELECT id FROM conversation_vectors WHERE model=?)').get(semanticEncoder.model).n;
+        const indexed = db.prepare('SELECT count(*) AS n FROM conversation_vectors WHERE model=?').get(semanticEncoder.model).n;
         db.exec('COMMIT');
-        let selected = rows;
-        let totalResults = total;
-        const semantic = { status: 'no_solicitada', embedded: 0, model: semanticEncoder.model };
-        if (mode === 'hibrida' && expression) {
-          try {
-            if (!(await semanticEncoder.available())) semantic.status = 'no_disponible';
-            else {
-              const pending = db.prepare('SELECT count(*) AS n FROM conversations WHERE id NOT IN (SELECT id FROM conversation_vectors WHERE model=?)').get(semanticEncoder.model).n;
-              const indexed = db.prepare('SELECT count(*) AS n FROM conversation_vectors WHERE model=?').get(semanticEncoder.model).n;
-              semantic.pending = pending;
-              semantic.status = pending ? 'preparando' : 'activa';
-              const ready = semanticEncoder.isReady?.() !== false;
-              const found = indexed && ready ? await semanticSearch(db, semanticEncoder, { query, projectKey: project === undefined ? undefined : fold(project), signal }) : { matches: [], embedded: 0 };
-              if (indexed && !ready) {
-                semantic.status = 'cargando';
-                if (!warming && !preparing && !closing) {
-                  warming = semanticEncoder.embed([query], { kind: 'query' }).then(() => { preparationError = null; })
-                    .catch(error => { preparationError = error.code ?? 'SEMANTIC_FAILED'; }).finally(() => { warming = null; });
-                }
-              }
-              if (pending) startPreparation();
-              if (preparationError) semantic.status = 'fallo';
-              const fused = fuseResults(rows, found.matches, { exactIdentifiers: /\d/.test(query) || /[/\\.]/.test(query) });
-              selected = fused.slice(0, limit).map(row => {
-                const metadata = db.prepare('SELECT revision,updated,title,project FROM conversations WHERE id=?').get(row.id);
-                return { ...metadata, ...row };
-              });
-              totalResults = fused.length;
-            }
-          } catch (error) {
-            if (signal?.aborted) throw error;
-            semantic.status = 'fallo';
-          }
-        }
-        return { total: totalResults, semantic, results: selected.slice(0, limit).map(row => ({ id: row.id, revision: Number(row.revision),
-          title: row.title, project: row.project || null, updatedAt: row.updated,
-          excerpt: row.excerpt.slice(0, 500), match: row.match ?? 'palabras' })),
-          index: { examined: present.size, read, omitted } };
+        return { rows, total, presentCount: present.size, read, omitted, pending, indexed };
       } catch (error) {
         try { db.exec('ROLLBACK'); } catch {}
         throw error;
       } finally { db.close(); }
     }, 'conversation-index', { signal, timeoutMs: 5000 });
+
+    let selected = synced.rows;
+    let totalResults = synced.total;
+    const semantic = { status: 'no_solicitada', embedded: 0, model: semanticEncoder.model };
+    if (mode === 'hibrida' && expression) {
+      const db = await openIndex();
+      try {
+        if (!(await semanticEncoder.available())) semantic.status = 'no_disponible';
+        else {
+          semantic.pending = synced.pending;
+          semantic.status = synced.pending ? 'preparando' : 'activa';
+          const ready = semanticEncoder.isReady?.() !== false;
+          const found = synced.indexed && ready ? await semanticSearch(db, semanticEncoder, { query, projectKey: project === undefined ? undefined : fold(project), signal }) : { matches: [], embedded: 0 };
+          if (synced.indexed && !ready) {
+            semantic.status = 'cargando';
+            if (!warming && !preparing && !closing) {
+              warming = semanticEncoder.embed([query], { kind: 'query' }).then(() => { preparationError = null; })
+                .catch(error => { preparationError = error.code ?? 'SEMANTIC_FAILED'; }).finally(() => { warming = null; });
+            }
+          }
+          if (synced.pending) startPreparation();
+          if (preparationError) semantic.status = 'fallo';
+          const fused = fuseResults(synced.rows, found.matches, { exactIdentifiers: /\d/.test(query) || /[/\\.]/.test(query) });
+          selected = fused.slice(0, limit).map(row => {
+            const metadata = db.prepare('SELECT revision,updated,title,project FROM conversations WHERE id=?').get(row.id);
+            return { ...metadata, ...row };
+          });
+          totalResults = fused.length;
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        semantic.status = 'fallo';
+      } finally { db.close(); }
+    }
+    return { total: totalResults, semantic, results: selected.slice(0, limit).map(row => ({ id: row.id, revision: Number(row.revision),
+      title: row.title, project: row.project || null, updatedAt: row.updated,
+      excerpt: row.excerpt.slice(0, 500), match: row.match ?? 'palabras' })),
+      index: { examined: synced.presentCount, read: synced.read, omitted: synced.omitted } };
   }
   return Object.freeze({ getConversation, saveConversation, searchConversations,
     getConversationPreferences, configureConversationPreferences,

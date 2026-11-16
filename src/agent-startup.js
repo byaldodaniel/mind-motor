@@ -49,7 +49,7 @@ async function install(file,block) {
   }finally{await fs.rm(temporary,{force:true});}
 }
 /** Anfitrión de instalación; nunca se expone como herramienta de agente. */
-export async function prepareAgentStartup({root,runtime,manifest,home=os.homedir(),env=process.env,platform=process.platform}={}) {
+export async function prepareAgentStartup({root,runtime,manifest,home=os.homedir(),env=process.env,platform=process.platform,createMissing=false}={}) {
   if(!root || env.MIND_AGENT_STARTUP==='0')return {estado:'omitido',clientes:[]};
   const codexHome=env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home,'.codex');
   const candidates=[['Codex',codexHome,'AGENTS.md'],['Claude Code',path.join(home,'.claude'),'CLAUDE.md'],['Antigravity',path.join(home,'.gemini'),'GEMINI.md']];
@@ -68,6 +68,6 @@ export async function prepareAgentStartup({root,runtime,manifest,home=os.homedir
       clients.push({cliente:name,archivo:file,estado:await install(file,block)});
     } catch(error) {clients.push({cliente:name,estado:'pendiente',codigo:error.code??'STARTUP_RULE_FAILED',mensaje:error.message});}
   }
-  const connections=await updateManagedClientConnections({root,runtime,manifest,home,env,platform});
+  const connections=await updateManagedClientConnections({root,runtime,manifest,home,env,platform,createMissing});
   return {estado:[...clients,...connections].some(x=>x.estado==='pendiente')?'parcial':clients.length||connections.length?'preparado':'sin_clientes',clientes:clients,conexiones:connections};
 }

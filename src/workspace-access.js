@@ -1,16 +1,40 @@
-import { contains, currentDirectory } from './paths.js';
+import { contains, currentDirectory, samePath } from './paths.js';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { validateCandidateFolder } from './consent.js';
 import { ACCESS_LEVELS } from './access-policy.js';
 
+const IGNORED_AGENT_DIR_PATTERN = /(?:^|[\\/])\.(?:codex|claude|gemini)(?:$|[\\/])|(?:^|[\\/])Documents[\\/]Codex(?:$|[\\/])/iu;
+
+function isIgnoredWorkspaceCandidate(candidate) {
+  return typeof candidate === 'string' && IGNORED_AGENT_DIR_PATTERN.test(candidate);
+}
+
 /** El ámbito procede del cliente MCP o del iniciador, nunca de una herramienta. */
 export function createWorkspaceAccess(session, { paths = [], cwd = currentDirectory(), log = () => {} } = {}) {
   let active = paths.length > 0;
   let grants = new Map();
+  const ephemeralGrants = new Set();
   const reduced = new Set();
   let ready = Promise.resolve();
   const userDataDirectory = session.layout.userDataDirectory;
+  async function releaseEphemeral() {
+    for (const id of [...ephemeralGrants]) {
+      ephemeralGrants.delete(id);
+      await session.motor.releaseSessionFolder?.(id).catch(() => {});
+    }
+  }
+  function normalizeCandidate(candidate) {
+    if (typeof candidate !== 'string' || !candidate.trim()) return null;
+    if (session.layout.root) {
+      try {
+        if (samePath(candidate, session.layout.root)) return userDataDirectory ?? null;
+      } catch {}
+    }
+    if (isIgnoredWorkspaceCandidate(candidate)) return null;
+    return candidate;
+  }
   async function isDestination(folder) {
     if(!folder)return false;
     const directories=await session.motor.workDestinationDirectories();
@@ -54,14 +78,25 @@ export function createWorkspaceAccess(session, { paths = [], cwd = currentDirect
 
   async function replace(nextPaths) {
     // Cerrar el ámbito anterior antes de validar o registrar el nuevo.
+    const previousGrants = new Set(grants.keys());
     grants = new Map();
-    for (const candidate of [...new Set([...nextPaths,...userDataDirectory?[userDataDirectory]:[]])]) {
+    await releaseEphemeral();
+    const mapped = nextPaths.map(normalizeCandidate).filter(Boolean);
+    const candidates = [...new Set([...mapped, ...(userDataDirectory ? [userDataDirectory] : [])])];
+    for (const candidate of candidates) {
       try {
         const canonical = await validateCandidateFolder(candidate, session.layout);
-        const registered = await session.motor.authorizeFolder(canonical);
+        const isPersistentUserDir = Boolean(userDataDirectory && samePath(canonical, userDataDirectory));
+        const registered = isPersistentUserDir || typeof session.motor.authorizeSessionFolder !== 'function'
+          ? await session.motor.authorizeFolder(canonical)
+          : await session.motor.authorizeSessionFolder(canonical);
+        if (registered?.ephemeral) ephemeralGrants.add(registered.id);
         const folder = await session.motor.getAuthorizedFolder(registered.id);
+        if (!folder) continue;
         grants.set(folder.id, folder.generation);
-        await session.audit('carpeta-abierta', { carpeta: folder.id, canal: 'cliente-o-iniciador' });
+        if (!previousGrants.has(folder.id)) {
+          await session.audit('carpeta-abierta', { carpeta: folder.id, canal: 'cliente-o-iniciador' });
+        }
       } catch (error) {
         log('aviso', 'No se pudo abrir una carpeta del espacio de trabajo', { codigo: error.code ?? 'WORKSPACE_UNAVAILABLE' });
       }
@@ -75,12 +110,17 @@ export function createWorkspaceAccess(session, { paths = [], cwd = currentDirect
       if(connection.clientCapabilities?.roots && paths.length===0) {
         active=true;await this.refresh(connection);
       } else {
-        let candidates=paths;
-        if(candidates.length===0) {
-          try {candidates=[await validateCandidateFolder(cwd,session.layout)];}catch{}
+        let candidates = paths.map(normalizeCandidate).filter(Boolean);
+        if (candidates.length === 0) {
+          const normalizedCwd = normalizeCandidate(cwd);
+          if (normalizedCwd) {
+            try { candidates = [await validateCandidateFolder(normalizedCwd, session.layout)]; } catch {}
+          }
         }
-        if(candidates.length>0 || userDataDirectory) {
-          active=candidates.length>0;ready=replace(candidates);await ready;
+        if (candidates.length > 0 || userDataDirectory) {
+          active = candidates.length > 0;
+          ready = replace(candidates);
+          await ready;
         }
       }
     },
@@ -116,6 +156,11 @@ export function createWorkspaceAccess(session, { paths = [], cwd = currentDirect
           throw new MotorError('WORKSPACE_REQUIRED', 'Abre esta carpeta en tu agente para trabajar con ella mediante Mind.');
         }
       }
+    },
+    async close() {
+      await ready.catch(() => {});
+      grants = new Map();
+      await releaseEphemeral();
     },
     active: () => active,
   };

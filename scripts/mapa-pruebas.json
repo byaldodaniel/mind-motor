@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "descripcion": "Mapa delimitador de pruebas por módulo del Motor de Mind para validación acotada de 1.0.4-r3.",
+  "modulos": {
+    "src/connector.js": [
+      "test/connector.test.js",
+      "test/motor-central.test.js"
+    ],
+    "src/workspace-access.js": [
+      "test/workspace-access.test.js",
+      "test/agent-session.test.js"
+    ],
+    "src/mcp-core.js": [
+      "test/mcp-server.test.js",
+      "test/request-cancellation.test.js",
+      "test/motor-central.test.js"
+    ],
+    "src/smart-queue.js": [
+      "test/smart-queue.test.js",
+      "test/motor-central.test.js"
+    ],
+    "src/index-store.js": [
+      "test/storage-publication.test.js",
+      "test/index-cache.test.js",
+      "test/base-format.test.js"
+    ],
+    "src/sqlite-catalog.js": [
+      "test/storage-publication.test.js",
+      "test/index-cache.test.js",
+      "test/base-format.test.js",
+      "test/properties-indexes.test.js"
+    ],
+    "src/indexer.js": [
+      "test/indexer.test.js",
+      "test/index-queue-exclusions.test.js",
+      "test/index-process.test.js"
+    ],
+    "src/index-scan.js": [
+      "test/index-process.test.js",
+      "test/exclusions.test.js",
+      "test/native-lifetime.test.js"
+    ],
+    "src/index-observer.js": [
+      "test/index-observer.test.js",
+      "test/observation-integration.test.js"
+    ],
+    "src/search.js": [
+      "test/search.test.js",
+      "test/index-cache.test.js"
+    ],
+    "src/properties.js": [
+      "test/properties-indexes.test.js",
+      "test/custom-index-close.test.js"
+    ],
+    "src/marks-extractor.js": [
+      "test/search.test.js",
+      "test/properties-indexes.test.js"
+    ],
+    "src/client-connections.js": [
+      "test/client-connections.test.js",
+      "test/agent-startup.test.js"
+    ],
+    "src/motor-central.js": [
+      "test/motor-central.test.js",
+      "test/mcp-bridge.test.js",
+      "test/mcp-lifecycle.test.js"
+    ],
+    "src/tools/destinos.js": [
+      "test/result-verification.test.js",
+      "test/work-destinations.test.js"
+    ],
+    "src/conversations.js": [
+      "test/conversations.test.js",
+      "test/conversation-hybrid.test.js"
+    ],
+    "src/custom-index.js": [
+      "test/properties-indexes.test.js",
+      "test/custom-index-close.test.js"
+    ],
+    "src/session.js": [
+      "test/agent-session.test.js",
+      "test/observation-integration.test.js"
+    ],
+    "src/base-format.js": [
+      "test/base-format.test.js"
+    ],
+    "src/paths.js": [
+      "test/exclusions.test.js",
+      "test/index-queue-exclusions.test.js"
+    ]
+  }
+}

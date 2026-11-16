@@ -3,6 +3,7 @@ import { identifyCurrentProcess, inspectProcessOwners } from './process-identity
 import { writeJson } from './storage.js';
 import { ensureUserDataDirectory } from './user-data-directory.js';
 import { lockInstallation } from './installation-lock.js';
+import { cleanStaleBaseTemporaries } from './connector.js';
 import fs from 'node:fs/promises';
 import { watch as fsWatch } from 'node:fs';
 import os from 'node:os';
@@ -16,6 +17,7 @@ import { createConsentRequests } from './consent.js';
 import { createRemovalLog } from './removals.js';
 import { SESSION_EXTENSIONS } from './session-extensions.js';
 import { createBackgroundLease } from './background-coordinator.js';
+import { closePersistentScanner } from './index-scan.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { withRequestContext, requestSignal, waitForRequest } from './request-context.js';
 
@@ -29,7 +31,15 @@ const SESSIONS_DIRECTORY = 'sesiones';
 /** Registro de auditoría local: decisiones de acceso y operaciones sobre originales, sin contenido. */
 function createAudit(baseDirectory) {
   const file = path.join(baseDirectory, 'auditoria.jsonl');
+  const recentOpens = new Map();
   return async function audit(event, data = {}) {
+    if (event === 'carpeta-abierta' && data?.carpeta) {
+      const key = `${data.carpeta}:${data.canal ?? ''}`;
+      const now = Date.now();
+      const prev = recentOpens.get(key);
+      if (prev && now - prev < 60_000) return;
+      recentOpens.set(key, now);
+    }
     const line = `${JSON.stringify({ fecha: new Date().toISOString(), evento: event, ...data })}\n`;
     await fs.appendFile(file, line, { encoding: 'utf8', mode: 0o600 });
   };
@@ -121,10 +131,26 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     let state = folders.get(folderId);
     if (!state) {
       state = { ready: null, lastReport: null, lastError: null, lastChanges: null,
-        halted: null, configuration: null, chain: Promise.resolve() };
+        halted: null, haltRetryCount: 0, haltRetryTimer: null, configuration: null, chain: Promise.resolve() };
       folders.set(folderId, state);
     }
     return state;
+  }
+
+  function scheduleHaltedRetry(folderId) {
+    const state = track(folderId);
+    if (closed || !observe || !state.halted || state.haltRetryTimer) return;
+    if (!['SAFE_SCAN_UNAVAILABLE', 'SCOPE_UNAVAILABLE'].includes(state.halted)) return;
+    const waitMs = Math.min(15_000 * (2 ** state.haltRetryCount), 300_000);
+    state.haltRetryTimer = setTimeout(() => {
+      state.haltRetryTimer = null;
+      if (closed || !state.halted) return;
+      state.haltRetryCount += 1;
+      state.halted = null;
+      state.ready = null;
+      begin(folderId);
+    }, waitMs);
+    state.haltRetryTimer.unref?.();
   }
 
   /** Anota lo desaparecido usando las entradas salientes del delta sin retener todo el índice en RAM. */
@@ -150,6 +176,10 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     }
     if (report.type === 'reconciled') {
       state.lastError = null;
+      state.halted = null;
+      state.haltRetryCount = 0;
+      clearTimeout(state.haltRetryTimer);
+      state.haltRetryTimer = null;
       if (report.changes) {
         state.lastChanges = { at: state.lastReport.at, ...report.changes };
         const total = report.changes.added.length + report.changes.modified.length + report.changes.removed.length;
@@ -305,6 +335,14 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     async start() {
       if (started || closed) return;
       started = true;
+      await cleanStaleBaseTemporaries(motor.baseDirectory).catch(() => {});
+      await liveSessions(motor.baseDirectory, { pythonExecutable: layout.pythonExecutable }).then(async ({ stale, directory }) => {
+        for (const item of stale) await fs.rm(path.join(directory, item.file), { force: true }).catch(() => {});
+        if (installationSession) {
+          const instDir = path.dirname(installationSession);
+          for (const item of stale) await fs.rm(path.join(instDir, item.file), { force: true }).catch(() => {});
+        }
+      }).catch(() => {});
       await policy.prune().catch((error) => log('aviso', 'No se pudieron limpiar decisiones antiguas', { error: String(error) }));
       try {
         await sync();
@@ -320,15 +358,29 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     begin,
 
     /**
-     * Garantiza un índice coherente antes de consultarlo: con observación espera
-     * la reconciliación inicial; sin ella reconcilia ahora (operación individual).
+     * Garantiza un índice coherente antes de consultarlo: con `allowStale: true`,
+     * responde al instante desde el último índice guardado sin esperar ni abortar
+     * si una carpeta está detenida (p. ej., disco externo desconectado).
      */
-    async ensureIndex(folderId, { timeoutMs = 60_000 } = {}) {
+    async ensureIndex(folderId, { timeoutMs = 60_000, allowStale = false } = {}) {
       const request = requestSignal();
       const signal = request ? AbortSignal.any([lifecycle.signal, request]) : lifecycle.signal;
       signal.throwIfAborted();
       if (!started) await waitForRequest(withRequestContext({}, () => this.start()), signal);
       lifecycle.signal.throwIfAborted();
+      if (allowStale) {
+        const state = folders.get(folderId);
+        const existing = await motor.readFolderIndex(folderId).catch(() => null);
+        if (state?.halted) {
+          scheduleHaltedRetry(folderId);
+          if (existing) return { status: 'current', stale: true, code: state.halted };
+          return { status: 'unavailable', code: state.halted };
+        }
+        if (existing) {
+          if (observe && observer && !state?.ready) void begin(folderId);
+          return { status: 'current', stale: false };
+        }
+      }
       if (observe) await motor.prioritizeIndex(folderId, timeoutMs);
       if (observe && !observer) {
         const until = Date.now() + timeoutMs;
@@ -355,12 +407,23 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
         finally { clearTimeout(timer); unhurry?.(); }
         if (result === 'timeout') return { status: 'reconciling' };
         if (folders.get(folderId)?.halted) {
-          throw new MotorError(folders.get(folderId).halted, 'La indexación está detenida; cambia la configuración o solicita una reindexación explícita.');
+          const halted = folders.get(folderId).halted;
+          if (allowStale) {
+            scheduleHaltedRetry(folderId);
+            const existing = await motor.readFolderIndex(folderId).catch(() => null);
+            if (existing) return { status: 'current', stale: true, code: halted };
+            return { status: 'unavailable', code: halted };
+          }
+          throw new MotorError(halted, 'La indexación está detenida; cambia la configuración o solicita una reindexación explícita.');
         }
         if (await motor.readFolderIndex(folderId)) return { status: 'current' };
       }
-      track(folderId);
+      const state = track(folderId);
       const indexed = await motor.indexFolder(folderId);
+      state.halted = null;
+      state.haltRetryCount = 0;
+      clearTimeout(state.haltRetryTimer);
+      state.haltRetryTimer = null;
       await trackRemovals(folderId, indexed.changes);
       return { status: 'reconciled', generation: indexed.generation };
     },
@@ -369,11 +432,15 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
      * Reconcilia ahora una carpeta tras una operación de Mind que cambió su
      * estructura (crear carpetas, mover, papelera), con o sin observación.
      */
-    async reindex(folderId) {
+    async reindex(folderId, options = {}) {
       const state = track(folderId);
       state.halted = null;
+      state.haltRetryCount = 0;
+      clearTimeout(state.haltRetryTimer);
+      state.haltRetryTimer = null;
       state.ready = null;
-      const indexed = await motor.indexFolder(folderId);
+      const hints = options?.relativePath ? { paths: [options.relativePath], overflow: false } : undefined;
+      const indexed = await motor.indexFolder(folderId, hints ? { hints } : undefined);
       await trackRemovals(folderId, indexed.changes);
       return indexed;
     },
@@ -416,6 +483,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       clearTimeout(registryWake);
       registryWake = null;
       observer?.pausePeriodic?.();
+      closePersistentScanner();
       await clearCaches();
     },
 
@@ -440,8 +508,13 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
       clearTimeout(registryWake);
       registryWatcher?.close();
       registryWatcher = null;
+      for (const state of folders.values()) {
+        clearTimeout(state.haltRetryTimer);
+        state.haltRetryTimer = null;
+      }
       listeners.clear();
       const cleanup = (async () => {
+        closePersistentScanner();
         await motor.closeConversationSearch();
         await syncing?.catch(() => {});
         await Promise.allSettled([

@@ -14,6 +14,7 @@ export const QUEUE_PRIORITY = Object.freeze({
 const READ_TOOLS = new Set([
   'estado',
   'buscar',
+  'agrupar',
   'explorar',
   'leer',
   'eliminados',
@@ -167,7 +168,7 @@ function throwIfAborted(signal) {
  * Una escritura puede soltar su exclusión mientras espera al usuario
  * (`suspendWhile`); al terminar la espera vuelve a la cola de sus mismas claves.
  */
-export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
+export function createSmartQueue({ backgroundYieldMs = 12, maxPending = 128 } = {}) {
   // Por clave, las reservas en orden de llegada; la cabeza es la que la tiene.
   const locks = new Map();
   const idleWaiters = new Set();
@@ -179,6 +180,27 @@ export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
   let activeReads = 0;
   let completedReads = 0;
   let completedWrites = 0;
+
+  function checkAdmission() {
+    if (activeReads + counts.held + counts.queued >= maxPending) {
+      const error = new Error('Mind está atendiendo el máximo de solicitudes simultáneas; reintenta en un momento.');
+      error.code = 'QUEUE_BUSY';
+      throw error;
+    }
+  }
+
+  function withTimeoutSignal(signal, timeoutMs) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return { signal, cancel: () => {} };
+    const timerController = new AbortController();
+    const timer = setTimeout(() => {
+      const err = new Error('La solicitud excedió el tiempo máximo en cola.');
+      err.code = 'QUEUE_TIMEOUT';
+      timerController.abort(err);
+    }, timeoutMs);
+    timer.unref?.();
+    const combined = signal ? AbortSignal.any([signal, timerController.signal]) : timerController.signal;
+    return { signal: combined, cancel: () => clearTimeout(timer) };
+  }
 
   function hasForegroundDemand() {
     return activeReads > 0 || counts.held > 0 || counts.queued > 0;
@@ -304,21 +326,26 @@ export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
   }
 
   return Object.freeze({
-    async runRead(fn, { signal } = {}) {
+    async runRead(fn, { signal, timeoutMs } = {}) {
       throwIfAborted(signal);
+      checkAdmission();
+      const timed = withTimeoutSignal(signal, timeoutMs);
       activeReads += 1;
       try {
-        return await fn();
+        return await fn(timed.signal);
       } finally {
+        timed.cancel();
         activeReads -= 1;
         completedReads += 1;
         notifyIdleWaiters();
       }
     },
 
-    async runWrite(keysOrResolver, fn, { signal } = {}) {
+    async runWrite(keysOrResolver, fn, { signal, timeoutMs } = {}) {
       throwIfAborted(signal);
-      const ctx = { keys: null, signal, state: 'new', reservation: null, resuming: null };
+      checkAdmission();
+      const timed = withTimeoutSignal(signal, timeoutMs);
+      const ctx = { keys: null, signal: timed.signal, state: 'new', reservation: null, resuming: null };
       // Mientras se resuelven las claves ya cuenta como escritura en espera.
       setState(ctx, 'queued');
       try {
@@ -328,6 +355,7 @@ export function createSmartQueue({ backgroundYieldMs = 12 } = {}) {
         await acquire(ctx, 'queued');
         return await writeContext.run({ ctx, suspended: false }, fn);
       } finally {
+        timed.cancel();
         releaseReservation(ctx);
         setState(ctx, 'done');
         completedWrites += 1;

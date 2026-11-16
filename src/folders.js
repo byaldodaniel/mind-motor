@@ -44,6 +44,9 @@ function authorizationId(canonical) {
  * puede contener ni ocupar (en el producto, la carpeta completa de Mind).
  */
 export function createFolderRegistry(baseDirectory, motorDirectory, protectedDirectories = [], userDataDirectory = null) {
+  /** Autorizaciones efímeras de sesión ("carpeta abierta"): nunca se escriben en disco. */
+  const sessionScopes = new Map();
+
   function filename(id) {
     if (typeof id !== 'string' || !VALID_ID.test(id)) {
       throw new MotorError('INVALID_AUTHORIZATION_ID', 'El identificador de autorización no es válido.');
@@ -65,7 +68,15 @@ export function createFolderRegistry(baseDirectory, motorDirectory, protectedDir
 
   async function load(id, includeGeneration = false) {
     const stored = await readJson(filename(id));
-    if (stored === null) return null;
+    if (stored === null) {
+      const ephemeral = sessionScopes.get(id);
+      if (!ephemeral) return null;
+      return {
+        id: ephemeral.id,
+        path: ephemeral.path,
+        ...(includeGeneration ? { generation: ephemeral.generation, exclusions: ephemeral.exclusions } : {}),
+      };
+    }
     const data = stored.data;
     const generationOk = (value) => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
     if (!data || typeof data !== 'object' || Array.isArray(data)
@@ -105,16 +116,50 @@ export function createFolderRegistry(baseDirectory, motorDirectory, protectedDir
       return { id, path: canonical };
     },
 
-    /** Consulta registros persistidos sin recorrer las carpetas originales. */
+    /** Registra temporalmente una carpeta abierta en sesión sin persistir en disco. */
+    async authorizeSessionFolder(folderPath) {
+      const canonical = await resolveFolder(folderPath);
+      rejectInternal(canonical);
+      const id = authorizationId(canonical);
+      const disk = await readJson(filename(id));
+      if (disk !== null) {
+        const existing = await load(id);
+        if (existing) return { ...existing, ephemeral: false };
+      }
+      const current = sessionScopes.get(id);
+      if (current) {
+        current.refs += 1;
+        return { id, path: current.path, ephemeral: true };
+      }
+      sessionScopes.set(id, { id, path: canonical, generation: randomUUID(), exclusions: [], refs: 1 });
+      return { id, path: canonical, ephemeral: true };
+    },
+
+    releaseSessionFolder(id) {
+      const current = sessionScopes.get(id);
+      if (!current) return false;
+      current.refs -= 1;
+      if (current.refs <= 0) sessionScopes.delete(id);
+      return current.refs <= 0;
+    },
+
+    /** Consulta registros persistidos y ámbitos activos en sesión sin recorrer originales. */
     async listAuthorizedFolders() {
       const entries = await fs.readdir(baseDirectory);
       const folders = [];
+      const seen = new Set();
       for (const entry of entries.sort()) {
         const match = FILENAME.exec(entry);
         if (match) {
           const folder = await load(match[1]);
-          if (folder) folders.push(folder);
+          if (folder) {
+            folders.push(folder);
+            seen.add(folder.id);
+          }
         }
+      }
+      for (const ephemeral of sessionScopes.values()) {
+        if (!seen.has(ephemeral.id)) folders.push({ id: ephemeral.id, path: ephemeral.path });
       }
       return folders;
     },
@@ -130,7 +175,12 @@ export function createFolderRegistry(baseDirectory, motorDirectory, protectedDir
         throw new MotorError('INVALID_EXCLUSIONS', 'Las exclusiones deben ser hasta 64 rutas relativas dentro de la carpeta, con "/" entre componentes.');
       }
       const stored = await readJson(filename(id));
-      if (stored === null) return null;
+      if (stored === null) {
+        const ephemeral = sessionScopes.get(id);
+        if (!ephemeral) return null;
+        ephemeral.exclusions = normalized;
+        return normalized;
+      }
       const current = await load(id, true);
       await writeJson(filename(id), {
         format: 'mind-folder-authorization', version: 3, id, path: current.path,
@@ -139,8 +189,9 @@ export function createFolderRegistry(baseDirectory, motorDirectory, protectedDir
       return normalized;
     },
 
-    /** Retira solo el registro de la Base, aunque la carpeta ya no exista. */
+    /** Retira el registro de la Base (y de sesión si fuera efímero), aunque la carpeta ya no exista. */
     async revokeFolder(id) {
+      sessionScopes.delete(id);
       return removeJson(filename(id));
     },
 

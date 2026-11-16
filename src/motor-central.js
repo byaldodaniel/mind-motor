@@ -33,8 +33,8 @@ import {
   HEALTH_NONCE_PATTERN,
 } from './connector.js';
 
-const DEFAULT_LIGHT_IDLE_MS = 3 * 60_000;
-const DEFAULT_SHUTDOWN_IDLE_MS = 10 * 60_000;
+const DEFAULT_LIGHT_IDLE_MS = 60_000;
+const DEFAULT_SHUTDOWN_IDLE_MS = 0;
 // Prórroga máxima del reposo y del autoapagado mientras hay trabajo de fondo en curso
 // (un recorrido inicial grande o la preparación semántica). Acotada: un trabajo
 // atascado no mantiene el Motor despierto para siempre.
@@ -515,6 +515,7 @@ export async function startCentralMotor({
         onRootsChanged: (connection) => workspace.refresh(connection),
         onClose: async () => {
           connections.close(id);
+          await workspace.close().catch(() => {});
           for (const stream of sseStreams) {
             try { stream.end(); } catch {}
           }
@@ -766,11 +767,12 @@ export async function startCentralMotor({
         ok: true, value: formatted.structuredContent, text: formatted.content[0].text, isError: formatted.isError === true,
       });
 
+      let workspace = null;
       try {
         return await trackWork(async () => {
           await session.start();
           await session.sync();
-          const workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
+          workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
           await workspace.initialize({ clientCapabilities: {} });
           const scope = {
             tools: createAgentTools({ session: workspace.session, connection: conn, log }),
@@ -816,6 +818,8 @@ export async function startCentralMotor({
             ...(known && error.details ? { detalles: error.details } : {}),
           },
         });
+      } finally {
+        await workspace?.close?.().catch(() => {});
       }
     }
 

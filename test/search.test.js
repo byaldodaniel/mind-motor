@@ -154,7 +154,7 @@ test('busca en los índices sin recorrer ni abrir las carpetas originales', asyn
 test('no devuelve índices de carpetas retiradas ni de autorizaciones anteriores', async (t) => {
   const { base, first, motor, one, two } = await fixture(t);
   const filename = path.join(base, `folder-index-${one.id}.json`);
-  const stale = await fs.readFile(filename);
+  const stale = JSON.stringify({ format: 'mind-folder-index', version: 3, ...(await motor.readFolderIndex(one.id)) });
   assert.equal(await motor.revokeFolder(one.id), true);
   let response = await motor.searchFiles({ folderIds: [one.id, two.id], query: 'informe' });
   assert.deepEqual(response.results.map((item) => item.folderId), [two.id]);

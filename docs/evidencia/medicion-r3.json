@@ -1,0 +1,78 @@
+{
+  "fecha": "2026-11-16T06:06:34.567Z",
+  "rama": "gemini/1.0.4-r3",
+  "commit": "b33dfd9",
+  "baseRealCopiada": true,
+  "entradasCopiadasReales": 132324,
+  "busquedaReal": {
+    "carpetas": 9,
+    "entradas": 132324,
+    "coincidencias": 43,
+    "frioMs": 6851.81,
+    "calienteMs": 94.61,
+    "igual": true
+  },
+  "arbol100k": {
+    "entradas": 100000,
+    "escrituraMs": 3523.16,
+    "lecturaFriaMs": 2225.07,
+    "lecturaCalienteMs": 2.65
+  },
+  "reconciliacionCambioUnArchivo": {
+    "entradas": 1020,
+    "indexacionInicialMs": 1961.82,
+    "reconciliacionUnArchivoMs": 378.71,
+    "busquedaMs": 20.53,
+    "coincidencias": 20,
+    "generacion": 2
+  },
+  "marcasYAgrupacion": {
+    "disponible": true,
+    "proyectosAnalizados": [
+      "Aldo Daniel",
+      "Mind",
+      "ASPROCOAN",
+      "SACTEK",
+      "KEEP PACKING"
+    ],
+    "conteoManualLinea": {
+      "pendientes": 16,
+      "ideas": 3
+    },
+    "agrupadoMs": 281.06,
+    "totalPendientesDetectados": 16,
+    "grupos": [
+      {
+        "grupo": "Aldo Daniel",
+        "total": 4,
+        "abiertos": 4
+      },
+      {
+        "grupo": "ASPROCOAN",
+        "total": 4,
+        "abiertos": 4
+      },
+      {
+        "grupo": "Mind",
+        "total": 3,
+        "abiertos": 3
+      },
+      {
+        "grupo": "SACTEK",
+        "total": 3,
+        "abiertos": 3
+      },
+      {
+        "grupo": "KEEP PACKING",
+        "total": 2,
+        "abiertos": 2
+      }
+    ]
+  },
+  "memoriaProceso": {
+    "rssMb": 340.9,
+    "heapUsedMb": 193.8,
+    "privateMb": 342.8
+  },
+  "duracionTotalMs": 21994.36
+}

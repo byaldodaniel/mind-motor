@@ -20,6 +20,7 @@ import { createTextCreator } from './text-creator.js';
 import { createTextModifier } from './text-modifier.js';
 import { createFolderIndexer } from './indexer.js';
 import { createIndexSearch } from './search.js';
+import { groupMarksInCatalog } from './marks-extractor.js';
 import { createIndexObserver } from './index-observer.js';
 import { createPropertyStore } from './properties.js';
 import { createOrganizer } from './organizer.js';
@@ -207,6 +208,12 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
      * @returns {Promise<{ id: string, path: string, generation: string | null } | null>}
      */
     getAuthorizedFolder: (id) => loadAuthorizedFolder(id),
+    authorizeSessionFolder: folders.authorizeSessionFolder,
+    releaseSessionFolder: async (id) => {
+      const removed = folders.releaseSessionFolder(id);
+      if (removed) await stopObservation(id).catch(() => {});
+      return removed;
+    },
 
     /**
      * Solo anfitrión: subcarpetas que el usuario excluye del ámbito. Mind no las
@@ -238,6 +245,30 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     ...createIndexSearch({
       readFolderIndex: indexer.readFolderIndex, loadAuthorizedFolder, readFolderProperties: properties.readFolderProperties,
     }),
+    async groupMarks({ folderIds, scopes, tag = null, status = 'abierto', groupBy = 'proyecto', propertyFilter = null, customAliases = null, coverageFolders = [] } = {}) {
+      let resolvedScopes = scopes;
+      if (!resolvedScopes) {
+        const list = folderIds ?? (await folders.listAuthorizedFolders()).map((item) => item.id);
+        resolvedScopes = [];
+        for (const id of list) {
+          const folder = await loadAuthorizedFolder(id).catch(() => null);
+          if (!folder) continue;
+          const index = await indexer.readFolderIndex(id).catch(() => null);
+          if (index) resolvedScopes.push({ folder, index });
+        }
+      }
+      return groupMarksInCatalog({
+        baseDirectory: base,
+        scopes: resolvedScopes,
+        readFolderProperties: properties.readFolderProperties,
+        tag,
+        status,
+        groupBy,
+        propertyFilter,
+        customAliases,
+        coverageFolders,
+      });
+    },
     // Propiedades: operaciones del anfitrión. Los agentes las usan a través de sus herramientas.
     setProperties: properties.setProperties,
     getProperties: properties.getProperties,

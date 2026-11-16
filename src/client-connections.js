@@ -219,8 +219,44 @@ async function replaceSafe(file, anchor, previous, next) {
   } finally { await fs.rm(temporary, { force: true }); }
 }
 
-/** Updates existing managed entries only. It never creates a server or exports configuration values. */
-export async function updateManagedClientConnections({ root, runtime, manifest, home = os.homedir(), env = process.env, platform = process.platform, baseMigration } = {}) {
+function buildManagedMcpSpec({ root, runtime, manifest }) {
+  if (!runtime?.nodeExecutable) return null;
+  const paths = productPaths(root, manifest ?? { layoutVersion: 2 });
+  return { command: runtime.nodeExecutable, args: [paths.agentEntrypoint, 'mcp'] };
+}
+
+function insertMissingJson(text, spec) {
+  const parsed = JSON.parse(text);
+  if (!isObject(parsed)) return null;
+  if (parsed.mcpServers !== undefined && !isObject(parsed.mcpServers)) return null;
+  if (isObject(parsed.mcpServers) && parsed.mcpServers.mind !== undefined) return { conflict: true };
+  const next = {
+    ...parsed,
+    mcpServers: {
+      ...(parsed.mcpServers ?? {}),
+      mind: { command: spec.command, args: spec.args },
+    },
+  };
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  let serialized = JSON.stringify(next, null, 2);
+  if (eol !== '\n') serialized = serialized.replaceAll('\n', eol);
+  return { content: serialized + (text.endsWith('\n') ? eol : '') };
+}
+
+function insertMissingToml(text, spec) {
+  const headers = [...text.matchAll(/^[ \t]*\[([^\r\n]+)\][ \t]*(?:#[^\r\n]*)?\r?$/gm)];
+  if (headers.some(match => /^(?:mcp_servers|"mcp_servers"|'mcp_servers')\.(?:mind|"mind"|'mind')(?:\.|$)/u.test(match[1].trim()))) {
+    return { conflict: true };
+  }
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const trimmedEnd = text.replace(/[\r\n]+$/u, '');
+  const prefix = trimmedEnd.length ? trimmedEnd + eol + eol : '';
+  const block = `[mcp_servers.mind]${eol}command = ${JSON.stringify(spec.command)}${eol}args = [${spec.args.map(arg => JSON.stringify(arg)).join(', ')}]${eol}`;
+  return { content: prefix + block };
+}
+
+/** Updates existing managed entries and optionally creates missing ones in detected client configs without overwriting foreign entries. */
+export async function updateManagedClientConnections({ root, runtime, manifest, home = os.homedir(), env = process.env, platform = process.platform, baseMigration, createMissing = false } = {}) {
   if (!root || env.MIND_AGENT_STARTUP === '0') return [];
   baseMigration ??= env.MIND_BASE_MIGRATED_FROM && env.MIND_BASE_MIGRATED_TO ? { from: env.MIND_BASE_MIGRATED_FROM, to: env.MIND_BASE_MIGRATED_TO } : null;
   const codexHome = env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home, '.codex');
@@ -237,7 +273,16 @@ export async function updateManagedClientConnections({ root, runtime, manifest, 
     try {
       const previous = await readSafe(file, anchor); if (!previous) continue;
       const fields = format === 'toml' ? tomlFields(previous.text) : jsonFields(previous.text);
-      if (!fields) { results.push({ cliente: client, archivo: file, estado: 'sin-servidor-administrado' }); continue; }
+      if (!fields) {
+        if (!createMissing) { results.push({ cliente: client, archivo: file, estado: 'sin-servidor-administrado' }); continue; }
+        const spec = buildManagedMcpSpec({ root, runtime, manifest });
+        const inserted = spec ? (format === 'toml' ? insertMissingToml(previous.text, spec) : insertMissingJson(previous.text, spec)) : null;
+        if (!inserted) { results.push({ cliente: client, archivo: file, estado: 'sin-servidor-administrado' }); continue; }
+        if (inserted.conflict) { results.push({ cliente: client, archivo: file, estado: 'ajena' }); continue; }
+        await replaceSafe(file, anchor, previous, inserted.content);
+        results.push({ cliente: client, archivo: file, estado: 'creada' });
+        continue;
+      }
       const json = format === 'json' ? JSON.parse(previous.text).mcpServers?.mind : null;
       const entry = { ...json, command: fields.command.value, args: fields.args.value, env: fields.envMindBase ? { ...(json?.env ?? {}), MIND_BASE: fields.envMindBase.value } : json?.env };
       const next = await replacements(entry, { root, runtime, manifest, platform, baseMigration });

@@ -1,10 +1,15 @@
-import { lstat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { MotorError } from './errors.js';
-import { readJson, writeJson, removeJson } from './storage.js';
+import { readJson, removeJson } from './storage.js';
 import { withIndexLock } from './index-lock.js';
-import { prepareBaseFormat } from './base-format.js';
+import {
+  getScopeMetaFromCatalog,
+  loadScopeIndexFromCatalog,
+  saveScopeIndexToCatalog,
+  saveScopeBranchToCatalog,
+  removeScopeFromCatalog,
+} from './sqlite-catalog.js';
 
 const VALID_SCOPE_ID = /^[a-f0-9]{64}$/;
 const TYPES = new Set(['file', 'directory', 'link', 'other', 'unknown']);
@@ -90,21 +95,9 @@ function validRecord(data, scopeId) {
 
 /** Entradas totales que se conservan en memoria por instancia (LRU por carpeta). */
 export const INDEX_CACHE_MAX_ENTRIES = 600_000;
-export const INDEX_CACHE_MAX_BYTES = 32 * 1024 ** 2;
+export const INDEX_CACHE_MAX_BYTES = 128 * 1024 ** 2;
 // Solo para medir el comportamiento sin caché en las comparativas.
 const CACHE_ENABLED = process.env.MIND_SIN_CACHE_INDICE !== '1';
-
-async function identity(file) {
-  try {
-    const info = await lstat(file, { bigint: true });
-    // Un enlace u otro tipo no se cachea: la lectura normal lo rechaza.
-    if (!info.isFile()) return 'no-archivo';
-    return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
-}
 
 function deepFreeze(index) {
   for (const entry of index.entries) Object.freeze(entry);
@@ -144,52 +137,108 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
       return withIndexLock(baseDirectory, scopeId, task);
     },
     /**
-     * Índice validado. Se conserva en memoria ligado a la identidad física del
-     * archivo (dispositivo, inodo, tamaño y fechas en ns): cualquier publicación,
-     * de este u otro proceso, crea un archivo nuevo y lo invalida. La
-     * autorización la sigue comprobando el indexador en cada lectura.
+     * Índice validado desde SQLite (`catalog.sqlite`), con caché en memoria ligada
+     * a generación y revisión del ámbito; si existe un legado JSON previo, lo migra.
      * @returns {Promise<FolderIndex | null>}
      */
     async load(scopeId) {
+      validateScopeId(scopeId);
       if (os.freemem() < os.totalmem() * 0.08) cache.clear();
+
       const file = filename(scopeId);
-      const before = await identity(file);
-      if (before === null) {
+      const legacy = await readJson(file);
+      if (legacy !== null) {
+        if (!validRecord(legacy.data, scopeId)) {
+          throw new MotorError('INDEX_CORRUPT', 'El índice guardado no tiene el formato esperado.');
+        }
+        const { format, version, ...rawIndex } = legacy.data;
+        const index = {
+          ...rawIndex,
+          entries: rawIndex.entries.map((entry) => ({ ...entry, identity: entry.identity ?? null })),
+        };
+        let revision = '';
+        try {
+          revision = await saveScopeIndexToCatalog(baseDirectory, index);
+          await removeJson(file).catch(() => {});
+        } catch (error) {
+          if (!['EACCES', 'EPERM', 'EROFS'].includes(error?.code)) throw error;
+        }
+        const frozen = deepFreeze(index);
+        if (revision) remember(scopeId, `${index.generation}:${revision}:${index.updatedAt}`, frozen);
+        return frozen;
+      }
+
+      const meta = await getScopeMetaFromCatalog(baseDirectory, scopeId);
+      if (meta === null) {
         cache.delete(scopeId);
         return null;
       }
-      const cached = before === 'no-archivo' || !CACHE_ENABLED ? null : cache.get(scopeId);
-      if (cached && cached.identity === before) {
+      const metaKey = `${meta.generation}:${meta.revision}:${meta.updatedAt}`;
+      const cached = !CACHE_ENABLED ? null : cache.get(scopeId);
+      if (cached && cached.identity === metaKey) {
         cache.delete(scopeId);
-        cache.set(scopeId, cached); // Más reciente al final (LRU).
+        cache.set(scopeId, cached);
         return cached.index;
       }
-      const stored = await readJson(file);
-      if (stored === null) return null;
-      if (!validRecord(stored.data, scopeId)) {
+      const stored = await loadScopeIndexFromCatalog(baseDirectory, scopeId);
+      if (stored === null) {
+        cache.delete(scopeId);
+        return null;
+      }
+      const { revision, ...index } = stored;
+      const candidate = { format: 'mind-folder-index', ...index, version: 3 };
+      if (!validRecord(candidate, scopeId)) {
         throw new MotorError('INDEX_CORRUPT', 'El índice guardado no tiene el formato esperado.');
       }
-      const { format, version, ...index } = stored.data;
       const frozen = deepFreeze(index);
-      // Solo se guarda si el archivo no cambió mientras se leía.
-      if (before !== 'no-archivo' && (await identity(file)) === before) remember(scopeId, before, frozen);
+      remember(scopeId, `${index.generation}:${revision}:${index.updatedAt}`, frozen);
       return frozen;
     },
 
     /** @param {FolderIndex} index */
     async save(index) {
-      const record = { format: 'mind-folder-index', ...index, version: 3,
-        entries: index.entries.map((entry) => ({ ...entry, identity: entry.identity ?? null })) };
+      const normalizedEntries = index.entries.map((entry) => ({ ...entry, identity: entry.identity ?? null }));
+      const record = { format: 'mind-folder-index', ...index, version: 3, entries: normalizedEntries };
       if (!validRecord(record, index.scopeId)) {
         throw new MotorError('INDEX_INVALID', 'El índice generado no cumple el formato persistente.');
       }
-      await prepareBaseFormat(baseDirectory, 2);
-      await writeJson(filename(index.scopeId), record);
+      const normalizedIndex = { ...index, entries: normalizedEntries };
+      const revision = await saveScopeIndexToCatalog(baseDirectory, normalizedIndex);
+      await removeJson(filename(index.scopeId)).catch(() => {});
+      const frozen = deepFreeze(normalizedIndex);
+      remember(index.scopeId, `${normalizedIndex.generation}:${revision}:${normalizedIndex.updatedAt}`, frozen);
+      return frozen;
+    },
+
+    /** Actualización incremental por ramas sobre SQLite conservando caché coherente. */
+    async saveBranch(branch) {
+      validateScopeId(branch?.scopeId);
+      const normalizedUpserts = (branch.upserts ?? []).map((entry) => ({ ...entry, identity: entry.identity ?? null }));
+      if (!Array.isArray(branch.issues) || !branch.issues.every(validIssue)
+          || !normalizedUpserts.every(validEntry) || !path.isAbsolute(branch.root)
+          || !Number.isSafeInteger(branch.generation) || branch.generation < 1
+          || !isDate(branch.createdAt) || !isDate(branch.updatedAt)) {
+        throw new MotorError('INDEX_INVALID', 'La actualización parcial del índice no cumple el formato persistente.');
+      }
+      cache.delete(branch.scopeId);
+      const revision = await saveScopeBranchToCatalog(baseDirectory, {
+        ...branch,
+        upserts: normalizedUpserts,
+      });
+      if (branch.mergedIndex) {
+        const frozen = deepFreeze(branch.mergedIndex);
+        remember(branch.scopeId, `${branch.generation}:${revision}:${branch.updatedAt}`, frozen);
+        return frozen;
+      }
+      return null;
     },
 
     async remove(scopeId) {
+      validateScopeId(scopeId);
       cache.delete(scopeId);
-      return removeJson(filename(scopeId));
+      const removedCatalog = await removeScopeFromCatalog(baseDirectory, scopeId);
+      const removedLegacy = await removeJson(filename(scopeId));
+      return removedCatalog || removedLegacy;
     },
 
     clearCache() {
