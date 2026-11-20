@@ -7,7 +7,7 @@ import { fork, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { scanFolder } from '../src/index-scan.js';
+import { scanFolder, closePersistentScanner } from '../src/index-scan.js';
 import { spawnSupervised, processDiagnostics, stopSupervisedProcesses } from '../src/process-supervisor.js';
 
 const python = process.env.MIND_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
@@ -49,41 +49,71 @@ async function temporary(t) {
   return dir;
 }
 
-test('normal native scan exits and removes its active diagnostic record', async (t) => {
+/** The resident scanner's diagnostic record (active or recently closed) created after `since`. */
+async function scannerRecord(since, { active }) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const diagnostics = processDiagnostics();
+    const pool = active ? diagnostics.active : diagnostics.recent;
+    const found = pool.filter((item) => item.kind === 'index' && item.startedAt >= since).at(-1);
+    if (found?.pid) return found;
+    assert.ok(Date.now() < deadline, `No ${active ? 'active' : 'closed'} scanner record`);
+    await delay(10);
+  }
+}
+
+test('a normal scan leaves a visible resident scanner that closing reaps', async (t) => {
   const dir = await temporary(t);
   await fs.writeFile(path.join(dir, 'ficticio.txt'), 'dato ficticio');
+  closePersistentScanner();
+  const since = new Date().toISOString();
   const result = await scanFolder(dir, { previous: [], maxEntries: 10, pythonExecutable: python });
   assert.deepEqual(result.entries.map((item) => item.path), ['ficticio.txt']);
-  assert.equal(processDiagnostics().active.length, 0);
-  const latest = processDiagnostics().recent.at(-1);
-  assert.equal(latest.state, 'completed');
-  assert.equal(latest.kind, 'index');
-  await gone(latest.pid);
+  // r3 keeps one resident scanner per interpreter; it must be visible while alive.
+  const resident = await scannerRecord(since, { active: true });
+  assert.equal(resident.persistent, true);
+  assert.equal(resident.state, 'running');
+  assert.equal(alive(resident.pid), true);
+  closePersistentScanner();
+  await gone(resident.pid);
+  const closed = await scannerRecord(since, { active: false });
+  assert.equal(closed.pid, resident.pid);
+  assert.equal(closed.state, 'stopped');
+  assert.equal(processDiagnostics().active.filter((item) => item.kind === 'index').length, 0);
 });
 
 test('pre-cancelled scan creates no process; in-flight scan cancellation reaps its child', async (t) => {
   const dir = await temporary(t);
+  closePersistentScanner();
   const before = processDiagnostics().recent.length;
   await assert.rejects(scanFolder(dir, {
     previous: [], maxEntries: 10, pythonExecutable: python, signal: AbortSignal.abort(),
   }), { code: 'SCAN_CANCELLED' });
   assert.equal(processDiagnostics().recent.length, before);
+  assert.equal(processDiagnostics().active.filter((item) => item.kind === 'index').length, 0);
+  const since = new Date().toISOString();
   const controller = new AbortController();
   const pending = scanFolder(dir, { previous: [], maxEntries: 10, pythonExecutable: python, signal: controller.signal });
-  const own = processDiagnostics().active.at(-1);
-  assert.ok(own.pid);
+  const own = await scannerRecord(since, { active: true });
   controller.abort();
   await assert.rejects(pending, { code: 'SCAN_CANCELLED' });
   await gone(own.pid);
-  assert.equal(processDiagnostics().active.length, 0);
+  const closed = await scannerRecord(since, { active: false });
+  assert.equal(closed.pid, own.pid);
+  assert.equal(closed.reason, 'SCAN_CANCELLED');
+  assert.equal(processDiagnostics().active.filter((item) => item.kind === 'index').length, 0);
 });
 
 test('scan deadline rejects without a partial result and reaps the helper', async (t) => {
   const dir = await temporary(t);
-  const pending = scanFolder(dir, { previous: [], maxEntries: 10, pythonExecutable: python, timeoutMs: 1 });
-  const own = processDiagnostics().active.at(-1);
-  await assert.rejects(pending, { code: 'SCAN_TIMEOUT' });
-  await gone(own.pid);
+  closePersistentScanner();
+  const since = new Date().toISOString();
+  await assert.rejects(scanFolder(dir, { previous: [], maxEntries: 10, pythonExecutable: python, timeoutMs: 1 }),
+    { code: 'SCAN_TIMEOUT' });
+  const closed = await scannerRecord(since, { active: false });
+  assert.equal(closed.reason, 'SCAN_TIMEOUT');
+  await gone(closed.pid);
+  assert.equal(processDiagnostics().active.filter((item) => item.kind === 'index').length, 0);
 });
 
 test('cancelling a running blocked helper kills only its own child handle', async (t) => {

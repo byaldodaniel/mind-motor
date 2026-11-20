@@ -1,7 +1,6 @@
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
-import { DEFAULT_PROCESS_TIMEOUT_MS } from './process-supervisor.js';
+import { DEFAULT_PROCESS_TIMEOUT_MS, spawnSupervised } from './process-supervisor.js';
 
 const helper = fileURLToPath(new URL('./native_index.py', import.meta.url));
 const SEPARATOR = '/';
@@ -55,6 +54,7 @@ function getDaemon(pythonExecutable) {
   state = {
     pythonExecutable,
     child: null,
+    managed: null,
     buffer: '',
     stderr: '',
     queue: Promise.resolve(),
@@ -65,17 +65,24 @@ function getDaemon(pythonExecutable) {
   return state;
 }
 
-function disposeDaemon(state, error) {
+/**
+ * Detiene el auxiliar a través de process-supervisor, que deja constancia del motivo
+ * (`reason`, o el error entregado a la solicitud pendiente) en processDiagnostics.
+ */
+function disposeDaemon(state, error, reason = error) {
   clearTimeout(state.idleTimer);
   state.idleTimer = null;
   const child = state.child;
+  const managed = state.managed;
   state.child = null;
+  state.managed = null;
   state.buffer = '';
   const pending = state.active;
   state.active = null;
   if (child) {
     try { child.stdin?.end(); } catch { /* noop */ }
-    if (!child.killed) try { child.kill(); } catch { /* noop */ }
+    if (managed) managed.stop(reason ?? new MotorError('SCANNER_IDLE', 'El escáner persistente se cerró por inactividad.'));
+    else if (!child.killed) try { child.kill(); } catch { /* noop */ }
   }
   if (pending && error) pending.reject(error);
 }
@@ -95,12 +102,14 @@ function armDaemonIdle(state) {
 
 function ensureDaemonChild(state) {
   if (state.child && !state.child.killed && state.child.exitCode === null) return state.child;
-  const child = spawn(state.pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid), '--daemon'], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-    shell: false,
+  // Registrado en process-supervisor: aparece en processDiagnostics mientras vive y
+  // su cierre (inactividad, cancelación, plazo) queda en el historial reciente.
+  const managed = spawnSupervised(state.pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid), '--daemon'], {
+    kind: 'index', persistent: true,
   });
+  const child = managed.child;
   state.child = child;
+  state.managed = managed;
   state.buffer = '';
   state.stderr = '';
 
@@ -186,13 +195,13 @@ async function runDaemonRequest({ root, maxEntries, pythonExecutable, exclude = 
       };
       const onAbort = () => {
         const err = new MotorError('SCAN_CANCELLED', 'El recorrido se canceló.');
-        disposeDaemon(state, null);
+        disposeDaemon(state, null, err);
         finish(reject, err);
       };
       const checkSize = () => {
         if (Buffer.byteLength(state.buffer, 'utf8') > maxOutputBytes) {
           const err = new MotorError('SCAN_OUTPUT_LIMIT', 'El resultado del recorrido supera el límite de memoria.');
-          disposeDaemon(state, null);
+          disposeDaemon(state, null, err);
           finish(reject, err);
         }
       };
@@ -206,7 +215,7 @@ async function runDaemonRequest({ root, maxEntries, pythonExecutable, exclude = 
 
       timer = setTimeout(() => {
         const err = new MotorError('SCAN_TIMEOUT', 'El recorrido excedió el tiempo permitido.');
-        disposeDaemon(state, null);
+        disposeDaemon(state, null, err);
         finish(reject, err);
       }, timeoutMs);
       timer.unref?.();
@@ -222,7 +231,7 @@ async function runDaemonRequest({ root, maxEntries, pythonExecutable, exclude = 
       child.stdin.write(`${JSON.stringify(payload)}\n`, (writeErr) => {
         if (writeErr) {
           const err = new MotorError('SAFE_SCAN_UNAVAILABLE', messages.SAFE_SCAN_UNAVAILABLE, { cause: writeErr });
-          disposeDaemon(state, null);
+          disposeDaemon(state, null, err);
           finish(reject, err);
         }
       });

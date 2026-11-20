@@ -7,9 +7,13 @@ const recent = [];
 const MAX_RECENT = 32;
 export const DEFAULT_PROCESS_TIMEOUT_MS = 120_000;
 
-/** Only child handles created here can be stopped; process names/PIDs are never kill targets. */
+/**
+ * Only child handles created here can be stopped; process names/PIDs are never kill targets.
+ * `persistent` marks a resident helper (such as the index scanner) that has no overall
+ * deadline: its owner applies per-request deadlines and stops it when idle.
+ */
 export function spawnSupervised(program, args, {
-  signal, timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS, kind = 'helper',
+  signal, timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS, kind = 'helper', persistent = false,
 } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_800_000) {
     throw new MotorError('INVALID_PROCESS_TIMEOUT', 'El tiempo máximo debe estar entre 1 y 1800000 ms.');
@@ -18,7 +22,7 @@ export function spawnSupervised(program, args, {
   const child = spawn(program, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false });
   const record = {
     id: randomUUID(), pid: child.pid ?? null, parentPid: process.pid, kind,
-    startedAt: new Date().toISOString(), timeoutMs, state: 'starting',
+    startedAt: new Date().toISOString(), timeoutMs: persistent ? null : timeoutMs, persistent, state: 'starting',
   };
   let failure = null;
   let finished = false;
@@ -56,8 +60,10 @@ export function spawnSupervised(program, args, {
     });
   });
   active.set(record.id, { record, stop, completed });
-  deadline = setTimeout(() => stop(new MotorError('PROCESS_TIMEOUT', 'El auxiliar excedió el tiempo permitido.')), timeoutMs);
-  deadline.unref?.();
+  if (!persistent) {
+    deadline = setTimeout(() => stop(new MotorError('PROCESS_TIMEOUT', 'El auxiliar excedió el tiempo permitido.')), timeoutMs);
+    deadline.unref?.();
+  }
   signal?.addEventListener('abort', abort, { once: true });
   // Abort could occur while creating the child; do not lose that cancellation.
   if (signal?.aborted) abort();
