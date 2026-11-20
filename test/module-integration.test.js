@@ -137,8 +137,8 @@ test('un índice sin vínculo en el catálogo tampoco se ofrece como vigente', a
   unbound.scope.authorization_generation = null;
   await publishCatalogScope(base, JSON.stringify(unbound));
   await fs.unlink(path.join(folder, 'anterior.txt'));
-  // Motor recién abierto: que una instancia abierta tampoco lo ofrezca depende de la
-  // caché del índice (fallo de r3 registrado en indexer.test.js).
+  // Ni la instancia abierta (su caché se valida con el catálogo) ni un Motor nuevo lo ofrecen.
+  assert.equal(await motor.readFolderIndex(scope.id), null);
   motor = await openMotor({ baseDirectory: base });
   assert.equal(await motor.readFolderIndex(scope.id), null);
   assert.equal((await motor.indexFolder(scope.id)).mode, 'initial');
