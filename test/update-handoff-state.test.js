@@ -51,10 +51,9 @@ async function nativeWorker(t) {
   return { child, closed, owner };
 }
 
-// FALLO DE r3 (registrado, pendiente de decisión): writeHandoff sustituye relevo.json
-// con un renombrado sin reintento. En Windows, si un iniciador lo está leyendo en ese
-// instante, el renombrado da EPERM y el relevo falla; storage.writeJson ya reintenta
-// este caso. Un lector que mantiene el archivo abierto 60 ms lo reproduce siempre.
+// En Windows, renombrar sobre relevo.json mientras un iniciador lo lee da EPERM:
+// writeHandoff reintenta como storage.writeJson. Un lector que mantiene el archivo
+// abierto 60 ms lo reproducía siempre sin el reintento.
 test('un lector momentáneo de relevo.json no hace fallar writeHandoff', { skip: process.platform !== 'win32' && 'EPERM de renombrado propio de Windows' }, async t => {
   const root = await rootFixture(t);
   const id = randomUUID();
