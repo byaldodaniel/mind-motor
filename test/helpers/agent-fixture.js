@@ -8,7 +8,7 @@ import { toolResult, toolError } from '../../src/mcp-server.js';
 
 export const motorDirectory = await fs.realpath(fileURLToPath(new URL('../..', import.meta.url)));
 const development = path.dirname(motorDirectory);
-export const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3';
+export const pythonExecutable = process.env.MIND_TEST_BUNDLED_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
 
 /** Conexión simulada: onElicit hace de interfaz del cliente que pregunta al usuario. */
 export function connection({ onElicit = null, clientInfo = { name: 'cliente-de-prueba', version: '1.0' } } = {}) {
@@ -72,7 +72,7 @@ export async function agentFixture(t, { observe = false, prefix = '.mind-agent-t
     baseDirectory: path.join(mind, 'Base'), pythonExecutable, protectedDirectories: [mind],
   };
   async function open(options = {}) {
-    const session = await openSession({ layout, motorVersion: '0.0.0-prueba', observe, ...options });
+    const session = await openSession({ layout, motorVersion: '0.0.0-prueba', observe, nativeFilesExecutable: process.env.MIND_TEST_NATIVE_FILES, ...options });
     sessions.push(session);
     await session.start();
     return session;

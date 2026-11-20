@@ -28,10 +28,24 @@ pub(crate) fn open_reader(root: &str, relative: &str) -> Result<std::fs::File, &
     if !relative.split('/').all(reader_component) {
         return Err("UNSAFE_PATH");
     }
-    platform::open_reader(root, relative)
+    platform::open_reader(root, relative, true)
 }
 
-fn reader_component(name: &str) -> bool {
+pub(crate) fn open_reader_without_writers(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {
+    if !relative.split('/').all(reader_component) {
+        return Err("UNSAFE_PATH");
+    }
+    platform::open_reader(root, relative, false)
+}
+
+pub(crate) fn open_directory(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {
+    if !relative.is_empty() && !relative.split('/').all(reader_component) {
+        return Err("UNSAFE_PATH");
+    }
+    platform::open_directory(root, relative)
+}
+
+pub(crate) fn reader_component(name: &str) -> bool {
     let base = name.split('.').next().unwrap_or("").to_ascii_lowercase();
     let reserved = matches!(base.as_str(), "con" | "prn" | "aux" | "nul")
         || (["com", "lpt"].iter().filter_map(|prefix| base.strip_prefix(prefix)).any(|number| {
@@ -42,6 +56,9 @@ fn reader_component(name: &str) -> bool {
         && !reserved
         && !name.chars().any(|c| matches!(c, '\\' | '/' | ':' | '<' | '>' | '"' | '|' | '?' | '*' | '\x00'..='\x1f'))
 }
+
+#[cfg(windows)]
+pub(crate) use platform::acquire_native as windows_acquire;
 
 #[cfg(windows)]
 mod platform {
@@ -59,7 +76,7 @@ mod platform {
     }
     #[link(name="kernel32")] extern "system" {
         fn GetFileType(handle:Handle)->u32;
-        fn GetFileInformationByHandle(handle:Handle,info:*mut Info)->i32;
+        fn GetFileInformationByHandle(handle:Handle,info:*mut c_void)->i32;
         fn GetFileInformationByHandleEx(handle:Handle,class:i32,info:*mut c_void,size:u32)->i32;
         fn GetDriveTypeW(root:*const u16)->u32;
         fn GetLastError()->u32;
@@ -67,7 +84,14 @@ mod platform {
     struct Directory {handle:OwnedHandle,volume:u32}
     fn os_error(code:u32)->ScanError {ScanError("IO_ERROR",format!("Windows error {code}: {}",std::io::Error::from_raw_os_error(code as i32)))}
 
-    fn acquire(parent: Handle, name: &str, access: u32, options: u32) -> io::Result<OwnedHandle> {
+    fn acquire(parent: Handle, name: &str, access: u32, options: u32, share: u32) -> io::Result<OwnedHandle> {
+        acquire_native(parent, name, access, options, share, 1, 0)
+    }
+
+    pub(crate) fn acquire_native(
+        parent: Handle, name: &str, access: u32, options: u32, share: u32,
+        disposition: u32, attributes: u32,
+    ) -> io::Result<OwnedHandle> {
         let mut text: Vec<u16> = name.encode_utf16().collect();
         if text.len() > 32_766 {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -80,8 +104,12 @@ mod platform {
         let mut status = Status { status: 0, information: 0 };
         let mut handle = ptr::null_mut();
         let result = unsafe {
-            NtCreateFile(&mut handle, access, &mut attrs, &mut status, ptr::null(), 0, 7, 1, options, ptr::null(), 0)
+            NtCreateFile(&mut handle, access, &mut attrs, &mut status, ptr::null(), attributes, share, disposition, options, ptr::null(), 0)
         };
+        // DOS translation can collapse DELETE_PENDING into ACCESS_DENIED.
+        if result as u32 == 0xc000_0056 {
+            return Err(io::Error::from_raw_os_error(303));
+        }
         if result < 0 {
             return Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) } as i32));
         }
@@ -90,14 +118,14 @@ mod platform {
 
     fn metadata(handle: &OwnedHandle) -> io::Result<Info> {
         let mut info = Info::default();
-        if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), &mut info) } == 0 {
+        if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), (&mut info as *mut Info).cast()) } == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(info)
     }
 
     fn open(parent:Handle,name:&str,list:bool)->Result<Directory,ScanError> {
-        let handle = acquire(parent, name, 0x1000a0 | if list { 1 } else { 0 }, 0x200021)
+        let handle = acquire(parent, name, 0x1000a0 | if list { 1 } else { 0 }, 0x200021, 7)
             .map_err(|error| match error.raw_os_error() {
                 Some(code) => os_error(code as u32),
                 None => invalid("Path component too long"),
@@ -117,10 +145,10 @@ mod platform {
         }
     }
 
-    fn reader_open(parent: Handle, name: &str, directory: bool) -> Result<(OwnedHandle, u32), &'static str> {
+    fn reader_open(parent: Handle, name: &str, directory: bool, share: u32) -> Result<(OwnedHandle, u32), &'static str> {
         // Open the reparse point itself and inspect its held handle before use.
         let access = 0x100080 | if directory { 0x20 } else { 1 };
-        let handle = acquire(parent, name, access, 0x200020).map_err(reader_error)?;
+        let handle = acquire(parent, name, access, 0x200020, share).map_err(reader_error)?;
         let info = metadata(&handle).map_err(reader_error)?;
         if unsafe { GetFileType(handle.as_raw_handle()) } != 1
             || info.attributes & 0x400 != 0
@@ -132,7 +160,7 @@ mod platform {
         Ok((handle, info.volume))
     }
 
-    pub(super) fn open_reader(root: &str, relative: &str) -> Result<File, &'static str> {
+    fn reader_directory(root: &str, relative: &str) -> Result<(OwnedHandle, u32), &'static str> {
         let bytes = root.as_bytes();
         if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':'
             || bytes[2] != b'\\' || root.contains('/')
@@ -144,24 +172,33 @@ mod platform {
         if unsafe { GetDriveTypeW(drive_wide.as_ptr()) } != 3 {
             return Err("SAFE_OPEN_UNAVAILABLE");
         }
-        let (mut directory, mut volume) = reader_open(ptr::null_mut(), &format!("\\??\\{drive}"), true)?;
+        let (mut directory, mut volume) = reader_open(ptr::null_mut(), &format!("\\??\\{drive}"), true, 7)?;
         if root.len() > 3 {
             for name in root[3..].split('\\') {
                 if !reader_component(name) {
                     return Err("UNSAFE_PATH");
                 }
-                (directory, volume) = reader_open(directory.as_raw_handle(), name, true)?;
+                (directory, volume) = reader_open(directory.as_raw_handle(), name, true, 7)?;
             }
         }
-        let (ancestor, file) = relative.rsplit_once('/').unwrap_or(("", relative));
-        for name in ancestor.split('/').filter(|name| !name.is_empty()) {
-            let (next, current_volume) = reader_open(directory.as_raw_handle(), name, true)?;
+        for name in relative.split('/').filter(|name| !name.is_empty()) {
+            let (next, current_volume) = reader_open(directory.as_raw_handle(), name, true, 7)?;
             if current_volume != volume {
                 return Err("UNSAFE_PATH");
             }
             directory = next;
         }
-        let (file, current_volume) = reader_open(directory.as_raw_handle(), file, false)?;
+        Ok((directory, volume))
+    }
+
+    pub(super) fn open_directory(root: &str, relative: &str) -> Result<File, &'static str> {
+        reader_directory(root, relative).map(|(directory, _)| File::from(directory))
+    }
+
+    pub(super) fn open_reader(root: &str, relative: &str, share_writes: bool) -> Result<File, &'static str> {
+        let (ancestor, file) = relative.rsplit_once('/').unwrap_or(("", relative));
+        let (directory, volume) = reader_directory(root, ancestor)?;
+        let (file, current_volume) = reader_open(directory.as_raw_handle(), file, false, if share_writes { 7 } else { 5 })?;
         if current_volume != volume {
             return Err("UNSAFE_PATH");
         }
@@ -256,7 +293,7 @@ mod platform {
         Ok((fd, info))
     }
 
-    pub(super) fn open_reader(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {
+    fn reader_directory(root: &str, relative: &str) -> Result<(OwnedFd, libc::stat), &'static str> {
         if !root.starts_with('/') || root.starts_with("//") {
             return Err("UNSAFE_PATH");
         }
@@ -269,14 +306,23 @@ mod platform {
                 (directory, volume) = reader_open(directory.as_raw_fd(), name, true)?;
             }
         }
-        let (ancestor, file) = relative.rsplit_once('/').unwrap_or(("", relative));
-        for name in ancestor.split('/').filter(|name| !name.is_empty()) {
+        for name in relative.split('/').filter(|name| !name.is_empty()) {
             let (next, current_volume) = reader_open(directory.as_raw_fd(), name, true)?;
             if current_volume.st_dev != volume.st_dev {
                 return Err("UNSAFE_PATH");
             }
             directory = next;
         }
+        Ok((directory, volume))
+    }
+
+    pub(super) fn open_directory(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {
+        reader_directory(root, relative).map(|(directory, _)| std::fs::File::from(directory))
+    }
+
+    pub(super) fn open_reader(root: &str, relative: &str, _: bool) -> Result<std::fs::File, &'static str> {
+        let (ancestor, file) = relative.rsplit_once('/').unwrap_or(("", relative));
+        let (directory, volume) = reader_directory(root, ancestor)?;
         let (file, current_volume) = reader_open(directory.as_raw_fd(), file, false)?;
         if current_volume.st_dev != volume.st_dev {
             return Err("UNSAFE_PATH");
@@ -309,4 +355,4 @@ mod platform {
         }
     }
 }
-#[cfg(not(any(windows,unix)))] mod platform {use super::*; pub(super) fn open_reader(_: &str, _: &str) -> Result<std::fs::File, &'static str> { Err("SAFE_OPEN_UNAVAILABLE") } pub fn scan(_:&str,_:&str,_:usize)->Result<(Vec<Value>,bool),ScanError>{Err(ScanError("SAFE_SCAN_UNAVAILABLE","Unsupported platform".into()))}}
+#[cfg(not(any(windows,unix)))] mod platform {use super::*; pub(super) fn open_directory(_: &str, _: &str) -> Result<std::fs::File, &'static str> { Err("SAFE_OPEN_UNAVAILABLE") } pub(super) fn open_reader(_: &str, _: &str, _: bool) -> Result<std::fs::File, &'static str> { Err("SAFE_OPEN_UNAVAILABLE") } pub fn scan(_:&str,_:&str,_:usize)->Result<(Vec<Value>,bool),ScanError>{Err(ScanError("SAFE_SCAN_UNAVAILABLE","Unsupported platform".into()))}}

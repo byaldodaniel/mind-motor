@@ -120,7 +120,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, nativeTextReaderExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, nativeMeaningExecutable, userDataDirectory, backgroundGate = null } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, nativeTextReaderExecutable, nativeFilesExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, nativeMeaningExecutable, userDataDirectory, backgroundGate = null } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -182,14 +182,14 @@ export async function openMotor({ baseDirectory, pythonExecutable, nativeTextRea
   });
   // Organización (Función 03): carpetas, mover y papelera de Mind, con permisos de un solo intento.
   const trash = createTrashRegistry({ baseDirectory: base, loadAuthorizedFolder });
-  const organizer = createOrganizer({ loadAuthorizedFolder, pythonExecutable, trash });
+  const organizer = createOrganizer({ loadAuthorizedFolder, pythonExecutable, trash, nativeFilesExecutable });
   const workDestinations = createWorkDestinations(base);
   const resultRegistry = createResultRegistry(base);
   const relocation=createConversationRelocation({baseDirectory:base,continuity,conversations,results:resultRegistry,destinations:workDestinations});
   const coordinated=operation=>(...args)=>relocation.withState(()=>operation(...args));
-  const resultCopier = createResultCopier({loadAuthorizedFolder,pythonExecutable});
-  const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable });
-  const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable });
+  const resultCopier = createResultCopier({loadAuthorizedFolder,pythonExecutable,nativeFilesExecutable});
+  const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable, nativeFilesExecutable });
+  const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable, nativeFilesExecutable });
   /** Observadores abiertos en esta instancia; solo existen si el anfitrión los abre. */
   const observers = new Set();
 
@@ -227,7 +227,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, nativeTextRea
     },
     ...createTextReader({ loadAuthorizedFolder, pythonExecutable, nativeTextReaderExecutable }),
     // Texto de documentos de oficina (docx, xlsx, pptx, odt, ods, odp), con permisos propios.
-    ...createDocumentReader({ loadAuthorizedFolder, pythonExecutable }),
+    ...createDocumentReader({ loadAuthorizedFolder, pythonExecutable, nativeFilesExecutable }),
     // Funciones: administración y ejecución manual del anfitrión. getFunctionVersion
     // queda interno del ejecutor; no se entregan a agentes.
     createFunction: functions.createFunction,

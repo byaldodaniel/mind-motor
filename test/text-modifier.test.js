@@ -12,7 +12,9 @@ import { MAX_MODIFY_BYTES, createTextModifier, modifyNative, textVersion } from 
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const development = path.dirname(path.resolve(motorDirectory));
-const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3';
+const pythonExecutable = process.env.MIND_TEST_BUNDLED_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+const nativeFilesExecutable = process.env.MIND_TEST_NATIVE_FILES;
+const executables = { pythonExecutable, nativeFilesExecutable };
 const windows = process.platform === 'win32';
 const digest = (text) => textVersion(text).slice('sha256:'.length);
 
@@ -31,7 +33,7 @@ async function fixture(t, options = {}) {
   const registered = await motor.authorizeFolder(folder);
   // Mismo registro privado que usa el Motor oficial; no hay otro sistema de permisos.
   const { loadAuthorizedFolder } = createFolderRegistry(motor.baseDirectory, await fs.realpath(motorDirectory));
-  const modifier = createTextModifier({ loadAuthorizedFolder, ...options });
+  const modifier = createTextModifier({ loadAuthorizedFolder, ...executables, ...options });
   const requester = Object.freeze({ name: 'Agente ficticio' });
   const grant = (relativePath = 'nota.txt', who = requester) => modifier.grantTextModify({
     requester: who, folderId: registered.id, relativePath,
@@ -261,7 +263,7 @@ test('revalida la carpeta con el archivo ya verificado y antes de escribir', asy
   const { folder, motor, registered, file } = await fixture(t);
   await fs.writeFile(file(), 'original');
   await assert.rejects(modifyNative({
-    root: folder, relativePath: 'nota.txt', expected: digest('original'), bytes: Buffer.from('x'), pythonExecutable,
+    root: folder, relativePath: 'nota.txt', expected: digest('original'), bytes: Buffer.from('x'), ...executables,
     confirm: async () => {
       await motor.revokeFolder(registered.id);
       throw Object.assign(new Error('Retirada antes de escribir'), { code: 'FOLDER_NOT_AUTHORIZED' });
@@ -324,7 +326,7 @@ test('Windows: rechaza ACL explícitas y archivos abiertos para escribir por otr
 });
 
 test('si el intérprete seguro no está disponible falla cerrado', async (t) => {
-  const { modify, file } = await fixture(t, { pythonExecutable: path.join(development, 'python-inexistente') });
+  const { modify, file } = await fixture(t, { [nativeFilesExecutable ? 'nativeFilesExecutable' : 'pythonExecutable']: path.join(development, 'lector-inexistente') });
   await fs.writeFile(file(), 'original');
   await assert.rejects(modify('nota.txt', textVersion('original'), 'x'), { code: 'SAFE_OPEN_UNAVAILABLE' });
   assert.equal(await fs.readFile(file(), 'utf8'), 'original');

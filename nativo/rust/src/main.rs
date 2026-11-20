@@ -2,11 +2,16 @@ mod bridge;
 mod build_recipe;
 mod host;
 mod meaning;
+mod native_parent;
+mod office_read;
+mod organize;
+mod result_copy;
 mod scan;
 mod service_cli;
 mod service_process;
 mod services;
 mod text_read;
+mod text_write;
 mod view_cli;
 mod views;
 use std::io::{self, BufRead, Write};
@@ -18,6 +23,11 @@ fn main() {
         Some("scan") => scanner(),
         Some("buscar-significado") => meaning::run(),
         Some("leer-texto") => text_read::run(&args[1..]),
+        Some("crear-texto") => text_write::create(&args[1..]),
+        Some("modificar-texto") => text_write::modify(&args[1..]),
+        Some("copiar-resultado") => result_copy::run(&args[1..]),
+        Some("organizar-archivo") => organize::run(&args[1..]),
+        Some("leer-documento") => office_read::run(&args[1..]),
         Some("bridge") => tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()
             .map_err(|e|e.to_string()).and_then(|rt|rt.block_on(bridge::run(&args[1..]))),
         Some("anfitrion") => tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()

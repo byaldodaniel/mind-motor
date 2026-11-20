@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnFileHelper } from './native-file-helper.js';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { isExcluded } from './paths.js';
@@ -56,12 +56,10 @@ function iso(milliseconds) {
  * maxBytes solo viaja al auxiliar si difiere del predeterminado; el auxiliar
  * aplica el mínimo con su propio máximo.
  */
-export function createNative({ root, relativePath, bytes, pythonExecutable, confirm, maxBytes = DEFAULT_TEXT_BYTES }) {
+export function createNative({ root, relativePath, bytes, pythonExecutable, nativeFilesExecutable, confirm, maxBytes = DEFAULT_TEXT_BYTES }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], {
-      // Windows libuv jobs kill non-detached children immediately on parent
-      // death. The native guard owns the bounded grace after W instead.
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform === 'win32',
+    const child = spawnFileHelper({
+      pythonExecutable, script: helper, nativeFilesExecutable, operation: 'crear-texto', writes: true,
     });
     let output = '';
     let diagnostic = '';
@@ -123,7 +121,7 @@ export function createNative({ root, relativePath, bytes, pythonExecutable, conf
  * grantTextCreate/revokeTextCreate; al agente se le entrega una función ligada a
  * su identidad que llama a createTextFile.
  */
-export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3' }) {
+export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeFilesExecutable }) {
   // Distinto del WeakMap de lectura: un permiso de lectura nunca autoriza crear.
   const grants = new WeakMap();
   const denied = () => new MotorError('CREATE_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta creación.');
@@ -171,7 +169,7 @@ export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = pro
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const result = await createNative({
-        root: folder.path, relativePath: grant.relativePath, bytes, pythonExecutable, maxBytes: grant.maxBytes,
+        root: folder.path, relativePath: grant.relativePath, bytes, pythonExecutable, nativeFilesExecutable, maxBytes: grant.maxBytes,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();

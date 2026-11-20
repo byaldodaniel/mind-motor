@@ -154,28 +154,30 @@ node --test nativo/test/servicios-sqlite.test.mjs
 
 ## Archivos y significado (Etapa 5)
 
-El anfitrión de pruebas puede elegir `nativeTextReaderExecutable` al abrir una
-sesión. El lector abre los componentes por descriptores, espera la confirmación
-del Motor y lee por el mismo descriptor. La prueba cubre texto UTF-8 de hasta
-1 MiB, permisos y rutas de carpetas locales.
+El anfitrión de pruebas puede indicar una ruta absoluta en `nativeTextReaderExecutable` para leer
+texto en Rust, y en `nativeFilesExecutable` para crear y modificar texto,
+copiar resultados, organizar archivos y extraer texto de DOCX, XLSX, PPTX, ODT,
+ODS y ODP. Las dos opciones se pasan al abrir una sesión ficticia. Los permisos
+se vuelven a comprobar tras abrir el archivo o su carpeta. La modificación en
+macOS requiere completar la conservación de metadatos.
 
-`nativeMeaningExecutable` elige el buscador experimental. Trabaja con los
-resúmenes autorizados del proyecto y devuelve un pasaje copiado de la fuente.
-Usa palabras, asociaciones repetidas en los resúmenes y señales de idea o
-decisión. El informe compara el primer pasaje útil, los tres primeros y las
-preguntas sin respuesta en el mismo corpus ficticio. El límite de prueba es de
-2.048 conversaciones y 8 MiB de resúmenes por consulta.
+`nativeMeaningExecutable` elige el buscador experimental. Compara palabras
+y aprende asociaciones del proyecto.
+Busca en los resúmenes autorizados y conserva la distinción entre ideas y decisiones.
+La comparación es local y usa únicamente conversaciones ficticias. En la búsqueda
+híbrida con E5, si ambos métodos encuentran una nota se muestra el pasaje elegido
+por significado. Las consultas de identificadores conservan su extracto por palabras.
 
 ```powershell
 $env:MIND_TEST_NATIVE_TEXT_READER = $env:MIND_NATIVE_EXE
-node --test test/text-reader.test.js
+$env:MIND_TEST_NATIVE_FILES = $env:MIND_NATIVE_EXE
+node --test test/text-reader.test.js test/text-creator.test.js test/text-modifier.test.js test/organize-agent.test.js test/work-destinations.test.js
 $env:MIND_TEST_NATIVE_MEANING = $env:MIND_NATIVE_EXE
 node --test nativo/test/significado.test.mjs
 ```
 
-`MIND_TEST_BUNDLED_PYTHON` permite usar el Python portable como referencia de
-lectura. Para añadir E5 a la comparación de búsqueda, indica el directorio de su
-componente local con `MIND_TEST_E5_DIRECTORY`.
+`MIND_TEST_BUNDLED_PYTHON` permite usar el Python portable como referencia.
+La evaluación puede comparar con E5 local al indicar `MIND_TEST_E5_DIRECTORY`.
 
 ## Compilación reproducible
 

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnFileHelper } from './native-file-helper.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
@@ -83,12 +83,11 @@ function nativeError(operation, code) {
  * Protocolo del auxiliar: valida y adquiere sin modificar, avisa READY, espera W
  * (tras revalidar la autorización en confirm) y modifica.
  */
-export function runOrganizer({ operation, request, pythonExecutable, confirm }) {
+export function runOrganizer({ operation, request, pythonExecutable, nativeFilesExecutable, confirm }) {
   const settings = OPERATIONS[operation];
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], {
-      // The native guard bounds accepted mutations after Windows parent exit.
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform === 'win32',
+    const child = spawnFileHelper({
+      pythonExecutable, script: helper, nativeFilesExecutable, operation: 'organizar-archivo', writes: true,
     });
     let output = '';
     let diagnostic = '';
@@ -208,7 +207,7 @@ export function restoreNames(name, type, now = new Date()) {
  * @param {{ loadAuthorizedFolder: Function, pythonExecutable?: string, trash?: ReturnType<typeof import('./trash.js').createTrashRegistry> }} options
  * trash: registro de la papelera en la Base; sin él no hay borrado, restauración ni vaciado.
  */
-export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', trash = null }) {
+export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', trash = null, nativeFilesExecutable }) {
   const folders = grantTable('CREATE_FOLDER_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta carpeta nueva.');
   const moves = grantTable('MOVE_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y este movimiento.');
   const deletions = grantTable('DELETE_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y este borrado.');
@@ -264,7 +263,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
       const revalidate = revalidator(folders, grant, [grant.relativePath], []);
       const folder = await revalidate();
       const result = await runOrganizer({
-        operation: 'mkdir', pythonExecutable, confirm: revalidate,
+        operation: 'mkdir', pythonExecutable, nativeFilesExecutable, confirm: revalidate,
         request: { op: 'mkdir', root: folder.path, relativePath: grant.relativePath },
       });
       return { folderId: grant.folderId, relativePath: grant.relativePath, indexEntry: indexEntry(grant.relativePath, result, 'mkdir') };
@@ -319,7 +318,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
       }
       const folder = await revalidate();
       const result = await runOrganizer({
-        operation: 'move', pythonExecutable, confirm: revalidate,
+        operation: 'move', pythonExecutable, nativeFilesExecutable, confirm: revalidate,
         request: { op: 'move', root: folder.path, from: grant.from, to: grant.to, targetRoot: folder.targetPath ?? null },
       });
       const entry = indexEntry(grant.to, result, 'move');
@@ -362,7 +361,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
       const trashId = newTrashId();
       const expected = grant.expected;
       const result = await runOrganizer({
-        operation: 'trash', pythonExecutable, confirm: revalidate,
+        operation: 'trash', pythonExecutable, nativeFilesExecutable, confirm: revalidate,
         request: {
           op: 'trash', root: folder.path, relativePath: grant.relativePath, trashId,
           expect: expected && {
@@ -428,7 +427,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
       let result;
       try {
         result = await runOrganizer({
-          operation: 'restore', pythonExecutable, confirm: revalidate,
+          operation: 'restore', pythonExecutable, nativeFilesExecutable, confirm: revalidate,
           request: {
             op: 'restore', root: folder.path, trashId: grant.trashId, name,
             targetParent: parts, candidates: allowed(folder),
@@ -473,7 +472,7 @@ export function createOrganizer({ loadAuthorizedFolder, pythonExecutable = proce
       let gone = false;
       try {
         ({ removed } = await runOrganizer({
-          operation: 'purge', pythonExecutable, confirm: revalidate,
+          operation: 'purge', pythonExecutable, nativeFilesExecutable, confirm: revalidate,
           request: { op: 'purge', root: folder.path, trashId: grant.trashId },
         }));
       } catch (error) {

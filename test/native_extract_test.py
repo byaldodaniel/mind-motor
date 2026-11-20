@@ -1,9 +1,11 @@
 """Extracción de texto de documentos ficticios creados en la prueba."""
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -40,27 +42,48 @@ class ExtractTest(unittest.TestCase):
         self.assertEqual(self.temp.parent, DEVELOPMENT)
         shutil.rmtree(self.temp)
 
+    def extract(self, data, kind):
+        helper = os.environ.get('MIND_TEST_NATIVE_FILES')
+        if not helper:
+            return native.extract(data, kind)
+        file = self.temp / ('documento.' + kind)
+        file.write_bytes(data)
+        request = json.dumps({'root': str(self.temp.resolve()), 'relativePath': file.name, 'format': kind}).encode()
+        with subprocess.Popen([helper, 'leer-documento', '--parent-pid', str(os.getpid())],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+            child.stdin.write(request + b'\n')
+            child.stdin.flush()
+            first = child.stderr.readline()
+            output, error = child.communicate(b'R' if first.strip() == b'READY' else None, timeout=25)
+            if child.returncode:
+                code = error if first.strip() == b'READY' else first + error
+                raise native.Refusal(code.decode().strip())
+            self.assertEqual(first.strip(), b'READY')
+            return json.loads(output)
+
     def code(self, data, kind):
         with self.assertRaises(native.Refusal) as failure:
-            native.extract(data, kind)
+            self.extract(data, kind)
         return str(failure.exception)
 
     def test_docx_xlsx_pptx_and_opendocument_text(self):
-        self.assertEqual(native.extract(docx(['Acta ficticia', 'Acuerdo: revisar']), 'docx')['text'], 'Acta ficticia\nAcuerdo: revisar')
+        self.assertEqual(self.extract(docx(['Acta ficticia', 'Acuerdo: revisar']), 'docx')['text'], 'Acta ficticia\nAcuerdo: revisar')
         xlsx = archive({
             'xl/workbook.xml': f'<workbook xmlns="{S}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Gastos" r:id="rId1"/></sheets></workbook>',
             'xl/_rels/workbook.xml.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>',
             'xl/sharedStrings.xml': f'<sst xmlns="{S}"><si><t>Concepto</t></si><si><t>Papel ficticio</t></si></sst>',
             'xl/worksheets/sheet1.xml': f'<worksheet xmlns="{S}"><sheetData><row><c t="s"><v>0</v></c><c><v>Importe</v></c></row><row><c t="s"><v>1</v></c><c><v>12.5</v></c></row></sheetData></worksheet>',
         })
-        self.assertEqual(native.extract(xlsx, 'xlsx')['text'], '# Hoja: Gastos\nConcepto\tImporte\nPapel ficticio\t12.5')
+        self.assertEqual(self.extract(xlsx, 'xlsx')['text'], '# Hoja: Gastos\nConcepto\tImporte\nPapel ficticio\t12.5')
         pptx = archive({
             'ppt/slides/slide2.xml': f'<p:sld xmlns:p="x" xmlns:a="{A}"><a:p><a:r><a:t>Segunda</a:t></a:r></a:p></p:sld>',
             'ppt/slides/slide1.xml': f'<p:sld xmlns:p="x" xmlns:a="{A}"><a:p><a:r><a:t>Portada ficticia</a:t></a:r></a:p></p:sld>',
         })
-        self.assertEqual(native.extract(pptx, 'pptx')['text'], '# Diapositiva 1\nPortada ficticia\n\n# Diapositiva 2\nSegunda')
+        self.assertEqual(self.extract(pptx, 'pptx')['text'], '# Diapositiva 1\nPortada ficticia\n\n# Diapositiva 2\nSegunda')
         odt = archive({'content.xml': '<office:document-content xmlns:office="o" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><text:p>Nota ficticia</text:p><text:h>Título</text:h></office:body></office:document-content>'})
-        self.assertEqual(native.extract(odt, 'odt')['text'], 'Nota ficticia\nTítulo')
+        for kind in ('odt', 'ods', 'odp'):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.extract(odt, kind)['text'], 'Nota ficticia\nTítulo')
 
     def test_dtd_entities_bombs_encryption_and_garbage_are_refused(self):
         bomb = '<?xml version="1.0"?><!DOCTYPE d [<!ENTITY a "aaaa">]><w:document xmlns:w="%s"><w:body><w:p><w:r><w:t>&a;</w:t></w:r></w:p></w:body></w:document>' % W
@@ -81,7 +104,7 @@ class ExtractTest(unittest.TestCase):
         paragraphs = [' '.join(generator.choice(words) + str(generator.randrange(10_000)) for _ in range(120))
                       for _ in range(native.MAX_TEXT_CHARS // 1000 + 200)]
         long = docx(paragraphs)
-        result = native.extract(long, 'docx')
+        result = self.extract(long, 'docx')
         self.assertTrue(result['truncated'])
         self.assertEqual(len(result['text']), native.MAX_TEXT_CHARS)
 

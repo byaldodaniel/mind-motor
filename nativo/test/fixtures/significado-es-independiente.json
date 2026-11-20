@@ -1,0 +1,153 @@
+{
+  "name": "Etapa 5 · segunda muestra española independiente",
+  "documents": [
+    {
+      "key": "humedad",
+      "title": "Inventario de instrumentos",
+      "important": "Al terminar el turno, el higrómetro se guarda en el casillero verde. El termómetro queda junto a la puerta del depósito.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "humedad_manual",
+      "title": "Hoja de calibración",
+      "important": "Antes de medir humedad, el aparato se deja diez minutos sobre la mesa gris. El equipo vuelve a la caja de transporte si se presta a otro grupo.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "taller_correccion",
+      "title": "Inscripciones al taller",
+      "important": "Las rectificaciones de inscripción se aceptan hasta el miércoles a las 18:00. Luego se imprime la lista definitiva.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "taller_pago",
+      "title": "Aportaciones al taller",
+      "important": "La aportación de materiales se abona el viernes antes de las 12:00. La hoja de inscripción se revisa cuando se registra el pago.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "rampa_decision",
+      "title": "Acuerdo de accesos",
+      "important": "Decisión: la rampa de la entrada al salón permanecerá instalada durante todo el festival. El paso lateral queda reservado para el reparto.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "rampa_idea",
+      "title": "Propuestas de montaje",
+      "important": "Idea: retirar la rampa del salón tras la inauguración para poder usar esa zona durante el evento. La sugerencia se apuntó para debatirla.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "elevador_averia",
+      "title": "Incidencias del almacén",
+      "important": "Si el montacargas se atasca, se avisa a la guardia de mantenimiento en el interno 216. El aviso se anota con la hora de la avería.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "elevador_reparto",
+      "title": "Turnos de reparto",
+      "important": "Para programar el uso del ascensor de carga, llama a recepción en el interno 108. Es para reservas de franja y cambios de turno.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "trayecto_reembolso",
+      "title": "Gastos del encuentro",
+      "important": "El billete de autobús del desplazamiento de ida se reembolsa al presentar el original. La vuelta se hará en el vehículo del equipo.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "trayecto_reserva",
+      "title": "Opciones de transporte",
+      "important": "Se reservó un taxi para llevar equipos la víspera. El gasto de ese servicio se pagará con la tarjeta del coordinador.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "cocina_decision",
+      "title": "Equipo de demostración",
+      "important": "Decisión: para la demostración se utilizará la cocina de gas con cartucho de butano. La mesa y el cable de luces se recogen aparte.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "cocina_idea",
+      "title": "Material alternativo",
+      "important": "Idea: llevar un hornillo de alcohol si falta espacio en la mesa. El equipo todavía está consultando su disponibilidad.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "panel_formas",
+      "title": "Señales de capacidad",
+      "important": "El panel usa un círculo para libre y una cruz para ocupado, además del verde y el rojo. Los símbolos permanecerán visibles incluso con poca luz.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "panel_obra",
+      "title": "Marcas de pintura",
+      "important": "Se pintan dos círculos azules para señalar el almacenamiento y una cruz naranja para las obras. La entrada de visitantes sigue por la derecha.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "mascota_regla",
+      "title": "Acceso al almacén",
+      "important": "Al almacén solo pueden entrar perros guía. Las demás mascotas deben esperar fuera con un acompañante.",
+      "project": "Banco ficticio de tareas vecinales"
+    },
+    {
+      "key": "mascota_patio",
+      "title": "Acceso al patio de espera",
+      "important": "En el patio los perros pueden permanecer con correa y con su responsable. Hay un recipiente de agua junto a la banca.",
+      "project": "Banco ficticio de tareas vecinales"
+    }
+  ],
+  "positives": [
+    {
+      "query": "¿Dónde dejamos el aparato que registra la humedad después de usarlo?",
+      "key": "humedad",
+      "evidence": "Al terminar el turno, el higrómetro se guarda en el casillero verde."
+    },
+    {
+      "query": "¿Hasta cuándo puedo corregir los datos que puse al apuntarme al taller?",
+      "key": "taller_correccion",
+      "evidence": "Las rectificaciones de inscripción se aceptan hasta el miércoles a las 18:00."
+    },
+    {
+      "query": "¿Qué acordamos hacer con el acceso inclinado del salón mientras dure el evento?",
+      "key": "rampa_decision",
+      "evidence": "Decisión: la rampa de la entrada al salón permanecerá instalada durante todo el festival."
+    },
+    {
+      "query": "¿A quién llamo si el ascensor de carga se queda parado?",
+      "key": "elevador_averia",
+      "evidence": "Si el montacargas se atasca, se avisa a la guardia de mantenimiento en el interno 216."
+    },
+    {
+      "query": "¿Cómo recupero lo que pagué por viajar para llegar al encuentro?",
+      "key": "trayecto_reembolso",
+      "evidence": "El billete de autobús del desplazamiento de ida se reembolsa al presentar el original."
+    },
+    {
+      "query": "¿Qué combustible se eligió para el hornillo que usaremos en la presentación?",
+      "key": "cocina_decision",
+      "evidence": "Decisión: para la demostración se utilizará la cocina de gas con cartucho de butano."
+    },
+    {
+      "query": "Si una persona confunde los colores, ¿cómo sabrá si hay sitio?",
+      "key": "panel_formas",
+      "evidence": "El panel usa un círculo para libre y una cruz para ocupado, además del verde y el rojo."
+    },
+    {
+      "query": "¿Qué perros tienen permitido entrar en la bodega?",
+      "key": "mascota_regla",
+      "evidence": "Al almacén solo pueden entrar perros guía."
+    }
+  ],
+  "negatives": [
+    "¿Dónde se originó el ajedrez moderno?",
+    "¿De qué está formada la atmósfera de Saturno?",
+    "¿Cómo se regula el foco de un telescopio reflector?",
+    "¿Qué instrumento toca la melodía en esa sinfonía?"
+  ],
+  "nearMisses": [
+    "¿Cuánto cuesta calibrar el higrómetro?",
+    "¿Cuánto pesa la rampa de entrada al salón?"
+  ]
+}

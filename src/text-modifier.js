@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnFileHelper } from './native-file-helper.js';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
@@ -84,11 +84,10 @@ function iso(milliseconds) {
  * solo viaja al auxiliar si difiere del predeterminado; el auxiliar aplica el
  * mínimo con su propio máximo.
  */
-export function modifyNative({ root, relativePath, expected, bytes, pythonExecutable, confirm, maxBytes = DEFAULT_TEXT_BYTES }) {
+export function modifyNative({ root, relativePath, expected, bytes, pythonExecutable, nativeFilesExecutable, confirm, maxBytes = DEFAULT_TEXT_BYTES }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], {
-      // Keep the native guard's bounded commit grace; do not unref this child.
-      stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform === 'win32',
+    const child = spawnFileHelper({
+      pythonExecutable, script: helper, nativeFilesExecutable, operation: 'modificar-texto', writes: true,
     });
     let output = '';
     let diagnostic = '';
@@ -150,7 +149,7 @@ export function modifyNative({ root, relativePath, expected, bytes, pythonExecut
  * recibe grantTextModify/revokeTextModify; al agente se le entrega una función
  * ligada a su identidad que llama a modifyTextFile.
  */
-export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3' }) {
+export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeFilesExecutable }) {
   // Mapa propio: los permisos de lectura o creación nunca autorizan modificar.
   const grants = new WeakMap();
   const denied = () => new MotorError('MODIFY_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta modificación.');
@@ -201,7 +200,7 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const result = await modifyNative({
-        root: folder.path, relativePath: grant.relativePath, expected, bytes, pythonExecutable, maxBytes: grant.maxBytes,
+        root: folder.path, relativePath: grant.relativePath, expected, bytes, pythonExecutable, nativeFilesExecutable, maxBytes: grant.maxBytes,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnFileHelper } from './native-file-helper.js';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { isExcluded } from './paths.js';
@@ -34,9 +34,11 @@ export function documentFormat(relativePath) {
   return DOCUMENT_FORMATS.includes(format) ? format : null;
 }
 
-function extractNative({ root, relativePath, format, pythonExecutable, confirm }) {
+function extractNative({ root, relativePath, format, pythonExecutable, nativeFilesExecutable, confirm }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawnFileHelper({
+      pythonExecutable, script: helper, nativeFilesExecutable, operation: 'leer-documento',
+    });
     let output = '';
     let diagnostic = '';
     let confirmation;
@@ -88,7 +90,7 @@ function extractNative({ root, relativePath, format, pythonExecutable, confirm }
  * la lectura de texto: el anfitrión concede un permiso de un solo intento para
  * un archivo exacto; un permiso de lectura de texto no sirve aquí ni al revés.
  */
-export function createDocumentReader({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3' }) {
+export function createDocumentReader({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeFilesExecutable }) {
   const grants = new WeakMap();
   const denied = () => new MotorError('READ_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta lectura.');
   const excluded = () => new MotorError('PATH_EXCLUDED', 'El usuario excluyó esa ubicación del acceso de Mind.');
@@ -118,7 +120,7 @@ export function createDocumentReader({ loadAuthorizedFolder, pythonExecutable = 
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const result = await extractNative({
-        root: folder.path, relativePath: grant.relativePath, format: documentFormat(grant.relativePath), pythonExecutable,
+        root: folder.path, relativePath: grant.relativePath, format: documentFormat(grant.relativePath), pythonExecutable, nativeFilesExecutable,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();

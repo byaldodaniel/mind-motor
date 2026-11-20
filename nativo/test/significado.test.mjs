@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { RUNS } from './runs.mjs';
+import { fuseResults } from '../../src/conversation-search.js';
 import { createAgentTools } from '../../src/agent-tools.js';
 import { resolveLayout } from '../../src/layout.js';
 import { openMotor } from '../../src/motor.js';
@@ -14,7 +15,9 @@ const e5Directory = process.env.MIND_TEST_E5_DIRECTORY;
 const enabled = { skip: !nativeMeaningExecutable && 'Indica MIND_TEST_NATIVE_MEANING o MIND_NATIVE_EXE' };
 const independentProject = 'Validación independiente';
 
-// Consultas fijas de examples/evaluar-busqueda-hibrida.mjs, sin ajuste posterior.
+const independentBank = JSON.parse(await fs.readFile(new URL('./fixtures/significado-es-independiente.json', import.meta.url), 'utf8'));
+
+// Consultas de referencia, congeladas para medir cada cambio.
 const heldout = [
   ['Recuperación de cuenta','Si olvida su contraseña, solicite un enlace de restablecimiento por correo electrónico.','¿Cómo vuelvo a entrar si no recuerdo la clave de acceso?'],
   ['Plantas','Regar las macetas dos veces por semana y mantenerlas lejos del sol directo.','¿Con qué frecuencia debo echar agua a las plantas?'],
@@ -82,7 +85,7 @@ function active(result) {
 
 const round = value => Number(value.toFixed(2));
 
-async function score(search, seeds) {
+async function score(search, checks, noAnswer) {
   const times = [];
   const ranks = [];
   let falsePositives = 0;
@@ -92,13 +95,13 @@ async function score(search, seeds) {
     times.push(performance.now() - before);
     return result;
   }
-  for (const [i, [, , query]] of heldout.entries()) {
+  for (const { query, seed, excerpt } of checks) {
     const result = await timed(query);
-    const index = result.results.findIndex(row => row.id === seeds[i].id
-      && row.revision === seeds[i].revision && row.excerpt.includes(evidence[i]));
+    const index = result.results.findIndex(row => row.id === seed.id
+      && row.revision === seed.revision && row.excerpt.includes(excerpt));
     ranks.push(index === -1 ? null : index + 1);
   }
-  for (const query of negatives) {
+  for (const query of noAnswer) {
     if ((await timed(query)).total !== 0) falsePositives++;
   }
   times.sort((a, b) => a - b);
@@ -106,13 +109,41 @@ async function score(search, seeds) {
   return {
     top1: ranks.filter(rank => rank === 1).length,
     top3: ranks.filter(rank => rank !== null && rank <= 3).length,
-    totalConRespuesta: heldout.length,
+    totalConRespuesta: checks.length,
     sinRespuestaConCoincidencias: falsePositives,
-    totalSinRespuesta: negatives.length,
+    totalSinRespuesta: noAnswer.length,
     medianaMs: round(times.length % 2 ? times[middle] : (times[middle - 1] + times[middle]) / 2),
     puestos: ranks,
   };
 }
+
+test('una pregunta híbrida muestra el pasaje hallado por significado cuando ambos métodos encuentran la misma nota', () => {
+  const textMatch = { id: 'envios', excerpt: 'El paquete anterior ya salió del depósito.' };
+  const meaningMatch = { id: 'envios', excerpt: 'El almacén entrega los envíos de lunes a viernes, de ocho a doce.' };
+  const [question] = fuseResults([textMatch], [meaningMatch]);
+  assert.equal(question.match, 'ambas');
+  assert.equal(question.excerpt, meaningMatch.excerpt);
+  assert.equal(fuseResults([textMatch], [meaningMatch], { exactIdentifiers: true })[0].excerpt, textMatch.excerpt);
+  assert.equal(fuseResults([textMatch], [])[0].excerpt, textMatch.excerpt);
+});
+
+test('E5 muestra la respuesta literal a una pregunta reformulada', { skip: !e5Directory, timeout: 120_000 }, async t => {
+  const f = await fixture(t);
+  const motor = await f.motor({ semanticEncoder: createSemanticEncoder({ directory: e5Directory }) });
+  const title = 'Dónde se puede guardar el higrómetro después del evento';
+  const query = '¿Dónde se puede guardar el higrómetro después del evento?';
+  const patio = 'Las plantas de la entrada se regarán los jueves. El equipo del patio distribuirá semillas entre los vecinos y reparará las macetas dañadas. La comisión de jardinería entregará las herramientas antes de la reunión. La mesa del fondo se usará para ordenar sobres, clasificar etiquetas y limpiar las regaderas. El turno de la mañana llevará las bolsas de tierra a la caseta. Cada persona recogerá sus guantes en la portería. El grupo que prepare los materiales dejará un recuento en la libreta del patio.';
+  const answer = 'Tras la feria, el medidor de humedad quedará dentro del armario azul del almacén norte.';
+  const saved = await motor.saveConversation({ title, important: patio + '\n\n' + answer + ' Rita dejará allí la llave, junto a la lista de materiales.' });
+  const words = await motor.searchConversations({ query, mode: 'palabras' });
+  assert.match(words.results[0]?.excerpt, /^Las plantas/u);
+  assert.equal((await motor.prepareConversationSearch()).error, null);
+  const found = await motor.searchConversations({ query });
+  assert.equal(found.semantic.status, 'activa');
+  assert.equal(found.results[0]?.id, saved.id);
+  assert.equal(found.results[0]?.match, 'ambas');
+  assert.ok(found.results[0]?.excerpt.includes(answer));
+});
 
 test('compara el primer pasaje útil en consultas fijas ficticias', { ...enabled, timeout: 120_000 }, async t => {
   const f = await fixture(t);
@@ -128,8 +159,9 @@ test('compara el primer pasaje útil en consultas fijas ficticias', { ...enabled
   assert.equal(firstWords.results[0]?.id, seeds[0].id);
   active(await native.searchConversations({ ...options, query: 'contraseña' }));
 
-  const words = await score(query => r3.searchConversations({ ...options, query, mode: 'palabras' }), seeds);
-  const candidate = await score(async query => active(await native.searchConversations({ ...options, query })), seeds);
+  const checks = heldout.map(([, , query], index) => ({ query, seed: seeds[index], excerpt: evidence[index] }));
+  const words = await score(query => r3.searchConversations({ ...options, query, mode: 'palabras' }), checks, negatives);
+  const candidate = await score(async query => active(await native.searchConversations({ ...options, query })), checks, negatives);
   guard.check();
   let e5 = null;
   if (e5Directory) {
@@ -139,9 +171,40 @@ test('compara el primer pasaje útil en consultas fijas ficticias', { ...enabled
       const result = await r3.searchConversations({ ...options, query });
       assert.equal(result.semantic.status, 'activa', 'Se exige el E5 real, sin búsqueda de respaldo.');
       return result;
-    }, seeds);
+    }, checks, negatives);
   }
   t.diagnostic(JSON.stringify({ corpus: '10 conversaciones ficticias, 14 consultas', palabras: words, candidato: candidate, r3E5: e5 }));
+});
+
+test('mide generalización con preguntas ficticias congeladas y distractores', { ...enabled, timeout: 120_000 }, async t => {
+  const f = await fixture(t);
+  const guard = forbiddenEncoder();
+  const native = await f.motor({ nativeMeaningExecutable, semanticEncoder: guard.encoder });
+  const reference = await f.motor(e5Directory
+    ? { semanticEncoder: createSemanticEncoder({ directory: e5Directory }) }
+    : {});
+  const { documents, positives, negatives: unrelated, nearMisses } = independentBank;
+  const byKey = new Map();
+  for (const { key, title, important, project } of documents) {
+    byKey.set(key, await reference.saveConversation({ title, important, project }));
+  }
+
+  const checks = positives.map(({ query, key, evidence: excerpt }) => ({ query, seed: byKey.get(key), excerpt }));
+  const negatives = [...unrelated, ...nearMisses];
+  const options = { limit: 3 };
+  const candidate = await score(async query => active(await native.searchConversations({ ...options, query })), checks, negatives);
+  guard.check();
+  let e5 = null;
+  if (e5Directory) {
+    const preparation = await reference.prepareConversationSearch();
+    assert.equal(preparation.error, null);
+    e5 = await score(async query => {
+      const result = await reference.searchConversations({ ...options, query });
+      assert.equal(result.semantic.status, 'activa');
+      return result;
+    }, checks, negatives);
+  }
+  t.diagnostic(JSON.stringify({ corpus: independentBank.name, candidato: candidate, r3E5: e5 }));
 });
 
 test('aprende términos del proyecto, distingue intención y conserva permisos y vigencia', enabled, async t => {

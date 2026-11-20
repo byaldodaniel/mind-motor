@@ -1,13 +1,13 @@
-import {spawn} from 'node:child_process';
+import {spawnFileHelper} from './native-file-helper.js';
 import {fileURLToPath} from 'node:url';
 import {MotorError} from './errors.js';
 import {isExcluded} from './paths.js';
 import {outputName} from './work-destinations.js';
 const helper=fileURLToPath(new URL('./native_result_copy.py',import.meta.url));
 const allowedErrors=new Set(['ACCESS_DENIED','FILE_EXISTS','PARENT_NOT_FOUND','FILE_NOT_FOUND','UNSAFE_PATH','NO_SPACE','SOURCE_CHANGED','FILE_TOO_LARGE','SAFE_OPEN_UNAVAILABLE']);
-export function copyResultNative(request,{pythonExecutable,confirm}) {
+export function copyResultNative(request,{pythonExecutable,nativeFilesExecutable,confirm}) {
   return new Promise((resolve,reject)=>{
-    const child=spawn(pythonExecutable,['-I','-B',helper,'--parent-pid',String(process.pid)],{stdio:['pipe','pipe','pipe'],windowsHide:true,detached:process.platform==='win32'});
+    const child=spawnFileHelper({pythonExecutable,script:helper,nativeFilesExecutable,operation:'copiar-resultado',writes:true});
     let out='',diagnostic='',confirmed=false,failure;
     const fail=error=>{failure??=error;child.kill();};
     const timer=setTimeout(()=>fail(new MotorError(confirmed?'COPY_UNCONFIRMED':'COPY_FAILED','No se pudo confirmar la copia en el tiempo previsto.')),120000);
@@ -32,7 +32,7 @@ export function copyResultNative(request,{pythonExecutable,confirm}) {
     child.stdin.write(JSON.stringify(request)+'\n');
   });
 }
-export function createResultCopier({loadAuthorizedFolder,pythonExecutable=process.platform==='win32'?'python':'python3'}) {
+export function createResultCopier({loadAuthorizedFolder,pythonExecutable=process.platform==='win32'?'python':'python3',nativeFilesExecutable}) {
   const grants=new WeakMap();
   const verifications=new WeakMap();
   const denyVerification=()=>new MotorError('RESULT_VERIFICATION_NOT_AUTHORIZED','No hay permiso vigente para esta comprobación.');
@@ -62,7 +62,7 @@ export function createResultCopier({loadAuthorizedFolder,pythonExecutable=proces
       };
       const folder=await validate();
       const value=await copyResultNative({verifyOnly:true,sourceRoot:folder.path,sourcePath:grant.relative,maxBytes:4*1024**3},
-        {pythonExecutable,confirm:async()=>{await validate();await confirm?.();}});
+        {pythonExecutable,nativeFilesExecutable,confirm:async()=>{await validate();await confirm?.();}});
       return {...value,folderId:folder.id,relativePath:grant.relative};
     },
     async grantResultCopy({requester,sourceFolderId,sourcePath,targetFolderId,targetPath}={}) {
@@ -83,7 +83,7 @@ export function createResultCopier({loadAuthorizedFolder,pythonExecutable=proces
         return {source,target};
       };
       const {source,target}=await validate();
-      const result=await copyResultNative({sourceRoot:source.path,sourcePath:grant.from,targetRoot:target.path,targetPath:grant.to,maxBytes:4*1024**3},{pythonExecutable,confirm:async()=>{await validate();await confirm?.();}});
+      const result=await copyResultNative({sourceRoot:source.path,sourcePath:grant.from,targetRoot:target.path,targetPath:grant.to,maxBytes:4*1024**3},{pythonExecutable,nativeFilesExecutable,confirm:async()=>{await validate();await confirm?.();}});
       return {...result,folderId:target.id,relativePath:grant.to};
     }
   };

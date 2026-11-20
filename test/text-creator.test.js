@@ -9,7 +9,9 @@ import { MAX_CREATE_BYTES, createNative, createTextCreator } from '../src/text-c
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const development = path.dirname(path.resolve(motorDirectory));
-const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3';
+const pythonExecutable = process.env.MIND_TEST_BUNDLED_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+const nativeFilesExecutable = process.env.MIND_TEST_NATIVE_FILES;
+const executables = { pythonExecutable, nativeFilesExecutable };
 const linkType = process.platform === 'win32' ? 'junction' : 'dir';
 
 async function fixture(t, options = {}) {
@@ -27,7 +29,7 @@ async function fixture(t, options = {}) {
   const registered = await motor.authorizeFolder(folder);
   // Mismo registro privado que usa el Motor oficial; no hay otro sistema de permisos.
   const { loadAuthorizedFolder } = createFolderRegistry(motor.baseDirectory, await fs.realpath(motorDirectory));
-  const creator = createTextCreator({ loadAuthorizedFolder, ...options });
+  const creator = createTextCreator({ loadAuthorizedFolder, ...executables, ...options });
   const requester = Object.freeze({ name: 'Agente ficticio' });
   const grant = (relativePath = 'nuevo.txt', who = requester) => creator.grantTextCreate({
     requester: who, folderId: registered.id, relativePath,
@@ -221,7 +223,7 @@ test('revocar el permiso o la carpeta antes del intento lo impide; registrar de 
 test('revalida la carpeta tras adquirir el padre y antes de crear', async (t) => {
   const { folder, motor, registered } = await fixture(t);
   await assert.rejects(createNative({
-    root: folder, relativePath: 'nuevo.txt', bytes: Buffer.from('x'), pythonExecutable,
+    root: folder, relativePath: 'nuevo.txt', bytes: Buffer.from('x'), ...executables,
     confirm: async () => {
       await motor.revokeFolder(registered.id);
       throw Object.assign(new Error('Retirada antes de crear'), { code: 'FOLDER_NOT_AUTHORIZED' });
@@ -231,7 +233,7 @@ test('revalida la carpeta tras adquirir el padre y antes de crear', async (t) =>
 });
 
 test('si el intérprete seguro no está disponible falla cerrado', async (t) => {
-  const { folder, create } = await fixture(t, { pythonExecutable: path.join(development, 'python-inexistente') });
+  const { folder, create } = await fixture(t, { [nativeFilesExecutable ? 'nativeFilesExecutable' : 'pythonExecutable']: path.join(development, 'lector-inexistente') });
   await assert.rejects(create('nuevo.txt'), { code: 'SAFE_OPEN_UNAVAILABLE' });
   assert.deepEqual(await fs.readdir(folder), []);
 });

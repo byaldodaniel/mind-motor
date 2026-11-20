@@ -129,6 +129,7 @@ export function fuseResults(lexical, semantic, { exactIdentifiers = false } = {}
   semantic.forEach((row, rank) => {
     const before = merged.get(row.id);
     merged.set(row.id, { ...row, ...before, score: (before?.score ?? 0) + 1 / (60 + rank + 1),
+      excerpt: exactIdentifiers && before ? before.excerpt : row.excerpt,
       match: before ? 'ambas' : 'significado' });
   });
   return [...merged.values()].sort((a,b) => {
