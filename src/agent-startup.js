@@ -15,7 +15,7 @@ export function startupInstructions(root,runtime,platform=process.platform,manif
     ? '& '+[runtime.nodeExecutable,entrypoint].map(value=>"'"+value.replaceAll("'","''")+"'").join(' ')+' inicio'
     : [runtime.nodeExecutable,entrypoint].map(shellQuote).join(' ')+' inicio';
   return BEGIN+'\n## Mind: inicio de conversaciones\n\n'
-    +'Antes de responder la primera solicitud sustantiva de cada conversación, consulta Mind. Si tienes sus herramientas conectadas, llama destinos_consultar (con proyecto/conversacion cuando corresponda) y aplica su política antes de crear archivos.\n'
+    +'Antes de responder la primera solicitud sustantiva de cada conversación, consulta Mind. Si tienes sus herramientas conectadas, llama retomar con el ID de la conversación si lo tienes, o estado si no; por consola, destinos_consultar (con proyecto/conversacion cuando corresponda). Aplica sus destinos antes de crear archivos.\n'
     +'Si no tienes las herramientas, ejecuta este iniciador desde la carpeta de trabajo actual, sin cambiar de proyecto:\n\n'
     +'    '+command+'\n\n'
     +'Lee las instrucciones y destinos que devuelve inicio; usa su CLI incluida si no hay MCP. Conserva lo importante según la preferencia: esencial por defecto. Guarda documentos, imágenes, código y demás resultados físicamente en los destinos resueltos; registra resultados en la conversación y conserva su ID al retomar. Cambiar un destino de proyecto afecta a sus nuevos resultados. Comprueba el archivo antes de anunciar guardado.\n'

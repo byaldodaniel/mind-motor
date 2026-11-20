@@ -3,6 +3,7 @@ import { serveMcp } from './mcp-server.js';
 import { MotorError } from './errors.js';
 import { openSession } from './session.js';
 import { createAgentTools, AGENT_INSTRUCTIONS } from './agent-tools.js';
+import { catalogMode, instructionsFor, withCatalog } from './core-catalog.js';
 import { MOTOR_VERSION } from './version.js';
 import { releaseQuarantine } from './quarantine.js';
 
@@ -37,6 +38,8 @@ export async function runMcpSession({ layout, input = process.stdin, output = pr
   };
 
   workspace = createWorkspaceAccess(session, { paths: workspacePaths, log });
+  // Catálogo núcleo (1.0.5) salvo MIND_CATALOGO=completo.
+  const mode = catalogMode(null);
   const server = serveMcp({
     input,
     output,
@@ -44,10 +47,10 @@ export async function runMcpSession({ layout, input = process.stdin, output = pr
     instructions: quarantine.aviso ? `${AGENT_INSTRUCTIONS}\n\nAviso para el usuario: ${quarantine.aviso}` : AGENT_INSTRUCTIONS,
     tools: (connection) => {
       const tools = createAgentTools({ session: workspace.session, connection, log });
-      return { definitions: tools.definitions, async call(name, args, context) {
+      return withCatalog({ definitions: tools.definitions, async call(name, args, context) {
         await workspace.beforeCall(name, args);
         return tools.call(name, args, context);
-      } };
+      } }, mode);
     },
     onInitialized: async (connection) => { await session.start(); await session.sync(); await workspace.initialize(connection); },
     onRootsChanged: (connection) => workspace.refresh(connection),

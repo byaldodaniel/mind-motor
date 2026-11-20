@@ -17,7 +17,9 @@ for (const [command, args] of [
     'nativo/test/bridge-contract.test.mjs', 'nativo/test/bridge-boundary.test.mjs',
     'nativo/test/invalid-mcp.test.mjs', 'nativo/test/scan.test.mjs']]] : []),
 ]) {
-  const result = spawnSync(command, args, { stdio: 'inherit', windowsHide: true, env:{...process.env,MIND_AGENT_STARTUP:'0'} });
+  // Las suites de r3 llaman a las operaciones por su nombre completo: corren con el
+  // catálogo completo. El catálogo núcleo tiene sus pruebas (core-catalog) y su contrato.
+  const result = spawnSync(command, args, { stdio: 'inherit', windowsHide: true, env:{...process.env,MIND_AGENT_STARTUP:'0',MIND_CATALOGO:process.env.MIND_CATALOGO ?? 'completo'} });
   if (result.error) console.error(result.error.message);
   // Se ejecutan todas las suites aunque una falle, para ver todos los diagnósticos.
   if (result.status !== 0) failed.push(args.at(-1));

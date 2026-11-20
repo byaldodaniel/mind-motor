@@ -3,6 +3,7 @@
   "version": 1,
   "origen": {
     "motorVersion": "1.0.4",
+    "catalogo": "completo",
     "nota": "Capturado del Motor Central de src/ sobre una Base ficticia."
   },
   "base": {

@@ -24,6 +24,8 @@ import { MOTOR_VERSION } from '../../../src/version.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const NATIVO = path.resolve(HERE, '..', '..');
 export const CONTRACT_FILE = path.join(HERE, 'contrato-r3.json');
+// Catálogo núcleo de 1.0.5 (diez herramientas); el de r3 se pide con ?catalogo=completo.
+export const CORE_CONTRACT_FILE = path.join(HERE, 'contrato-nucleo.json');
 
 /** JSON con claves ordenadas: la huella no depende del orden de escritura. */
 export function canonical(value) {
@@ -104,7 +106,8 @@ async function withRealMotor(fn) {
   }
 }
 
-export async function captureContract() {
+export async function captureContract({ catalogo = 'completo' } = {}) {
+  const mcpPath = `/mcp?catalogo=${catalogo}`;
   const wire = await withRealMotor(async ({ port, token, connector }) => {
     const nonce = crypto.randomBytes(16).toString('hex');
     const health = await request({ port, method: 'GET', pathName: `/health?nonce=${nonce}` });
@@ -112,15 +115,15 @@ export async function captureContract() {
     const sinToken = await request({ port, method: 'POST', pathName: '/rpc', body: { accion: 'ping' } });
     const ping = await request({ port, method: 'POST', pathName: '/rpc', headers: auth, body: { accion: 'ping' } });
     const desconocida = await request({ port, method: 'POST', pathName: '/rpc', headers: auth, body: { accion: 'no-existe' } });
-    const init = await request({ port, method: 'POST', pathName: '/mcp', headers: auth, body: {
+    const init = await request({ port, method: 'POST', pathName: mcpPath, headers: auth, body: {
       jsonrpc: '2.0', id: 1, method: 'initialize',
       params: { protocolVersion: SUPPORTED_PROTOCOL_VERSIONS[0], capabilities: {}, clientInfo: { name: 'contrato-r3', version: '1' } },
     } });
     const session = init.headers['mcp-session-id'];
     const mcp = { ...auth, ...(session ? { 'Mcp-Session-Id': session } : {}) };
-    await request({ port, method: 'POST', pathName: '/mcp', headers: mcp, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
-    const list = await request({ port, method: 'POST', pathName: '/mcp', headers: mcp, body: { jsonrpc: '2.0', id: 2, method: 'tools/list' } });
-    if (session) await request({ port, method: 'DELETE', pathName: '/mcp', headers: mcp });
+    await request({ port, method: 'POST', pathName: mcpPath, headers: mcp, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
+    const list = await request({ port, method: 'POST', pathName: mcpPath, headers: mcp, body: { jsonrpc: '2.0', id: 2, method: 'tools/list' } });
+    if (session) await request({ port, method: 'DELETE', pathName: mcpPath, headers: mcp });
     return { connector, health, sinToken, ping, desconocida, init, list };
   });
 
@@ -130,7 +133,7 @@ export async function captureContract() {
   return {
     formato: 'mind-contrato',
     version: 1,
-    origen: { motorVersion: MOTOR_VERSION, nota: 'Capturado del Motor Central de src/ sobre una Base ficticia.' },
+    origen: { motorVersion: MOTOR_VERSION, catalogo, nota: 'Capturado del Motor Central de src/ sobre una Base ficticia.' },
     base: { formatVersion: BASE_FORMAT_VERSION, catalogo: CATALOG_FILENAME, esquemaCatalogo: await catalogSchema() },
     conector: Object.fromEntries(Object.entries(wire.connector).map(([k, v]) => [k, typeOf(v)]).sort()),
     http: {
@@ -159,10 +162,12 @@ export async function captureContract() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const contract = await captureContract();
+  const core = process.argv.includes('--nucleo');
+  const contract = await captureContract({ catalogo: core ? 'nucleo' : 'completo' });
   const text = `${JSON.stringify(contract, null, 2)}\n`;
+  const file = core ? CORE_CONTRACT_FILE : CONTRACT_FILE;
   if (process.argv.includes('--escribir')) {
-    await fs.writeFile(CONTRACT_FILE, text);
-    console.error(`Contrato escrito en ${CONTRACT_FILE}`);
+    await fs.writeFile(file, text);
+    console.error(`Contrato escrito en ${file}`);
   } else process.stdout.write(text);
 }

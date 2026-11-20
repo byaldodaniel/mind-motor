@@ -1,122 +1,57 @@
 # Mind — instrucciones para agentes de IA
 
-## Carpeta abierta y actualizaciones asistidas
+Esta carpeta es Mind: un motor local que encuentra, lee, crea, modifica y
+organiza los archivos que el usuario autoriza, y conserva la continuidad entre
+sesiones y agentes. Los originales indexados se quedan donde están.
 
-La carpeta de trabajo que comunica el cliente, el iniciador con `--carpeta`, o
-su directorio de inicio válido tiene acceso completo durante la sesión, sin otro
-formulario de Mind. Para trabajar con otra ubicación, ábrela en el agente.
-Las confirmaciones al borrar y vaciar la papelera se conservan.
-Si el cliente no comunica una carpeta válida, configura su iniciador con
-`mind mcp --carpeta <ruta-absoluta>`; el flujo manual sigue disponible.
-El Motor Central consulta el canal estable en segundo plano y el agente avisa una
-vez por conversación. Usa actualizacion_consultar para explicar la entrega y
-actualizacion_posponer si el usuario pide recordarla después. Solo ante una petición
-expresa de aplicar, usa actualizacion_aplicar: el usuario confirma en el formulario
-o en dos pasos con un código ligado a la entrega. Mind prepara con el Motor vivo,
-espera la quietud de todos los chats y comunica el acta, incluidos los fallos.
-Sin conexión continúa con la versión instalada.
+## Cómo empezar
 
+Nunca pidas al usuario configurar servidores, copiar comandos ni editar
+configuración.
 
-Esta carpeta es **My Mind**, la copia portable de Mind, un motor local que permite a los agentes de IA trabajar
-la información del usuario a su manera. Mind encuentra, lee, crea, modifica y
-organiza archivos en las carpetas que el usuario autoriza, y conserva continuidad
-entre sesiones y agentes. Los originales indexados permanecen donde están. Los resultados generados se guardan físicamente en los destinos elegidos; resultado_importar copia los temporales cuando sea necesario.
+- **Con herramientas MCP de Mind:** úsalas. Las instrucciones del servidor son
+  el manual vigente; no hace falta repetirlas aquí.
+- **Sin ellas:** usa la consola incluida (`Sistema/mind.cmd` en Windows,
+  `./Sistema/mind` en macOS/Linux), que trae sus propios runtimes:
+  `Sistema/mind.cmd estado` y
+  `Sistema/mind.cmd herramienta <operación> '<json>'`. La consola usa los
+  nombres completos de las operaciones (`buscar`, `leer`, `crear`,
+  `conversacion_guardar`, `destinos_consultar`…).
+- Si tu cliente necesita registrar MCP, `Sistema/mind.cmd preparar` genera la
+  entrada `mind` de `.mcp.json`.
 
-## Cómo empezar (Regla de oro: Cero configuración del usuario)
+## Herramientas
 
-El usuario descargó y extrajo el ZIP de Mind. **NUNCA le pidas al usuario que configure servidores MCP, que copie comandos ni que edite archivos de configuración.** Si tu cliente aún no detecta Mind, ejecuta su iniciador; la carpeta universal prepara automáticamente la entrada de Mind en `.mcp.json` para el equipo actual.
-
-1. **Si tu cliente ya tiene conectadas las herramientas de Mind por MCP** (`mind.estado`, `mind.buscar`, `mind.leer`, etc.):
-   Úsalas directamente.
-2. **Si NO tienes herramientas MCP en tu interfaz o no aparecen activas:**
-   **Empieza a trabajar de inmediato ejecutando Mind por consola.** Mind incluye sus propios ejecutables (`Sistema/mind.cmd` en Windows, `./Sistema/mind` en macOS/Linux) y sus propios runtimes (Node y Python portables), por lo que funciona en cualquier entorno sin instalación previa:
-   - Estado general: `Sistema/mind.cmd estado` (o `./Sistema/mind estado`)
-   - Buscar archivos: `Sistema/mind.cmd herramienta buscar "{\"consulta\":\"termino\"}"`
-   - Leer archivos: `Sistema/mind.cmd herramienta leer "{\"ruta\":\"ruta/al/archivo\"}"`
-   - Modificar: `Sistema/mind.cmd herramienta modificar "{\"ruta\":\"...\",\"contenido\":\"...\"}"`
-   - Crear texto: `Sistema/mind.cmd herramienta crear "{\"ruta\":\"...\",\"contenido\":\"...\"}"`
-   - Cualquier otra herramienta: `Sistema/mind.cmd herramienta <nombre> '<json>'` (ver catálogo abajo).
-3. **Registro automático en segundo plano (opcional y silencioso):**
-   Si tu cliente necesita registrar MCP y puedes hacerlo desde el agente, ejecuta `Sistema/mind.cmd preparar` en Windows o `./Sistema/mind preparar` en macOS/Linux y usa la entrada `mind` del `.mcp.json` generado, resolviendo las rutas desde esta carpeta. Puedes seguir usando el iniciador por consola mientras tanto.
-
-## Aplicar la actualización 1.0.4 a una copia ya instalada
-
-Cuando el usuario solicite actualizar una copia anterior, aplica esta entrega con el código nuevo desde fuera de esa copia; no invoques el actualizador antiguo. Mantén la ruta existente y sus datos. Antes de ejecutar código de la entrega nueva, verifica el descriptor `Sistema/entrega-firmada.json` con la clave pública ya fijada en la instalación anterior y su Node de confianza: firma Ed25519, identidad, SHA-256 exacto del manifiesto y archivos declarados. No uses una clave nueva del propio paquete como ancla ni importes su verificador antes de acreditar su autenticidad.
-
-Después ejecuta el iniciador de la entrega nueva con `corregir <ruta-de-la-copia-existente> --paquete <ruta-de-la-entrega-verificada>`. La orden conserva Base, resultados, destinos y opciones de conexión; actualiza solo entradas administradas que pertenecen a esa instalación. Si devuelve pendiente por sesiones activas o no verificables, conserva esa operación y explica la causa. No cierres procesos ajenos ni borres registros por su PID o antigüedad. La misma orden retoma la preparación después del cierre seguro de las sesiones reales. No pidas al usuario copiar comandos ni editar configuración.
-
-## Conversaciones como elementos
-
-Conserva la información importante elegida por el usuario con `conversacion_guardar`: título, información importante y referencias opcionales a recursos. No exige carpeta única ni historial completo. Mantén el mismo ID de Mind; al actualizar, usa la revisión leída. Para recordar, busca con `conversaciones_buscar` y lee solo los elementos pertinentes con `conversacion_leer`. Los recursos y destinos siguen la elección y los permisos del usuario. Una referencia o un ID nativo declarado no concede acceso a archivos.
-
-## Cómo trabajar con Mind
-
-1. Llama a `estado`: muestra las carpetas autorizadas, sus permisos, sus índices
-   y si tu cliente puede mostrar formularios de autorización al usuario.
-2. Si el usuario quiere trabajar con una carpeta que no está autorizada, usa
-   `solicitar_acceso` con su ruta absoluta y los **permisos mínimos**
-   necesarios (`acceso`: `encontrar`, `leer` o `completo`). Para la continuidad,
-   `leer` o `registrar`.
-3. **Nunca afirmes que el usuario autorizó algo.** Lo decide el usuario en el
-   formulario que muestra tu cliente o con `mind autorizar` en la consola. Si la
-   solicitud queda pendiente, explica al usuario cómo aprobarla.
-4. Para localizar información usa `buscar` y `explorar` antes de leer. Usan los
-   índices persistentes y no recorren el disco cada vez.
-5. `leer` devuelve el contenido y su versión. Para cambios puntuales usa
-   `editar`; para sustituir todo el contenido, `modificar` con esa versión. Si el
-   archivo cambió entretanto, Mind no escribe (`VERSION_CONFLICT`): vuelve a leer.
-   `crear` nunca sobrescribe. `leer` también extrae, solo para leer, el texto de
-   documentos de oficina (.docx, .xlsx, .pptx, .odt, .ods, .odp).
-6. Si algo ya no aparece, `eliminados` muestra lo que desapareció en los últimos
-   30 días (solo metadatos; Mind no guarda copias).
-7. Registra decisiones, resultados y contexto útiles con `continuidad_registrar`
-   y recupera trabajos anteriores con `continuidad_consultar`.
-8. Con acceso completo puedes organizar: `crear_carpeta`, `mover` y `renombrar`
-   nunca reemplazan nada. `borrar` lleva a la papelera de Mind y el usuario lo
-   confirma cada vez; `papelera` y `restaurar` lo recuperan. `vaciar_papelera`
-   elimina para siempre y pide una doble confirmación al usuario.
-9. `asignar_propiedades` etiqueta archivos sin modificarlos; `buscar` filtra por
-   esas propiedades. `crear_indice` mantiene un índice en CSV dentro de una
-   carpeta autorizada.
-10. `crear_funcion` define tareas reutilizables sobre el catálogo de ejecutores
-    de Mind; `ejecutar_funcion` las ejecuta con los permisos ya concedidos y
-    `activar_funcion` pide al usuario que autorice su ejecución automática.
-    `crear_respaldo` cifra la Base en el destino que el usuario configuró.
+`estado`, `retomar` (memoria, pendientes y destinos de una conversación por ID,
+en una llamada), `buscar`, `leer` (con `seccion` para un solo apartado),
+`crear`, `modificar`, `organizar`, `guardar`, `acceso` y `mind`, que alcanza
+cualquier otra operación por su nombre (`operacion: "ayuda"` las lista).
+El catálogo completo anterior sigue disponible con `?catalogo=completo` en la
+URL MCP o con `MIND_CATALOGO=completo`.
 
 ## Reglas
 
-- Mind es opcional: úsalo cuando aporte valor. Si otra herramienta basta, puedes
-  usarla, pero eso no amplía tus permisos.
-- Las confirmaciones (borrar, vaciar la papelera, activar funciones) son del
-  usuario. Si tu cliente no puede mostrarlas, quedan pendientes para
-  `mind autorizar`: díselo al usuario, no las des por hechas.
-- No modifiques el contenido de esta carpeta (`Sistema/`,
-  iniciadores y configuraciones técnicas). Son el programa y los datos técnicos del usuario. `Conversaciones/` contiene archivos del usuario y sí es un almacén de trabajo; permanece intacto durante las actualizaciones.
-- No uses rutas, ids de carpeta ni nombres de agente como si fueran permisos.
+- La carpeta que abre el cliente tiene acceso completo durante la sesión. Para
+  otra, pide acceso con permisos mínimos. **Nunca afirmes que el usuario
+  autorizó algo**: decide en el formulario o con `mind autorizar`.
+- Borrar, vaciar la papelera y activar funciones las confirma siempre el
+  usuario.
+- Crea los resultados en los destinos que devuelve Mind y conserva el ID de la
+  conversación al retomarla. Comprueba el archivo antes de anunciar que guardaste.
+- No modifiques `Sistema/`, los iniciadores ni la configuración técnica.
+  `Conversaciones/` sí es un almacén de trabajo.
+- Ante un aviso de actualización, responde primero lo pedido y añade el aviso
+  en una línea. Aplica una actualización solo si el usuario lo pide.
 - Informa con exactitud lo que hiciste y lo que falló.
 
-## Conversaciones personalizables
+## Actualizar una copia ya instalada
 
-Antes de guardar consulta `conversacion_preferencias`. Predeterminado esencial: decisiones y motivos, correcciones vigentes, resultados y ubicaciones, pendientes y siguiente paso; actualizar ante cambios relevantes o al completar etapas. Detallado conserva contexto adicional; manual solo guarda por petición expresa (`solicitado:true`); personalizado sigue las reglas del usuario. `conversacion_configurar` cambia la general o una excepción por conversación solo cuando el usuario lo pida. `preferencias:null` restaura herencia. La búsqueda predeterminada de conversaciones es híbrida y local; comprobar `semantica.estado`, y leer la fuente por ID antes de usarla. El motor no captura el historial ni redacta resúmenes por sí mismo.
-
-## Ubicación de la memoria de conversaciones
-
-`conversacion_guardar` escribe el resumen importante en un .md real. Usa `destino` si el usuario elige un archivo; `conversacion_configurar` admite `preferencias.carpeta_destino` para nuevos archivos. Sin indicación, conserva el archivo previo o usa `Conversaciones` en My Mind (la Base técnica está en `Sistema/Base`). La primera sesión crea ese almacén aunque el usuario no tenga carpetas previas. Informa la ruta que devuelve `archivo`. `pendiente_archivo` no significa guardado completo. Los recursos multimedia mantienen sus destinos propios. No necesitas copiar el historial nativo: conserva lo importante según las preferencias y las indicaciones del usuario.
-
-## Destinos físicos para todas las creaciones
-
-Al iniciar o retomar, usa `destinos_consultar` con el proyecto y, si existe, el ID de conversación. Aplica sus destinos ANTES de crear documentos, imágenes, código, videos, audio u otros resultados. Predeterminado: `Conversaciones/` en My Mind (la Base técnica está en `Sistema/Base/`); se crea automáticamente. Guarda lo importante en modo esencial salvo otra preferencia.
-
-Solo por indicación del usuario, usa `destinos_configurar` para elegir un almacén general, por tipo, por proyecto o por conversación. Prioridad: indicación de archivo, conversación, proyecto, general, predeterminado. Una excepción de proyecto afecta a sus creaciones nuevas; conserva los archivos previos y los demás proyectos. Cambiar una preferencia no concede permisos.
-
-Usa `crear` o `crear_carpeta` con proyecto/conversacion. Para otras herramientas resuelve la ubicación con `destino_resolver` (`preparar:true`) y crea allí el archivo real. Si imponen un temporal autorizado, usa `resultado_importar`: copia por flujo sin enlaces, conserva el origen y devuelve huella SHA-256. Registra con `resultado_registrar` los archivos creados directamente. Si creaste archivos antes de la primera memoria, regístralos cuando obtengas su ID. Al retomar, `conversacion_leer` incluye sus resultados. Comprueba la ubicación física antes de anunciar guardado.
-
-Esta política guía al agente. Mind no intercepta escrituras arbitrarias realizadas por otras aplicaciones ni cambia la ubicación del historial interno del cliente.
-
-## Arranque fuera de esta carpeta
-
-El iniciador prepara reglas globales de los clientes detectados en el primer uso. En un chat nuevo, consulta `destinos_consultar` antes de trabajar; si no hay MCP, ejecuta el Node incluido con `Sistema/arranque.cjs inicio` desde la carpeta actual, sin cambiar de proyecto. La respuesta contiene las instrucciones y destinos que debes aplicar. No pidas al usuario pegar este prompt en cada conversación. `preparar` permite revisar el resultado por cliente; el programa conserva las reglas existentes.
-
-## Trasladar y continuar
-
-Si el usuario pide trasladar una conversación con recursos dispersos o a otro disco, usa conversacion_trasladar con su id, revision leída y carpeta destino. Reúne memoria y archivos, comprueba las copias y conserva los originales como recuperación; informa ese hecho. Para mover o renombrar una carpeta ya organizada usa mover/renombrar: Mind actualiza las rutas vinculadas y los destinos. Tras el traslado vuelve a leer el elemento y usa la nueva revisión; no copies solo el .md ni crees otro elemento. Un estado pendiente no es un traslado confirmado. Los movimientos hechos fuera de Mind no actualizan automáticamente sus referencias.
+Aplica la entrega nueva desde fuera de esa copia, sin invocar su actualizador
+antiguo. Antes de ejecutar código nuevo, verifica `Sistema/entrega-firmada.json`
+con la clave pública ya fijada en la instalación anterior (firma Ed25519,
+identidad, SHA-256 del manifiesto y de los archivos declarados); nunca uses una
+clave del propio paquete como ancla. Después ejecuta el iniciador nuevo con
+`corregir <copia-existente> --paquete <entrega-verificada>`: conserva Base,
+resultados, destinos y conexiones. Si queda pendiente por sesiones activas,
+explica la causa; no cierres procesos ajenos ni borres registros por su PID o
+antigüedad.

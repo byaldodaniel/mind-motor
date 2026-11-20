@@ -10,6 +10,7 @@ import { takeUpdateReport } from './update-handoff.js';
 import { openSession } from './session.js';
 import { createWorkspaceAccess } from './workspace-access.js';
 import { createAgentTools, AGENT_INSTRUCTIONS } from './agent-tools.js';
+import { catalogMode, instructionsFor, withCatalog } from './core-catalog.js';
 import { acquireOwnerFileLock } from './process-identity.js';
 import { createMcpProcessor, MAX_MESSAGE_BYTES, formatError, rpcError, INVALID_REQUEST, PARSE_ERROR, toolResult, toolError } from './mcp-core.js';
 import { createSmartQueue, QUEUE_PRIORITY, classifyToolPriority, resolveToolResourceKeys } from './smart-queue.js';
@@ -464,8 +465,10 @@ export async function startCentralMotor({
       conexiones: report.conexiones, quietud: report.quietud };
     }
 
-    function createIsolatedMcpSession({ workspacePaths = [], cwd = null, conexion = null, declared = false } = {}) {
+    function createIsolatedMcpSession({ workspacePaths = [], cwd = null, conexion = null, declared = false, catalogo = null } = {}) {
       const id = randomUUID();
+      // Catálogo núcleo (1.0.5) salvo que el cliente pida el completo de r3 (?catalogo=completo).
+      const mode = catalogMode(catalogo);
       // Con cabecera de ámbito habla un puente de Mind; sin ella, un cliente por HTTP directo.
       connections.open(id, { conexion, transporte: declared ? 'puente' : 'http', carpeta: cwd ?? workspacePaths[0] ?? null });
       const workspace = createWorkspaceAccess(session, { paths: workspacePaths, cwd, log });
@@ -491,7 +494,7 @@ export async function startCentralMotor({
 
       const processor = createMcpProcessor({
         serverInfo: serverInfo(motorVersion),
-        instructions: AGENT_INSTRUCTIONS,
+        instructions: instructionsFor(mode, AGENT_INSTRUCTIONS),
         tools(connection) {
           const scope = {
             tools: createAgentTools({ session: workspace.session, connection: releasingLocksWhileAsking(connection, id), log }),
@@ -501,10 +504,10 @@ export async function startCentralMotor({
             // Sin puente (HTTP directo) la conversación es la sesión MCP.
             conexion: conexion ?? `sesion:${id}`,
           };
-          return {
+          return withCatalog({
             definitions: scope.tools.definitions,
             call: (name, args, context) => runTool(scope, name, args, context),
-          };
+          }, mode);
         },
         onInitialized: async (connection) => {
           connections.identify(id, connection.clientInfo, connection.clientCapabilities);
@@ -568,7 +571,8 @@ export async function startCentralMotor({
         }
       } else if (!Array.isArray(body) && body?.method === 'initialize') {
         const declared = parseWorkspaceHeader(req.headers['x-mind-workspace']);
-        mcpSession = createIsolatedMcpSession({ workspacePaths: declared.paths, cwd: declared.cwd, conexion: declared.conexion, declared: declared.declared });
+        const requestedCatalog = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('catalogo');
+        mcpSession = createIsolatedMcpSession({ workspacePaths: declared.paths, cwd: declared.cwd, conexion: declared.conexion, declared: declared.declared, catalogo: requestedCatalog });
       } else {
         return sendJson(res, 400, formatError(body?.id ?? null, rpcError(INVALID_REQUEST, 'Falta cabecera Mcp-Session-Id.')));
       }

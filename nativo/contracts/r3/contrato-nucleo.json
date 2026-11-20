@@ -1,0 +1,235 @@
+{
+  "formato": "mind-contrato",
+  "version": 1,
+  "origen": {
+    "motorVersion": "1.0.4",
+    "catalogo": "nucleo",
+    "nota": "Capturado del Motor Central de src/ sobre una Base ficticia."
+  },
+  "base": {
+    "formatVersion": 3,
+    "catalogo": "catalog.sqlite",
+    "esquemaCatalogo": [
+      {
+        "type": "index",
+        "name": "idx_document_marks_tag_status",
+        "tabla": "document_marks",
+        "sql": "CREATE INDEX idx_document_marks_tag_status ON document_marks(tag, status, scope_id, relative_path)"
+      },
+      {
+        "type": "table",
+        "name": "document_marks",
+        "tabla": "document_marks",
+        "sql": "CREATE TABLE document_marks ( scope_id TEXT NOT NULL, relative_path TEXT NOT NULL, block_index INTEGER NOT NULL, heading TEXT, line_number INTEGER NOT NULL, block_type TEXT NOT NULL, tag TEXT NOT NULL, raw_tag TEXT NOT NULL, status TEXT NOT NULL, excerpt TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (scope_id, relative_path, block_index, tag) )"
+      },
+      {
+        "type": "table",
+        "name": "folder_entries",
+        "tabla": "folder_entries",
+        "sql": "CREATE TABLE folder_entries ( scope_id TEXT NOT NULL, path TEXT NOT NULL, type TEXT NOT NULL, size INTEGER, modified_at TEXT, changed_at TEXT, created_at TEXT, identity TEXT, state TEXT NOT NULL, reason TEXT, PRIMARY KEY (scope_id, path) )"
+      },
+      {
+        "type": "table",
+        "name": "folder_scopes",
+        "tabla": "folder_scopes",
+        "sql": "CREATE TABLE folder_scopes ( scope_id TEXT PRIMARY KEY, root TEXT NOT NULL, authorization_generation TEXT, generation INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, issues_json TEXT NOT NULL DEFAULT '[]', revision TEXT NOT NULL DEFAULT '' )"
+      },
+      {
+        "type": "table",
+        "name": "scanned_files",
+        "tabla": "scanned_files",
+        "sql": "CREATE TABLE scanned_files ( scope_id TEXT NOT NULL, relative_path TEXT NOT NULL, fingerprint TEXT NOT NULL, scanned_at TEXT NOT NULL, PRIMARY KEY (scope_id, relative_path) )"
+      },
+      {
+        "type": "table",
+        "name": "tag_aliases",
+        "tabla": "tag_aliases",
+        "sql": "CREATE TABLE tag_aliases ( alias TEXT PRIMARY KEY, canonical_tag TEXT NOT NULL, user_defined INTEGER NOT NULL DEFAULT 0 )"
+      }
+    ]
+  },
+  "conector": {
+    "baseId": "string",
+    "motorVersion": "string",
+    "pid": "number",
+    "port": "number",
+    "startedAt": "string",
+    "url": "string",
+    "version": "number"
+  },
+  "http": {
+    "health": {
+      "status": 200,
+      "campos": {
+        "activeRequests": "number",
+        "backgroundBusy": "boolean",
+        "baseId": "string",
+        "independence": "string",
+        "lastActivityAt": "number",
+        "launch": "string",
+        "motorVersion": "string",
+        "ok": "boolean",
+        "packageRevision": "number",
+        "pid": "number",
+        "port": "number",
+        "previousEnd": "string",
+        "proof": "string",
+        "queue": "object",
+        "sessions": "number",
+        "startedAt": "string",
+        "state": "string"
+      }
+    },
+    "rpcSinToken": {
+      "status": 401
+    },
+    "rpcPing": {
+      "status": 200,
+      "campos": [
+        "activeRequests",
+        "baseId",
+        "ok",
+        "pid",
+        "port",
+        "sessions",
+        "state"
+      ]
+    },
+    "rpcAccionDesconocida": {
+      "status": 400,
+      "codigo": "UNKNOWN_RPC_ACTION"
+    },
+    "rpcAcciones": [
+      "apagar",
+      "estado",
+      "herramienta",
+      "inicio",
+      "ping",
+      "quietud",
+      "verificar-actualizacion"
+    ]
+  },
+  "mcp": {
+    "versionesProtocolo": [
+      "2025-11-25",
+      "2025-06-18",
+      "2025-03-26",
+      "2024-11-05"
+    ],
+    "versionNegociada": "2025-11-25",
+    "sesionEnCabecera": true,
+    "capacidades": [
+      "tools"
+    ],
+    "instrucciones": {
+      "bytes": 1393,
+      "sha256": "3df6120b5ab176501726cd1d7e9045f0490695322657c734f887aeffa2fd5cb5"
+    },
+    "herramientas": [
+      {
+        "nombre": "acceso",
+        "esquemaSha256": "f900e6c48773e97acdf20e5eb57da0e8b6d0033fe23d3c24ea3fb7ca25c6cc33",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 323
+      },
+      {
+        "nombre": "buscar",
+        "esquemaSha256": "bb2535f673c7bbae93f1e76b6c0726273e9d25d342c9f05a33d121a9134dbfbc",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 365
+      },
+      {
+        "nombre": "crear",
+        "esquemaSha256": "4df20abca516ea37191d5640880549e4fdeb7767ac9b73caffb5e9057090da9b",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 285
+      },
+      {
+        "nombre": "estado",
+        "esquemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 78
+      },
+      {
+        "nombre": "guardar",
+        "esquemaSha256": "89fa7beb658cf3f205e0f44b4240076a8ce5ecfb7a3b1c826013eec4de5232f0",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 279
+      },
+      {
+        "nombre": "leer",
+        "esquemaSha256": "d078ecd6e1c2f0ee29970b902713e673a7488338e8ae35db75420a24ef3b0741",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 239
+      },
+      {
+        "nombre": "mind",
+        "esquemaSha256": "335ac61bf53f85b2c3895c0552892ebfda235f5f1db7f2b077eb8b5cf328f89c",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 231
+      },
+      {
+        "nombre": "modificar",
+        "esquemaSha256": "8ac258cf7c4e53b83f0353ae7fa6be42de13ff491c24eb14b3db6dc262c3b045",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 205
+      },
+      {
+        "nombre": "organizar",
+        "esquemaSha256": "f7def4814dfd572a0b4064ffdfed4dc48ad16266c942cdca4b9b99bb1dad9628",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 344
+      },
+      {
+        "nombre": "retomar",
+        "esquemaSha256": "dfa9b196692e21fc3096aa41e45048ffc6714fcf04ae858c902befb0062cbb7c",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 200
+      }
+    ],
+    "presupuesto": {
+      "herramientas": 10,
+      "catalogoBytes": 7620,
+      "instruccionesBytes": 1393
+    }
+  }
+}
