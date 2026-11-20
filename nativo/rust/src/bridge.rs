@@ -45,7 +45,7 @@ fn repeatable(v:&Value)->bool {
         matches!(name,"estado"|"buscar"|"explorar"|"leer"|"eliminados"|"continuidad_consultar"|"conversaciones_buscar"|"conversacion_leer"|"conversacion_preferencias"|"destinos_consultar"|"actualizacion_consultar"|"papelera"|"propiedades"|"indices_personalizados"|"funciones"|"historial_funcion")||(name=="destino_resolver"&&v.pointer("/params/arguments/preparar")!=Some(&Value::Bool(true)))
     },_=>false}
 }
-fn regular_json(path:&Path)->Option<Value>{
+pub(crate) fn regular_json(path:&Path)->Option<Value>{
     let mut options=std::fs::OpenOptions::new();options.read(true);
     #[cfg(windows)] {use std::os::windows::fs::OpenOptionsExt;options.custom_flags(0x00200000);}
     #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC);}
@@ -54,7 +54,7 @@ fn regular_json(path:&Path)->Option<Value>{
     #[cfg(windows)] {use std::os::windows::fs::MetadataExt;if metadata.file_attributes()&0x400!=0{return None}}
     let mut bytes=Vec::new();file.take(65537).read_to_end(&mut bytes).ok()?;if bytes.len()>65536{return None}serde_json::from_slice(&bytes).ok()
 }
-fn base_id(path:&Path)->Option<String>{
+pub(crate) fn base_id(path:&Path)->Option<String>{
     let canonical=std::fs::canonicalize(path).ok()?;let mut text=canonical.to_str()?.to_owned();
     #[cfg(windows)] {if let Some(p)=text.strip_prefix("\\\\?\\"){text=p.to_owned();}}
     text=text.nfc().collect();

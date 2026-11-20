@@ -1,5 +1,7 @@
 param(
   [string]$Target = '',
+  # Al cambiar dependencias: actualiza Cargo.lock (descarga de crates.io lo que falte).
+  [switch]$ActualizarBloqueo,
   [string]$Toolchain = $env:MIND_RUST_TOOLCHAIN
 )
 # Compila el ejecutable nativo de Mind.
@@ -9,7 +11,8 @@ param(
 # Los compiladores y cachés nunca forman parte del paquete de Mind.
 $ErrorActionPreference = 'Stop'
 $env:CARGO_TARGET_DIR = Join-Path $PSScriptRoot 'target'
-$buildArgs = @('build', '--release', '--locked', '--manifest-path', (Join-Path $PSScriptRoot 'Cargo.toml'))
+$lockFlag = if ($ActualizarBloqueo) { '--quiet' } else { '--locked' }
+$buildArgs = @('build', '--release', $lockFlag, '--manifest-path', (Join-Path $PSScriptRoot 'Cargo.toml'))
 if ($Target) { $buildArgs += @('--target', $Target) }
 
 $cargo = Get-Command cargo -ErrorAction SilentlyContinue
