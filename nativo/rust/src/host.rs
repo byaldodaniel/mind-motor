@@ -3,7 +3,7 @@
 // Motor r3 con la prueba HMAC de /health y le reenvía /mcp y /rpc sin tocar su
 // contenido (incluidas las respuestas SSE). Mientras dure el relevo, r3 sigue
 // siendo el único escritor de la Base; el anfitrión no la escribe salvo su
-// propio registro `anfitrion.json`. En la Etapa 3 servirá también las vistas.
+// propio registro `anfitrion.json`. Las vistas optativas tienen otro puerto.
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
@@ -15,16 +15,24 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
-use crate::{bridge::{base_id, regular_json}, MAX_MESSAGE};
+use crate::{bridge::{base_id, regular_json}, views::Views, MAX_MESSAGE};
 
-type Body = BoxBody<Bytes, std::io::Error>;
+pub(crate) type Body = BoxBody<Bytes, std::io::Error>;
 
 #[derive(Clone)]
 struct Motor { port: u16, token: String }
 
-struct Host { base: PathBuf, port: u16, client: reqwest::Client, motor: Mutex<Option<Motor>>, started: String }
+struct Host {
+    base: PathBuf,
+    base_id: String,
+    port: u16,
+    client: reqwest::Client,
+    motor: Mutex<Option<Motor>>,
+    started: String,
+    views: Option<Arc<Views>>,
+}
 
-fn full(status: StatusCode, value: Value) -> Response<Body> {
+pub(crate) fn full(status: StatusCode, value: Value) -> Response<Body> {
     let bytes = Bytes::from(serde_json::to_vec(&value).unwrap_or_default());
     Response::builder().status(status).header(header::CONTENT_TYPE, "application/json")
         .body(Full::new(bytes).map_err(|never: Infallible| match never {}).boxed()).unwrap()
@@ -33,17 +41,17 @@ fn full(status: StatusCode, value: Value) -> Response<Body> {
 /// Igualdad en tiempo constante para el token.
 fn same(a: &[u8], b: &[u8]) -> bool { a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 }
 
-/// Solo se acepta un Host de loopback con el puerto del anfitrión, y un Origin
-/// ausente o también de loopback: protege contra páginas web que intenten
-/// llegar a Mind mediante DNS rebinding.
+/// Un navegador en el puerto de vistas nunca comparte origen con la API privada.
 fn allowed_origin(req: &Request<Incoming>, port: u16) -> bool {
-    let host_ok = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).is_some_and(|h| {
-        h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}") || h == format!("[::1]:{port}")
+    fn loopback_authority(authority: &str, port: u16) -> bool {
+        ["127.0.0.1", "localhost", "[::1]"].iter().any(|host| authority == format!("{host}:{port}"))
+    }
+    let host_ok = req.headers().get(header::HOST).and_then(|v| v.to_str().ok())
+        .is_some_and(|host| loopback_authority(host, port));
+    let origin_ok = req.headers().get(header::ORIGIN).is_none_or(|value| {
+        value.to_str().ok().and_then(|origin| origin.strip_prefix("http://"))
+            .is_some_and(|authority| loopback_authority(authority, port))
     });
-    let origin_ok = match req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        None => true,
-        Some(o) => ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"].iter().any(|p| o.starts_with(p)),
-    };
     host_ok && origin_ok
 }
 
@@ -55,7 +63,7 @@ impl Host {
         if state.get("version")?.as_u64() != Some(1) || secret.get("version")?.as_u64() != Some(1) { return None }
         let port = u16::try_from(state.get("port")?.as_u64()?).ok()?;
         if port == 0 || port == self.port { return None }
-        let expected = base_id(&self.base)?;
+        let expected = &self.base_id;
         if state.get("baseId")?.as_str()? != expected { return None }
         let token = secret.get("token")?.as_str()?;
         if token.len() < 32 { return None }
@@ -85,14 +93,18 @@ impl Host {
         if !allowed_origin(&req, self.port) { return Ok(full(StatusCode::FORBIDDEN, json!({"error": "ORIGIN_NOT_ALLOWED"}))) }
         let path = req.uri().path().to_owned();
         if path == "/health" && req.method() == Method::GET {
-            let motor = self.motor(true).await;
-            return Ok(full(StatusCode::OK, json!({
-                "ok": true, "anfitrion": true, "pid": std::process::id(), "port": self.port, "startedAt": self.started,
-                "motor": motor.map(|m| json!({"port": m.port, "verificado": true})),
-            })));
+            return Ok(self.health(req.uri().query()).await);
         }
-        if path != "/mcp" && path != "/rpc" { return Ok(full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"}))) }
-        let Some(motor) = self.motor(false).await.or(self.motor(true).await) else {
+        let control = self.views.as_ref().filter(|_| path == "/vistas" || path.starts_with("/vistas/"));
+        if path != "/mcp" && path != "/rpc" && control.is_none() {
+            return Ok(full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"})));
+        }
+        let motor = if control.is_some() {
+            self.motor(true).await
+        } else {
+            self.motor(false).await.or(self.motor(true).await)
+        };
+        let Some(motor) = motor else {
             return Ok(full(StatusCode::SERVICE_UNAVAILABLE, json!({"error": "MOTOR_UNAVAILABLE"})));
         };
         let authorized = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())
@@ -101,7 +113,31 @@ impl Host {
             return Ok(Response::builder().status(StatusCode::UNAUTHORIZED).header(header::WWW_AUTHENTICATE, "Bearer")
                 .body(Full::new(Bytes::from_static(b"{\"error\":\"UNAUTHORIZED\"}")).map_err(|never: Infallible| match never {}).boxed()).unwrap());
         }
+        if let Some(views) = control {
+            return Ok(views.control(req).await);
+        }
         Ok(self.forward(req, motor).await)
+    }
+
+    async fn health(&self, query: Option<&str>) -> Response<Body> {
+        let motor = self.motor(true).await;
+        let mut state = json!({
+            "ok": true, "anfitrion": true, "pid": std::process::id(), "port": self.port,
+            "startedAt": self.started, "baseId": self.base_id,
+            "motor": motor.as_ref().map(|m| json!({"port": m.port, "verificado": true})),
+        });
+        let nonce = query.and_then(|query| query.strip_prefix("nonce=")).filter(|nonce| {
+            (16..=128).contains(&nonce.len()) && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        if let (Some(nonce), Some(motor)) = (nonce, motor) {
+            let mut mac = Hmac::<Sha256>::new_from_slice(motor.token.as_bytes()).expect("HMAC accepts any key length");
+            mac.update(format!("mind-host-health-v1\n{nonce}\n{}\n{}", self.base_id, self.port).as_bytes());
+            state["proof"] = json!(format!("{:x}", mac.finalize().into_bytes()));
+        }
+        if let Some(views) = &self.views {
+            state["vistas"] = views.usage().await;
+        }
+        full(StatusCode::OK, state)
     }
 
     /// Reenvía la petición al Motor tal cual (salvo cabeceras de transporte) y
@@ -142,20 +178,43 @@ fn argument(args: &[String], name: &str) -> Option<String> {
 }
 
 pub async fn run(args: &[String]) -> Result<(), String> {
-    let base = PathBuf::from(argument(args, "--base").ok_or("anfitrion --base ABS [--port N]")?);
+    let base = PathBuf::from(argument(args, "--base").ok_or("anfitrion --base ABS [--port N] [--puerto-vistas N]")?);
     if !base.is_absolute() { return Err("--base debe ser absoluta".into()) }
     let wanted: u16 = argument(args, "--port").map(|p| p.parse().map_err(|_| "--port inválido")).transpose()?.unwrap_or(0);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], wanted))).await.map_err(|e| format!("No se pudo escuchar: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let base_identity = base_id(&base).ok_or("No se pudo identificar la Base")?;
+    let preview = if args.iter().any(|arg| arg == "--puerto-vistas") {
+        let wanted: u16 = argument(args, "--puerto-vistas")
+            .and_then(|value| value.parse().ok()).ok_or("--puerto-vistas inválido")?;
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], wanted)))
+            .await.map_err(|error| format!("No se pudo abrir el puerto de vistas: {error}"))?;
+        let port = listener.local_addr().map_err(|error| error.to_string())?.port();
+        Some((listener, port))
+    } else {
+        None
+    };
     let started = format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
-    let client = reqwest::Client::builder().no_proxy().build().map_err(|e| e.to_string())?;
-    let host = Arc::new(Host { base: base.clone(), port, client, motor: Mutex::new(None), started });
-    // Registro propio del anfitrión, para que instaladores y pruebas lo encuentren.
-    let record = json!({"version": 1, "port": port, "pid": std::process::id(), "url": format!("http://127.0.0.1:{port}/mcp")});
+    let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        .build().map_err(|e| e.to_string())?;
+    let views = preview.as_ref().map(|(_, port)| Arc::new(Views::new(*port)));
+    let mut record = json!({
+        "version": 1, "port": port, "pid": std::process::id(), "baseId": base_identity,
+        "url": format!("http://127.0.0.1:{port}/mcp"),
+    });
+    if let Some((_, port)) = &preview {
+        record["puertoVistas"] = json!(port);
+    }
+    let host = Arc::new(Host {
+        base: base.clone(), base_id: base_identity, port, client, motor: Mutex::new(None), started, views: views.clone(),
+    });
     let path = base.join("anfitrion.json");
     let temporary = base.join(format!(".anfitrion-{}.tmp", Uuid::new_v4().simple()));
     std::fs::write(&temporary, serde_json::to_vec(&record).unwrap_or_default()).and_then(|_| std::fs::rename(&temporary, &path)).map_err(|e| format!("No se pudo registrar el anfitrión: {e}"))?;
     println!("{record}");
+    if let (Some((listener, _)), Some(views)) = (preview, views) {
+        tokio::spawn(serve_views(listener, views));
+    }
     loop {
         let (stream, _) = match listener.accept().await { Ok(s) => s, Err(_) => continue };
         let host = host.clone();
@@ -166,3 +225,17 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
+async fn serve_views(listener: TcpListener, views: Arc<Views>) {
+    loop {
+        let Ok((stream, _)) = listener.accept().await else { continue };
+        let views = views.clone();
+        tokio::spawn(async move {
+            let service = hyper::service::service_fn(move |req| {
+                let views = views.clone();
+                async move { Ok::<_, Infallible>(views.serve(req).await) }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service).await;
+        });
+    }
+}

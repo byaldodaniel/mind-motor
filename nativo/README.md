@@ -5,11 +5,12 @@ un solo proceso `Mind`, sin Node, Python ni ONNX, para Windows, macOS y Linux
 en x64 y ARM64. Mientras dura la transición, el Motor de `src/` (r3) sigue
 siendo el único escritor de la Base.
 
-Hoy el ejecutable tiene dos modos, heredados del piloto de r3
-(`Borradores/Piloto-Nativo-r3`, 16-nov-2026):
+Modos del ejecutable Rust:
 
 - `bridge`: puente MCP stdio ↔ Streamable HTTP hacia el Motor Central.
 - `scan`: enumeración segura de un directorio por petición JSONL.
+- `anfitrion`: entrada HTTP privada al Motor Central y alojamiento local opcional de vistas.
+- `vista`: abre, consulta, reemplaza o cierra una vista estática.
 
 ## Contenido
 
@@ -51,6 +52,38 @@ una Base dentro de su programa. Nunca usar una Base personal.
 
 Si el contrato falla, el Motor cambió algo que la pieza nativa debe respetar.
 Si el cambio es intencionado: `node nativo/contracts/r3/capturar.mjs --escribir`.
+
+## Vista compartida (Etapa 3)
+
+Con el Motor de una Base ficticia encendido, inicia el candidato con
+`anfitrion --base ABS --puerto-vistas 0`. El valor `0` deja que el sistema
+elija un puerto libre para la vista. Mind usa el mismo proceso para la página
+y la conexión privada, en dos puertos locales.
+
+```text
+vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS
+vista consultar --base ABS --id UUID
+vista cerrar --base ABS --id UUID
+```
+
+`--contenido` apunta a la salida estática con `index.html` y rutas relativas.
+En Git, `--copia` es la raíz de la copia de trabajo. La respuesta incluye
+el proyecto, la copia, la rama, el commit y los cambios locales. La huella
+identifica los archivos servidos y también se calcula para carpetas sin Git.
+
+Guarda la URL como referencia junto con la identidad de la vista en la
+conversación. Otro chat recupera esos datos con `retomar` y abre la misma
+dirección. Para reemplazar el contenido de la vista, pasa `--id UUID --version N`
+a `vista abrir`. La URL conserva la última versión válida y `vista consultar`
+permite comprobar su versión actual. `vista cerrar` retira la página y libera
+su contenido en memoria. Las vistas duran lo que dura el anfitrión.
+
+La prueba local usa el binario Rust y dos sesiones de Mind con datos ficticios.
+
+```powershell
+$env:MIND_NATIVE_EXE = (Resolve-Path '.\nativo\rust\target\release\mind-native-rust-pilot.exe').Path
+node --test nativo/test/vista-compartida.test.mjs
+```
 
 ## Compilación reproducible
 
