@@ -32,7 +32,9 @@ test('modo de catálogo: núcleo por defecto, completo solo si se pide', () => {
   assert.equal(catalogMode('cualquiera', {}), 'nucleo');
   const inner = { definitions: [{ name: 'estado' }], call: () => 'interno' };
   assert.equal(withCatalog(inner, 'completo'), inner);
-  assert.equal(CORE_DEFINITIONS.length, 11);
+  assert.equal(CORE_DEFINITIONS.length, 12);
+  assert.equal(CORE_DEFINITIONS.find((d) => d.name === 'guardar').annotations.destructiveHint, false);
+  assert.equal(CORE_DEFINITIONS.find((d) => d.name === 'actualizar').annotations.destructiveHint, true);
   assert.equal(CORE_DEFINITIONS.find((d) => d.name === 'mind').annotations.readOnlyHint, true);
   assert.equal(CORE_DEFINITIONS.find((d) => d.name === 'mind_cambiar').annotations.destructiveHint, true);
   assert.ok(Buffer.byteLength(CORE_INSTRUCTIONS) < 2048);
@@ -41,7 +43,7 @@ test('modo de catálogo: núcleo por defecto, completo solo si se pide', () => {
 test('cada herramienta núcleo llega a la operación interna con su nombre original', async () => {
   const calls = [];
   const names = ['estado', 'buscar', 'agrupar', 'conversaciones_buscar', 'continuidad_consultar', 'explorar', 'crear', 'crear_carpeta',
-    'editar', 'modificar', 'mover', 'borrar', 'asignar_propiedades', 'conversacion_guardar', 'continuidad_registrar', 'solicitar_acceso',
+    'editar', 'modificar', 'mover', 'borrar', 'asignar_propiedades', 'conversacion_guardar', 'continuidad_registrar', 'continuidad_actualizar', 'solicitar_acceso',
     'retirar_acceso', 'funciones'];
   const readOnly = new Set(['estado', 'buscar', 'agrupar', 'conversaciones_buscar', 'continuidad_consultar', 'explorar', 'funciones']);
   const inner = { definitions: names.map((name) => ({ name, description: name, inputSchema: {}, annotations: { readOnlyHint: readOnly.has(name) } })), call: async (name, args) => { calls.push([name, args]); return { ok: true }; } };
@@ -67,6 +69,16 @@ test('cada herramienta núcleo llega a la operación interna con su nombre origi
     ['conversacion_guardar', { titulo: 't', importante: 'i' }],
     ['retirar_acceso', { carpeta: 'c', todo: true }],
     ['funciones', {}],
+  ]);
+  // guardar nunca reemplaza: con id o revision remite a actualizar, que sí lo hace.
+  await assert.rejects(core.call('guardar', { id: 'c1', revision: 1, importante: 'x' }), { code: 'USE_ACTUALIZAR' });
+  await assert.rejects(core.call('actualizar', { importante: 'x' }), { code: 'INVALID_ARGUMENTS' });
+  const before = calls.length;
+  await core.call('actualizar', { id: 'c1', revision: 2, importante: 'x' });
+  await core.call('actualizar', { en: 'continuidad', id: 'r1', revision: 1, contenido: 'y' });
+  assert.deepEqual(calls.slice(before), [
+    ['conversacion_guardar', { id: 'c1', revision: 2, importante: 'x' }],
+    ['continuidad_actualizar', { id: 'r1', revision: 1, contenido: 'y' }],
   ]);
   await assert.rejects(core.call('organizar', { accion: 'quemar' }), { code: 'INVALID_ARGUMENTS' });
   await assert.rejects(core.call('mind', { operacion: 'no_existe' }), { code: 'UNKNOWN_TOOL' });
@@ -140,6 +152,12 @@ test('núcleo de extremo a extremo: buscar, leer por sección, modificar, guarda
   const byText = await f.call('retomar', { consulta: 'Ensayo núcleo' });
   assert.equal(byText.isError, false, byText.text);
   assert.equal(byText.data.conversacion?.id, id, byText.text);
+
+  const updated = await f.call('actualizar', { id, revision: resumed.data.conversacion.revision, importante: 'Pendiente: medir tokens. Hecho: catálogo núcleo.' });
+  assert.equal(updated.isError, false, updated.text);
+  assert.match((await f.call('retomar', { id })).data.conversacion.importante, /catálogo núcleo/);
+  const stale = await f.call('actualizar', { id, revision: resumed.data.conversacion.revision, importante: 'Revisión vieja.' });
+  assert.equal(stale.isError, true);
 
   const viaMind = await f.call('mind', { operacion: 'conversacion_preferencias' });
   assert.equal(viaMind.isError, false, viaMind.text);

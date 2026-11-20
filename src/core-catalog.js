@@ -23,9 +23,9 @@ export function catalogMode(requested, env = process.env) {
 export const CORE_INSTRUCTIONS = `Mind trabaja con los archivos que el usuario autoriza y conserva la continuidad entre sesiones y agentes.
 
 1. Al empezar: si tienes un ID de conversación, "retomar" con ese id; trae memoria, pendientes, resultados y destinos en una llamada. Sin ID, "estado".
-2. Antes de leer, "buscar": en archivos, marcas (#pendiente, tareas [ ]), conversaciones, continuidad o una carpeta. "leer" con "seccion" trae solo ese apartado; "seccion":"?" muestra el índice.
+2. Antes de leer, "buscar". Pendientes o ideas: buscar en "marcas" (no leas los archivos). Un apartado de un documento: "leer" con "seccion" ("?" muestra el índice).
 3. Escribir: "crear" nunca sobrescribe; "modificar" exige la version leída (o "ediciones" puntuales). "organizar" mueve, renombra, borra a la papelera y restaura.
-4. Guardar lo importante: "guardar" en conversacion (titulo, importante; con id y revision al actualizar), continuidad o resultado. Crea archivos en los destinos que devuelve "retomar".
+4. Guardar lo importante: "guardar" crea (conversación nueva, registro de continuidad o resultado); "actualizar" cambia una conversación o registro existente con su id y revision. Crea archivos en los destinos que devuelve "retomar".
 5. Permisos: la carpeta abierta en el cliente tiene acceso durante la sesión. Para otra, "acceso" solicitar con permisos mínimos. El usuario decide; nunca afirmes que autorizó algo. Las confirmaciones pendientes se resuelven con "mind autorizar" en la consola.
 6. Lo demás (funciones, índices, respaldo, actualizaciones, traslados, preferencias): "mind" consulta y "mind_cambiar" modifica; operacion "ayuda" las lista.
 
@@ -75,9 +75,16 @@ const ROUTES = Object.freeze({
     destinos: {
       conversacion: { operacion: 'conversacion_guardar' },
       continuidad: { operacion: 'continuidad_registrar' },
-      continuidad_actualizar: { operacion: 'continuidad_actualizar' },
       resultado: { operacion: 'resultado_registrar' },
       resultado_importar: { operacion: 'resultado_importar' },
+    },
+  },
+  actualizar: {
+    selector: 'en',
+    defecto: 'conversacion',
+    destinos: {
+      conversacion: { operacion: 'conversacion_guardar' },
+      continuidad: { operacion: 'continuidad_actualizar' },
     },
   },
   acceso: {
@@ -100,7 +107,7 @@ export const CORE_DEFINITIONS = Object.freeze([
   {
     name: 'retomar',
     title: 'Retomar una conversación',
-    description: 'Con el ID de Mind de una conversación devuelve en una llamada su memoria vigente, resultados, referencias y los destinos donde crear archivos. Sin id, consulta busca la conversación más pertinente.',
+    description: 'Con el ID de Mind de una conversación devuelve en una llamada su memoria vigente, resultados, referencias y los destinos donde crear archivos (no hace falta consultar destinos aparte). Sin id, consulta busca la conversación más pertinente.',
     inputSchema: OPEN({
       id: { type: 'string', description: 'ID de Mind de la conversación.' },
       consulta: { type: 'string', description: 'Texto para encontrarla si no conoces el id.' },
@@ -111,7 +118,7 @@ export const CORE_DEFINITIONS = Object.freeze([
   {
     name: 'buscar',
     title: 'Buscar',
-    description: `Busca sin recorrer el disco. en: archivos (nombre, ruta, filtros), marcas (#pendiente, #idea, tareas [ ]; agrupar_por, estado), conversaciones, continuidad, carpeta (listar su contenido), eliminados (últimos 30 días) o propiedades de una ruta. ${MORE}`,
+    description: `Busca sin recorrer el disco. Pendientes, tareas o ideas: en "marcas" con consulta "pendiente" (o la etiqueta del usuario); devuelve abiertos, agrupados por proyecto, con archivo y línea, sin leer los archivos. Otros: archivos (nombre o ruta), conversaciones, continuidad, carpeta (listar su contenido), eliminados (últimos 30 días) o propiedades de una ruta. ${MORE}`,
     inputSchema: OPEN({
       en: { type: 'string', enum: enumOf('buscar') },
       consulta: { type: 'string' },
@@ -125,7 +132,7 @@ export const CORE_DEFINITIONS = Object.freeze([
   {
     name: 'leer',
     title: 'Leer',
-    description: 'Lee un archivo de texto o documento de oficina y devuelve su version (necesaria para modificar). seccion devuelve solo el apartado con ese encabezado; seccion "?" devuelve el índice de encabezados. desde_linea y lineas acotan por líneas.',
+    description: 'Lee un archivo de texto o documento de oficina y devuelve su version (necesaria para modificar). Si solo necesitas un apartado, usa seccion con su encabezado (coincidencia parcial, sin tildes) en lugar de leer todo; seccion "?" devuelve el índice. desde_linea y lineas acotan por líneas.',
     inputSchema: OPEN({
       carpeta: FOLDER,
       ruta: RELATIVE,
@@ -178,16 +185,27 @@ export const CORE_DEFINITIONS = Object.freeze([
   },
   {
     name: 'guardar',
-    title: 'Guardar continuidad',
-    description: `en conversacion: titulo e importante (nueva) o id y revision leída (actualizar). en continuidad: contenido y tipo. en resultado: archivo creado en su destino. ${MORE}`,
+    title: 'Guardar algo nuevo',
+    description: `Crea o añade sin reemplazar nada. en conversacion: titulo e importante (conversación nueva). en continuidad: contenido y tipo (registro nuevo). en resultado: archivo ya creado en su destino, con conversacion. Para cambiar algo que ya existe, usa actualizar. ${MORE}`,
     inputSchema: OPEN({
       en: { type: 'string', enum: enumOf('guardar') },
-      id: { type: 'string' },
-      revision: { type: 'integer', minimum: 1 },
       titulo: { type: 'string' },
       importante: { type: 'string' },
+      proyecto: { type: 'string' },
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  {
+    name: 'actualizar',
+    title: 'Actualizar lo guardado',
+    description: `Reemplaza el contenido de una conversación o un registro de continuidad que ya existe, si sigue en la revision leída (si cambió, no escribe). en conversacion: id, revision e importante. en continuidad: id, revision y contenido. ${MORE}`,
+    inputSchema: OPEN({
+      en: { type: 'string', enum: enumOf('actualizar') },
+      id: { type: 'string' },
+      revision: { type: 'integer', minimum: 1 },
+      importante: { type: 'string' },
+    }, ['id', 'revision']),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'acceso',
@@ -319,7 +337,19 @@ export function withCatalog(inner, mode = 'nucleo') {
     buscar: (args, context) => { const r = route('buscar', args); return run(r.operacion, r.argumentos, context); },
     crear: (args, context) => { const r = route('crear', args); return run(r.operacion, r.argumentos, context); },
     organizar: (args, context) => { const r = route('organizar', args); return run(r.operacion, r.argumentos, context); },
-    guardar: (args, context) => { const r = route('guardar', args); return run(r.operacion, r.argumentos, context); },
+    guardar: (args, context) => {
+      if (plain(args).id !== undefined || plain(args).revision !== undefined) {
+        throw new MotorError('USE_ACTUALIZAR', 'Para cambiar algo que ya existe usa actualizar con su id y revision.');
+      }
+      const r = route('guardar', args);
+      return run(r.operacion, r.argumentos, context);
+    },
+    actualizar: (args, context) => {
+      const input = plain(args);
+      if (input.id === undefined || input.revision === undefined) throw invalid('actualizar necesita id y revision leída.');
+      const r = route('actualizar', input);
+      return run(r.operacion, r.argumentos, context);
+    },
     acceso: (args, context) => { const r = route('acceso', args); return run(r.operacion, r.argumentos, context); },
 
     modificar(args, context) {

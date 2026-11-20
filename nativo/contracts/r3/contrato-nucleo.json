@@ -122,8 +122,8 @@
       "tools"
     ],
     "instrucciones": {
-      "bytes": 1435,
-      "sha256": "075d750241797cdd2d0a18b9fb30aaf0f8e755f9af2c350b928fea421b159ce7"
+      "bytes": 1456,
+      "sha256": "cc69a75d15c313ddb3ad7c5ad2aed42bc648011b1162d28189c69241dac0374e"
     },
     "herramientas": [
       {
@@ -137,13 +137,24 @@
         "descripcionBytes": 323
       },
       {
+        "nombre": "actualizar",
+        "esquemaSha256": "3e5fd40e1b94a9188346542fca3e9f9f78e7f3650a57a243fe7ce631c03e48e8",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 350
+      },
+      {
         "nombre": "buscar",
         "esquemaSha256": "bb2535f673c7bbae93f1e76b6c0726273e9d25d342c9f05a33d121a9134dbfbc",
         "anotaciones": {
           "readOnlyHint": true,
           "openWorldHint": false
         },
-        "descripcionBytes": 365
+        "descripcionBytes": 481
       },
       {
         "nombre": "crear",
@@ -167,13 +178,13 @@
       },
       {
         "nombre": "guardar",
-        "esquemaSha256": "89fa7beb658cf3f205e0f44b4240076a8ce5ecfb7a3b1c826013eec4de5232f0",
+        "esquemaSha256": "26aaeed2e3c2f5a56c480f7d7c1a9ebb4110924da635a8c20d6b08ba7965e12b",
         "anotaciones": {
           "readOnlyHint": false,
           "destructiveHint": false,
           "openWorldHint": false
         },
-        "descripcionBytes": 279
+        "descripcionBytes": 379
       },
       {
         "nombre": "leer",
@@ -182,7 +193,7 @@
           "readOnlyHint": true,
           "openWorldHint": false
         },
-        "descripcionBytes": 239
+        "descripcionBytes": 289
       },
       {
         "nombre": "mind",
@@ -232,13 +243,13 @@
           "readOnlyHint": true,
           "openWorldHint": false
         },
-        "descripcionBytes": 200
+        "descripcionBytes": 242
       }
     ],
     "presupuesto": {
-      "herramientas": 11,
-      "catalogoBytes": 8278,
-      "instruccionesBytes": 1435
+      "herramientas": 12,
+      "catalogoBytes": 9320,
+      "instruccionesBytes": 1456
     }
   }
 }

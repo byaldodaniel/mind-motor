@@ -24,8 +24,10 @@ configuración.
 
 `estado`, `retomar` (memoria, pendientes y destinos de una conversación por ID,
 en una llamada), `buscar`, `leer` (con `seccion` para un solo apartado),
-`crear`, `modificar`, `organizar`, `guardar`, `acceso` y `mind`, que alcanza
-cualquier otra operación por su nombre (`operacion: "ayuda"` las lista).
+`crear`, `modificar`, `organizar`, `guardar` (crea, nunca reemplaza),
+`actualizar` (cambia lo guardado con su revisión), `acceso`, y `mind` y
+`mind_cambiar`, que alcanzan cualquier otra operación por su nombre: la primera
+solo consulta y la segunda cambia algo (`operacion: "ayuda"` las lista).
 El catálogo completo anterior sigue disponible con `?catalogo=completo` en la
 URL MCP o con `MIND_CATALOGO=completo`.
 
