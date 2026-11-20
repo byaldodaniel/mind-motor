@@ -317,6 +317,18 @@ test('exclusiones: el usuario las elige al autorizar; el agente puede añadir m�
   assert.equal(await fs.readFile(path.join(folder, 'Privado', 'claves.txt'), 'utf8'), 'Datos privados ficticios\n');
 });
 
+test('sin observación (consola), cada consulta reconcilia: buscar ve altas y bajas hechas fuera de Mind', async (t) => {
+  const { folder, open, agent } = await fixture(t);
+  const session = await open();
+  const call = agent(session, connection({ onElicit: () => ({ action: 'accept', content: { acceso: 'completo' } }) }));
+  await call('solicitar_acceso', { ruta: folder, acceso: 'completo' });
+  assert.equal((await call('buscar', { consulta: 'externo-ficticio' })).data.total, 0);
+  await fs.writeFile(path.join(folder, 'externo-ficticio.txt'), 'Creado fuera de Mind.');
+  assert.equal((await call('buscar', { consulta: 'externo-ficticio' })).data.total, 1);
+  await fs.rm(path.join(folder, 'externo-ficticio.txt'));
+  assert.equal((await call('buscar', { consulta: 'externo-ficticio' })).data.total, 0);
+});
+
 test('eliminados: rastro de solo metadatos y referencias de continuidad marcadas como rotas', async (t) => {
   const { folder, open, agent } = await fixture(t);
   const session = await open();
