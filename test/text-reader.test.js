@@ -1,27 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { openMotor } from '../src/motor.js';
+import { resolveLayout } from '../src/layout.js';
+import { openSession } from '../src/session.js';
+import { createAgentTools } from '../src/agent-tools.js';
 import { MAX_TEXT_BYTES, readNative } from '../src/text-reader.js';
 
-const development = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const pythonExecutable = process.platform === 'win32' ? 'python' : 'python3';
+const temporary = await fs.realpath(os.tmpdir());
+const pythonExecutable = process.env.MIND_TEST_BUNDLED_PYTHON || process.env.MIND_PYTHON
+  || (process.platform === 'win32' ? 'python' : 'python3');
+const nativeTextReaderExecutable = process.env.MIND_TEST_NATIVE_TEXT_READER || undefined;
+const executables = { pythonExecutable, nativeTextReaderExecutable };
 const linkType = process.platform === 'win32' ? 'junction' : 'dir';
 
 async function fixture(t) {
-  const root = await fs.mkdtemp(path.join(development, '.mind-read-test-'));
+  const root = await fs.mkdtemp(path.join(temporary, 'mind-read-test-'));
   t.after(async () => {
-    assert.equal(path.dirname(root), development);
-    assert.ok(path.basename(root).startsWith('.mind-read-test-'));
+    assert.equal(await fs.realpath(root), root);
+    assert.equal(path.dirname(root), temporary);
+    assert.ok(path.basename(root).startsWith('mind-read-test-'));
     await fs.rm(root, { recursive: true, force: true });
   });
   const base = path.join(root, 'Base');
   const folder = path.join(root, 'Información ficticia');
   await fs.mkdir(base);
   await fs.mkdir(folder);
-  const motor = await openMotor({ baseDirectory: base });
+  const motor = await openMotor({ baseDirectory: base, ...executables });
   const registered = await motor.authorizeFolder(folder);
   const requester = Object.freeze({ name: 'Agente ficticio' });
   const grant = (relativePath = 'texto.txt', who = requester) => motor.grantTextRead({
@@ -67,7 +74,7 @@ test('el permiso no autoriza otro archivo ni otra instancia; no puede reutilizar
   await fs.writeFile(path.join(folder, 'texto.txt'), 'permitido');
   await fs.writeFile(path.join(folder, 'otro.txt'), 'ajeno');
   const authorization = await grant();
-  const other = await openMotor({ baseDirectory: base });
+  const other = await openMotor({ baseDirectory: base, ...executables });
   await assert.rejects(other.readTextFile({ requester, authorization }), { code: 'READ_NOT_AUTHORIZED' });
   const results = await Promise.allSettled([
     motor.readTextFile({ requester, authorization, relativePath: 'otro.txt' }),
@@ -84,7 +91,7 @@ test('permite revocar el permiso antes del intento y observa la retirada persist
   assert.equal(motor.revokeTextRead(authorization), false);
   await assert.rejects(motor.readTextFile({ requester, authorization }), { code: 'READ_NOT_AUTHORIZED' });
   const pending = await grant();
-  const other = await openMotor({ baseDirectory: base });
+  const other = await openMotor({ baseDirectory: base, ...executables });
   await other.revokeFolder(registered.id);
   await assert.rejects(motor.readTextFile({ requester, authorization: pending }), { code: 'FOLDER_NOT_AUTHORIZED' });
   await assert.rejects(grant(), { code: 'FOLDER_NOT_AUTHORIZED' });
@@ -103,7 +110,7 @@ test('valida identidad, registro y sintaxis común antes de abrir originales', a
 test('retirar y registrar de nuevo no reactiva permisos antiguos, incluso con un registro heredado v1', async (t) => {
   const { base, folder, motor, registered, grant, requester } = await fixture(t);
   await fs.writeFile(path.join(folder, 'texto.txt'), 'ficticio');
-  const other = await openMotor({ baseDirectory: base });
+  const other = await openMotor({ baseDirectory: base, ...executables });
   for (const legacy of [false, true]) {
     if (legacy) {
       await fs.writeFile(path.join(base, `folder-authorization-${registered.id}.json`), JSON.stringify({
@@ -162,7 +169,7 @@ test('rechaza enlaces duros que comparten un archivo con otra ubicación', async
 test('revalida el permiso de carpeta después de la apertura y antes de leer', async (t) => {
   const { folder, motor, registered } = await fixture(t);
   await fs.writeFile(path.join(folder, 'texto.txt'), 'ficticio');
-  await assert.rejects(readNative({ root: folder, relativePath: 'texto.txt', pythonExecutable,
+  await assert.rejects(readNative({ root: folder, relativePath: 'texto.txt', ...executables,
     confirm: async () => {
       await motor.revokeFolder(registered.id);
       throw Object.assign(new Error('Retirada antes de leer'), { code: 'FOLDER_NOT_AUTHORIZED' });
@@ -170,10 +177,42 @@ test('revalida el permiso de carpeta después de la apertura y antes de leer', a
   }), { code: 'FOLDER_NOT_AUTHORIZED' });
 });
 
-test('si el intérprete seguro no está disponible falla cerrado', async (t) => {
+test('lee el archivo abierto aunque su ruta cambie antes de confirmar', async (t) => {
+  const { folder } = await fixture(t);
+  const original = path.join(folder, 'texto.txt');
+  const before = 'texto del archivo que se abrió';
+  await fs.writeFile(original, before);
+  const content = await readNative({
+    root: folder, relativePath: 'texto.txt', ...executables,
+    confirm: async () => {
+      await fs.rename(original, path.join(folder, 'apartado.txt'));
+      await fs.writeFile(original, 'texto del archivo de reemplazo');
+    },
+  });
+  assert.equal(content, before);
+});
+
+test('si el lector seguro elegido no está disponible falla cerrado', async (t) => {
   const { base, folder, requester, registered } = await fixture(t);
   await fs.writeFile(path.join(folder, 'texto.txt'), 'ficticio');
-  const motor = await openMotor({ baseDirectory: base, pythonExecutable: path.join(folder, 'python-inexistente') });
+  const selected = nativeTextReaderExecutable ? 'nativeTextReaderExecutable' : 'pythonExecutable';
+  const motor = await openMotor({ baseDirectory: base, ...executables, [selected]: path.join(folder, 'lector-inexistente') });
   const authorization = await motor.grantTextRead({ requester, folderId: registered.id, relativePath: 'texto.txt' });
   await assert.rejects(motor.readTextFile({ requester, authorization }), { code: 'SAFE_OPEN_UNAVAILABLE' });
+});
+
+test('leer usa el lector elegido desde una sesión normal y aplica la política de acceso', async (t) => {
+  const { base, folder, registered } = await fixture(t);
+  await fs.writeFile(path.join(folder, 'texto.txt'), 'Contenido ficticio de la sesión');
+  const layout = { ...await resolveLayout({ base }), pythonExecutable: executables.pythonExecutable };
+  const session = await openSession({ layout, motorVersion: '1.0.4', observe: false, nativeTextReaderExecutable });
+  try {
+    await session.start();
+    await session.policy.set(registered.id, ['encontrar', 'leer'], { channel: 'administracion-local' });
+    const tools = createAgentTools({ session, connection: { clientInfo: { name: 'Agente ficticio' } } });
+    const result = await tools.call('leer', { carpeta: registered.id, ruta: 'texto.txt' }, {});
+    assert.equal(result.contenido, 'Contenido ficticio de la sesión');
+  } finally {
+    await session.close();
+  }
 });

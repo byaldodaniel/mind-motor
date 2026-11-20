@@ -1,4 +1,56 @@
+import path from 'node:path';
+import { spawnSupervised } from './process-supervisor.js';
 import { SEMANTIC_DIMENSIONS } from './semantic-encoder.js';
+
+
+export const NATIVE_MEANING_MODEL = 'mind-estadistico-v1';
+export const MAX_MEANING_DOCUMENTS = 2048;
+export const MAX_MEANING_BYTES = 8 * 1024 * 1024;
+const MAX_MEANING_REPLY = 256 * 1024;
+
+export async function nativeMeaningSearch(executable, { query, documents, limit, signal }) {
+  if (typeof executable !== 'string' || !path.isAbsolute(executable)) {
+    throw new Error('El buscador de prueba requiere una ruta absoluta.');
+  }
+  const request = JSON.stringify({ query, documents, limit }) + '\n';
+  if (Buffer.byteLength(request, 'utf8') > 16 * 1024 * 1024) {
+    throw new Error('La consulta supera el tamaño del buscador de prueba.');
+  }
+  const managed = spawnSupervised(executable, ['buscar-significado'], {
+    signal, timeoutMs: 5000, kind: 'meaning',
+  });
+  const { child } = managed;
+  const chunks = [];
+  let length = 0;
+  child.stdin.on('error', () => {});
+  child.stderr.resume();
+  child.stdout.on('data', (chunk) => {
+    length += chunk.length;
+    if (length > MAX_MEANING_REPLY) managed.stop();
+    else chunks.push(chunk);
+  });
+  child.stdin.end(request);
+  const finished = await managed.completed;
+  signal?.throwIfAborted();
+  if (finished.error || finished.code !== 0 || length > MAX_MEANING_REPLY) {
+    throw new Error('Falló el buscador local de prueba.');
+  }
+  const reply = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (!Number.isSafeInteger(reply?.total) || reply.total < 0 || reply.total > documents.length
+      || !Array.isArray(reply.matches) || reply.matches.length !== Math.min(reply.total, limit)) {
+    throw new Error('Respuesta de búsqueda local no válida.');
+  }
+  const sources = new Map(documents.map(row => [row.id, row.important]));
+  const seen = new Set();
+  for (const match of reply.matches) {
+    if (!match || typeof match.excerpt !== 'string' || !match.excerpt || match.excerpt.length > 500
+        || seen.has(match.id) || !sources.get(match.id)?.includes(match.excerpt)) {
+      throw new Error('Pasaje sin respaldo en la conversación.');
+    }
+    seen.add(match.id);
+  }
+  return reply;
+}
 
 export function conversationChunks(title, important) {
   const fragments = [important];

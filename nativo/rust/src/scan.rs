@@ -23,10 +23,30 @@ pub fn handle(request:Value)->Value {
         Err(ScanError(code,message))=>json!({"id":id,"entries":[],"complete":false,"error":{"code":code,"message":message}})
     }
 }
+
+pub(crate) fn open_reader(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {
+    if !relative.split('/').all(reader_component) {
+        return Err("UNSAFE_PATH");
+    }
+    platform::open_reader(root, relative)
+}
+
+fn reader_component(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or("").to_ascii_lowercase();
+    let reserved = matches!(base.as_str(), "con" | "prn" | "aux" | "nul")
+        || (["com", "lpt"].iter().filter_map(|prefix| base.strip_prefix(prefix)).any(|number| {
+            number.len() == 1 && matches!(number.as_bytes()[0], b'1'..=b'9')
+        }));
+    !name.is_empty()
+        && !name.ends_with(['.', ' '])
+        && !reserved
+        && !name.chars().any(|c| matches!(c, '\\' | '/' | ':' | '<' | '>' | '"' | '|' | '?' | '*' | '\x00'..='\x1f'))
+}
+
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use std::{ffi::c_void,ptr,mem};
+    use std::{ffi::c_void, fs::File, io, mem, os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle}, ptr};
     type Handle=*mut c_void;
     #[repr(C)] struct Unicode {length:u16,max:u16,buffer:*mut u16}
     #[repr(C)] struct Attributes {length:u32,root:Handle,name:*mut Unicode,flags:u32,security:*mut c_void,qos:*mut c_void}
@@ -38,27 +58,114 @@ mod platform {
         fn RtlNtStatusToDosError(status:i32)->u32;
     }
     #[link(name="kernel32")] extern "system" {
-        fn CloseHandle(handle:Handle)->i32;
+        fn GetFileType(handle:Handle)->u32;
         fn GetFileInformationByHandle(handle:Handle,info:*mut Info)->i32;
         fn GetFileInformationByHandleEx(handle:Handle,class:i32,info:*mut c_void,size:u32)->i32;
         fn GetDriveTypeW(root:*const u16)->u32;
         fn GetLastError()->u32;
     }
-    struct Directory {handle:Handle,volume:u32}
-    impl Drop for Directory {fn drop(&mut self){unsafe{CloseHandle(self.handle);}}}
+    struct Directory {handle:OwnedHandle,volume:u32}
     fn os_error(code:u32)->ScanError {ScanError("IO_ERROR",format!("Windows error {code}: {}",std::io::Error::from_raw_os_error(code as i32)))}
+
+    fn acquire(parent: Handle, name: &str, access: u32, options: u32) -> io::Result<OwnedHandle> {
+        let mut text: Vec<u16> = name.encode_utf16().collect();
+        if text.len() > 32_766 {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let mut unicode = Unicode { length: (text.len() * 2) as u16, max: (text.len() * 2) as u16, buffer: text.as_mut_ptr() };
+        let mut attrs = Attributes {
+            length: mem::size_of::<Attributes>() as u32, root: parent,
+            name: &mut unicode, flags: 0x40, security: ptr::null_mut(), qos: ptr::null_mut(),
+        };
+        let mut status = Status { status: 0, information: 0 };
+        let mut handle = ptr::null_mut();
+        let result = unsafe {
+            NtCreateFile(&mut handle, access, &mut attrs, &mut status, ptr::null(), 0, 7, 1, options, ptr::null(), 0)
+        };
+        if result < 0 {
+            return Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) } as i32));
+        }
+        Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+    }
+
+    fn metadata(handle: &OwnedHandle) -> io::Result<Info> {
+        let mut info = Info::default();
+        if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info)
+    }
+
     fn open(parent:Handle,name:&str,list:bool)->Result<Directory,ScanError> {
-        let mut text:Vec<u16>=name.encode_utf16().collect();
-        if text.len()>32766{return Err(invalid("Path component too long"))}
-        let mut unicode=Unicode{length:(text.len()*2) as u16,max:(text.len()*2) as u16,buffer:text.as_mut_ptr()};
-        let mut attrs=Attributes{length:mem::size_of::<Attributes>() as u32,root:parent,name:&mut unicode,flags:0x40,security:ptr::null_mut(),qos:ptr::null_mut()};
-        let mut status=Status{status:0,information:0};let mut handle=ptr::null_mut();
-        let result=unsafe{NtCreateFile(&mut handle,0x1000A0|if list{1}else{0},&mut attrs,&mut status,ptr::null(),0,7,1,0x200021,ptr::null(),0)};
-        if result<0{return Err(os_error(unsafe{RtlNtStatusToDosError(result)}))}
-        let mut directory=Directory{handle,volume:0};let mut info=Info::default();
-        if unsafe{GetFileInformationByHandle(handle,&mut info)}==0{return Err(os_error(unsafe{GetLastError()}))}
+        let handle = acquire(parent, name, 0x1000a0 | if list { 1 } else { 0 }, 0x200021)
+            .map_err(|error| match error.raw_os_error() {
+                Some(code) => os_error(code as u32),
+                None => invalid("Path component too long"),
+            })?;
+        let info = metadata(&handle).map_err(|error| os_error(error.raw_os_error().unwrap_or(1) as u32))?;
         if info.attributes&0x400!=0||info.attributes&0x10==0{return Err(ScanError("REPARSE_POINT","Directory is a reparse point or changed type".into()))}
-        directory.volume=info.volume;Ok(directory)
+        Ok(Directory { handle, volume: info.volume })
+    }
+
+    fn reader_error(error: io::Error) -> &'static str {
+        match error.raw_os_error() {
+            Some(2 | 3) => "FILE_NOT_FOUND",
+            Some(5 | 32 | 33) => "ACCESS_DENIED",
+            Some(1920 | 4390 | 4392 | 4393) => "UNSAFE_PATH",
+            _ if error.kind() == io::ErrorKind::InvalidInput => "UNSAFE_PATH",
+            _ => "READ_FAILED",
+        }
+    }
+
+    fn reader_open(parent: Handle, name: &str, directory: bool) -> Result<(OwnedHandle, u32), &'static str> {
+        // Open the reparse point itself and inspect its held handle before use.
+        let access = 0x100080 | if directory { 0x20 } else { 1 };
+        let handle = acquire(parent, name, access, 0x200020).map_err(reader_error)?;
+        let info = metadata(&handle).map_err(reader_error)?;
+        if unsafe { GetFileType(handle.as_raw_handle()) } != 1
+            || info.attributes & 0x400 != 0
+            || (info.attributes & 0x10 != 0) != directory
+            || (!directory && info.links != 1)
+        {
+            return Err("UNSAFE_PATH");
+        }
+        Ok((handle, info.volume))
+    }
+
+    pub(super) fn open_reader(root: &str, relative: &str) -> Result<File, &'static str> {
+        let bytes = root.as_bytes();
+        if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':'
+            || bytes[2] != b'\\' || root.contains('/')
+        {
+            return Err("SAFE_OPEN_UNAVAILABLE");
+        }
+        let drive = &root[..3];
+        let drive_wide: Vec<u16> = drive.encode_utf16().chain(Some(0)).collect();
+        if unsafe { GetDriveTypeW(drive_wide.as_ptr()) } != 3 {
+            return Err("SAFE_OPEN_UNAVAILABLE");
+        }
+        let (mut directory, mut volume) = reader_open(ptr::null_mut(), &format!("\\??\\{drive}"), true)?;
+        if root.len() > 3 {
+            for name in root[3..].split('\\') {
+                if !reader_component(name) {
+                    return Err("UNSAFE_PATH");
+                }
+                (directory, volume) = reader_open(directory.as_raw_handle(), name, true)?;
+            }
+        }
+        let (ancestor, file) = relative.rsplit_once('/').unwrap_or(("", relative));
+        for name in ancestor.split('/').filter(|name| !name.is_empty()) {
+            let (next, current_volume) = reader_open(directory.as_raw_handle(), name, true)?;
+            if current_volume != volume {
+                return Err("UNSAFE_PATH");
+            }
+            directory = next;
+        }
+        let (file, current_volume) = reader_open(directory.as_raw_handle(), file, false)?;
+        if current_volume != volume {
+            return Err("UNSAFE_PATH");
+        }
+        Ok(File::from(file))
     }
     fn u32le(b:&[u8],o:usize)->u32{u32::from_le_bytes(b[o..o+4].try_into().unwrap())}
     fn u64le(b:&[u8],o:usize)->u64{u64::from_le_bytes(b[o..o+8].try_into().unwrap())}
@@ -72,11 +179,11 @@ mod platform {
         if parts.iter().any(|p|*p=="."||*p==".."||p.contains(':')) {return Err(invalid("Unsafe path component"))}
         let mut directory=open(ptr::null_mut(),&format!("\\??\\{}",&root[..3]),parts.is_empty())?;
         let volume=directory.volume;
-        for (i,part) in parts.iter().enumerate(){let next=open(directory.handle,part,i+1==parts.len())?;if next.volume!=volume{return Err(ScanError("OTHER_VOLUME","Volume changed".into()))}directory=next;}
+        for (i,part) in parts.iter().enumerate(){let next=open(directory.handle.as_raw_handle(),part,i+1==parts.len())?;if next.volume!=volume{return Err(ScanError("OTHER_VOLUME","Volume changed".into()))}directory=next;}
         // Enumeration and metadata are obtained from the same held directory handle.
         let mut aligned=vec![0u64;8192];let mut entries=Vec::new();let mut response_bytes=0;
         loop {
-            if unsafe{GetFileInformationByHandleEx(directory.handle,10,aligned.as_mut_ptr().cast(),65536)}==0 {
+            if unsafe{GetFileInformationByHandleEx(directory.handle.as_raw_handle(),10,aligned.as_mut_ptr().cast(),65536)}==0 {
                 let code=unsafe{GetLastError()};if code==18{return Ok((entries,true))}return Err(os_error(code))
             }
             let raw=unsafe{std::slice::from_raw_parts(aligned.as_ptr().cast::<u8>(),65536)};
@@ -106,8 +213,76 @@ mod platform {
     use super::*;
     use std::{ffi::{CString,CStr},mem,os::fd::{AsRawFd,FromRawFd,OwnedFd}};
     const FLAGS:i32=libc::O_RDONLY|libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC;
-    fn open(parent:i32,name:&str)->Result<OwnedFd,ScanError>{let name=CString::new(name).map_err(|_|invalid("NUL in path"))?;let fd=unsafe{libc::openat(parent,name.as_ptr(),FLAGS)};if fd<0{return Err(std::io::Error::last_os_error().into())}Ok(unsafe{OwnedFd::from_raw_fd(fd)})}
-    fn stat(fd:i32)->Result<libc::stat,ScanError>{let mut s=unsafe{mem::zeroed()};if unsafe{libc::fstat(fd,&mut s)}<0{return Err(std::io::Error::last_os_error().into())}Ok(s)}
+    fn open_at(parent: i32, name: &str, flags: i32) -> std::io::Result<OwnedFd> {
+        let name = CString::new(name).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let fd = unsafe { libc::openat(parent, name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    fn open(parent: i32, name: &str) -> Result<OwnedFd, ScanError> {
+        open_at(parent, name, FLAGS).map_err(ScanError::from)
+    }
+    fn descriptor_stat(fd: i32) -> std::io::Result<libc::stat> {
+        let mut info = unsafe { mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut info) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(info)
+    }
+    fn stat(fd: i32) -> Result<libc::stat, ScanError> {
+        descriptor_stat(fd).map_err(ScanError::from)
+    }
+
+    fn reader_error(error: std::io::Error) -> &'static str {
+        match error.raw_os_error() {
+            Some(libc::ELOOP | libc::ENOTDIR) => "UNSAFE_PATH",
+            _ if error.kind() == std::io::ErrorKind::NotFound => "FILE_NOT_FOUND",
+            _ if error.kind() == std::io::ErrorKind::PermissionDenied => "ACCESS_DENIED",
+            _ => "READ_FAILED",
+        }
+    }
+
+    fn reader_open(parent: i32, name: &str, directory: bool) -> Result<(OwnedFd, libc::stat), &'static str> {
+        let common = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+        let flags = common | if directory { libc::O_DIRECTORY } else { 0 };
+        let fd = open_at(parent, name, flags).map_err(reader_error)?;
+        let info = descriptor_stat(fd.as_raw_fd()).map_err(reader_error)?;
+        let expected = if directory { libc::S_IFDIR } else { libc::S_IFREG };
+        if info.st_mode & libc::S_IFMT != expected || (!directory && info.st_nlink != 1) {
+            return Err("UNSAFE_PATH");
+        }
+        Ok((fd, info))
+    }
+
+    pub(super) fn open_reader(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {
+        if !root.starts_with('/') || root.starts_with("//") {
+            return Err("UNSAFE_PATH");
+        }
+        let (mut directory, mut volume) = reader_open(libc::AT_FDCWD, "/", true)?;
+        if root != "/" {
+            for name in root[1..].split('/') {
+                if !reader_component(name) {
+                    return Err("UNSAFE_PATH");
+                }
+                (directory, volume) = reader_open(directory.as_raw_fd(), name, true)?;
+            }
+        }
+        let (ancestor, file) = relative.rsplit_once('/').unwrap_or(("", relative));
+        for name in ancestor.split('/').filter(|name| !name.is_empty()) {
+            let (next, current_volume) = reader_open(directory.as_raw_fd(), name, true)?;
+            if current_volume.st_dev != volume.st_dev {
+                return Err("UNSAFE_PATH");
+            }
+            directory = next;
+        }
+        let (file, current_volume) = reader_open(directory.as_raw_fd(), file, false)?;
+        if current_volume.st_dev != volume.st_dev {
+            return Err("UNSAFE_PATH");
+        }
+        Ok(std::fs::File::from(file))
+    }
     struct Stream(*mut libc::DIR);impl Drop for Stream{fn drop(&mut self){unsafe{libc::closedir(self.0);}}}
     #[cfg(target_os="linux")] fn errno()->*mut i32{unsafe{libc::__errno_location()}}
     #[cfg(target_os="macos")] fn errno()->*mut i32{unsafe{libc::__error()}}
@@ -134,8 +309,4 @@ mod platform {
         }
     }
 }
-#[cfg(not(any(windows,unix)))] mod platform {use super::*;pub fn scan(_:&str,_:&str,_:usize)->Result<(Vec<Value>,bool),ScanError>{Err(ScanError("SAFE_SCAN_UNAVAILABLE","Unsupported platform".into()))}}
-
-
-
-
+#[cfg(not(any(windows,unix)))] mod platform {use super::*; pub(super) fn open_reader(_: &str, _: &str) -> Result<std::fs::File, &'static str> { Err("SAFE_OPEN_UNAVAILABLE") } pub fn scan(_:&str,_:&str,_:usize)->Result<(Vec<Value>,bool),ScanError>{Err(ScanError("SAFE_SCAN_UNAVAILABLE","Unsupported platform".into()))}}

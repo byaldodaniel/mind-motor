@@ -36,7 +36,7 @@ const VALID_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /** @typedef {{ id: string, value: string }} TechnicalRecord */
 /**
- * @typedef {{ baseDirectory: string, pythonExecutable?: string, functionExecutors?: object, protectedDirectories?: string[] }} MotorOptions
+ * @typedef {{ baseDirectory: string, pythonExecutable?: string, nativeTextReaderExecutable?: string, functionExecutors?: object, protectedDirectories?: string[] }} MotorOptions
  * protectedDirectories: ubicaciones que ninguna carpeta autorizada puede contener ni ocupar.
  * functionExecutors: catálogo explícito de ejecutores de confianza del anfitrión
  * (véase docs/EJECUCION_FUNCIONES.md). Sin él no se puede vincular ninguna función.
@@ -120,7 +120,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, userDataDirectory, backgroundGate = null } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, nativeTextReaderExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, nativeMeaningExecutable, userDataDirectory, backgroundGate = null } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -160,7 +160,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
   const continuity = createContinuity({ baseDirectory: base });
   const continuityAccess = createContinuityAccess(continuity);
-  const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder, backgroundGate });
+  const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder, nativeMeaningExecutable, backgroundGate });
   const indexer = createFolderIndexer({
     baseDirectory: base,
     pythonExecutable,
@@ -225,7 +225,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, functionExecu
     async setFolderExclusions(id, exclusions) {
       return indexer.applyExclusions(id, () => setExclusions(id, exclusions));
     },
-    ...createTextReader({ loadAuthorizedFolder, pythonExecutable }),
+    ...createTextReader({ loadAuthorizedFolder, pythonExecutable, nativeTextReaderExecutable }),
     // Texto de documentos de oficina (docx, xlsx, pptx, odt, ods, odp), con permisos propios.
     ...createDocumentReader({ loadAuthorizedFolder, pythonExecutable }),
     // Funciones: administración y ejecución manual del anfitrión. getFunctionVersion

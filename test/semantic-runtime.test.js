@@ -9,7 +9,7 @@ import { copySemanticBundle } from '../src/semantic-bundle.js';
 import { createSemanticEncoder } from '../src/semantic-encoder.js';
 import { openMotor } from '../src/motor.js';
 
-const source = fileURLToPath(new URL('../.cache/semantic/', import.meta.url));
+const source = process.env.MIND_TEST_E5_DIRECTORY ?? fileURLToPath(new URL('../.cache/semantic/', import.meta.url));
 test('modelo real offline trasladado: búsqueda no espera la carga, recuperación e integridad',
   {skip: !existsSync(path.join(source,'manifest.json'))}, async t => {
     const root=await fs.mkdtemp(path.join(os.tmpdir(),'mind-semantic-runtime-'));

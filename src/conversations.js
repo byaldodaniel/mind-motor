@@ -6,7 +6,8 @@ import { withIndexLock } from './index-lock.js';
 import { requestSignal } from './request-context.js';
 import { createConversationPreferences, retention, describeRetention } from './conversation-preferences.js';
 import { createSemanticEncoder } from './semantic-encoder.js';
-import { semanticSearch, fuseResults, prepareConversationVectors } from './conversation-search.js';
+import { semanticSearch, fuseResults, prepareConversationVectors, nativeMeaningSearch,
+  NATIVE_MEANING_MODEL, MAX_MEANING_DOCUMENTS, MAX_MEANING_BYTES } from './conversation-search.js';
 
 export const CONVERSATION_INDEX = 'conversation-index.sqlite';
 const FORMAT = 'mind-conversation';
@@ -27,6 +28,14 @@ function id(value) {
   return value;
 }
 const fold = value => value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+function loadMeaningCorpus(db, project) {
+  const scope = project === undefined ? '' : ' WHERE project_key=?';
+  const args = project === undefined ? [] : [fold(project)];
+  const { entries, bytes } = db.prepare('SELECT count(*) AS entries, coalesce(sum(length(CAST(important AS BLOB))),0) AS bytes FROM conversations' + scope).get(...args);
+  if (entries > MAX_MEANING_DOCUMENTS || bytes > MAX_MEANING_BYTES) return null;
+  return db.prepare('SELECT id,revision,updated,title,project,important FROM conversations' + scope + ' ORDER BY id').all(...args);
+}
 function content(input) {
   return {
     format: FORMAT, version: 1,
@@ -54,8 +63,9 @@ function asConversation(entry) {
  * No lee originales ni historiales ni crea carpetas de trabajo.
  * Inferencia local bajo demanda en un worker que se libera tras inactividad.
  */
-export function createConversations({ baseDirectory, continuity, semanticEncoder = createSemanticEncoder(), backgroundGate = null }) {
+export function createConversations({ baseDirectory, continuity, semanticEncoder = createSemanticEncoder(), nativeMeaningExecutable, backgroundGate = null }) {
   const preferences = createConversationPreferences(baseDirectory);
+  const experimental = nativeMeaningExecutable !== undefined;
   let preparing;
   let warming;
   let preparationError;
@@ -86,6 +96,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     })().then(value => { preparationError = null; return value; }).catch(error => { preparationError = error.code ?? 'SEMANTIC_FAILED'; return 0; }).finally(() => { preparing = null; });
   }
   async function prepareConversationSearch() {
+    if (experimental) return { error: null };
     for (let attempt = 0; attempt < 5; attempt++) {
       const result = await searchConversations({ query: 'preparar' });
       if (result.semantic.pending === 0) { await warming; return { error: preparationError ?? null }; }
@@ -198,6 +209,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     if (query.trim() && terms.length === 0) fail('INVALID_CONVERSATION_QUERY', 'La consulta debe contener palabras o números.');
     const expression = terms.map(term => '"' + term + '"').join(' AND ');
     const signal = requestSignal();
+    const testMeaning = experimental && mode === 'hibrida' && Boolean(expression);
     const synced = await withIndexLock(baseDirectory, 'all', async () => {
       const db = await openIndex();
       try {
@@ -258,10 +270,11 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
         const excerpt = expression ? "snippet(conversations,4,'','',' … ',32)" : 'substr(important,1,300)';
         const rows = db.prepare(`SELECT id,revision,updated,title,project,${excerpt} AS excerpt
           FROM conversations${where} ORDER BY ${expression ? 'rank,' : ''} updated DESC,id LIMIT ?`).all(...args, mode === 'hibrida' ? 200 : limit);
-        const pending = db.prepare('SELECT count(*) AS n FROM conversations WHERE id NOT IN (SELECT id FROM conversation_vectors WHERE model=?)').get(semanticEncoder.model).n;
-        const indexed = db.prepare('SELECT count(*) AS n FROM conversation_vectors WHERE model=?').get(semanticEncoder.model).n;
+        const pending = experimental ? 0 : db.prepare('SELECT count(*) AS n FROM conversations WHERE id NOT IN (SELECT id FROM conversation_vectors WHERE model=?)').get(semanticEncoder.model).n;
+        const indexed = experimental ? 0 : db.prepare('SELECT count(*) AS n FROM conversation_vectors WHERE model=?').get(semanticEncoder.model).n;
+        const corpus = testMeaning ? loadMeaningCorpus(db, project) : null;
         db.exec('COMMIT');
-        return { rows, total, presentCount: present.size, read, omitted, pending, indexed };
+        return { rows, total, presentCount: present.size, read, omitted, pending, indexed, corpus };
       } catch (error) {
         try { db.exec('ROLLBACK'); } catch {}
         throw error;
@@ -270,8 +283,24 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
 
     let selected = synced.rows;
     let totalResults = synced.total;
-    const semantic = { status: 'no_solicitada', embedded: 0, model: semanticEncoder.model };
-    if (mode === 'hibrida' && expression) {
+    const semantic = { status: 'no_solicitada', embedded: 0, model: experimental ? NATIVE_MEANING_MODEL : semanticEncoder.model };
+    if (testMeaning) {
+      try {
+        if (synced.corpus === null) throw new Error('La Base supera el alcance del buscador de prueba.');
+        const documents = synced.corpus.map(({ id, important }) => ({ id, important }));
+        const found = await nativeMeaningSearch(nativeMeaningExecutable, { query, documents, limit, signal });
+        semantic.status = 'activa';
+        const exactCode = /^(?=.*[0-9])[A-Za-z0-9][A-Za-z0-9./_-]*$/u.test(query.trim());
+        if (!exactCode || !synced.rows.length) {
+          const sources = new Map(synced.corpus.map(({ important: _, ...row }) => [row.id, row]));
+          selected = found.matches.map(match => ({ ...sources.get(match.id), ...match, match: 'significado' }));
+          totalResults = found.total;
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        semantic.status = 'fallo';
+      }
+    } else if (mode === 'hibrida' && expression) {
       const db = await openIndex();
       try {
         if (!(await semanticEncoder.available())) semantic.status = 'no_disponible';

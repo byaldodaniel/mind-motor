@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
 import { isExcluded } from './paths.js';
@@ -24,9 +25,16 @@ function relativeName(value) {
 }
 
 /** Protocolo: abre sin leer, avisa READY, espera R y lee por el mismo descriptor. */
-export function readNative({ root, relativePath, pythonExecutable, confirm }) {
+export function readNative({ root, relativePath, pythonExecutable, nativeTextReaderExecutable, confirm }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, ['-I', '-B', helper, '--parent-pid', String(process.pid)], {
+    if (nativeTextReaderExecutable !== undefined
+        && (typeof nativeTextReaderExecutable !== 'string' || !path.isAbsolute(nativeTextReaderExecutable))) {
+      return reject(new MotorError('SAFE_OPEN_UNAVAILABLE', messages.SAFE_OPEN_UNAVAILABLE));
+    }
+    const parent = ['--parent-pid', String(process.pid)];
+    const command = nativeTextReaderExecutable ?? pythonExecutable;
+    const args = nativeTextReaderExecutable === undefined ? ['-I', '-B', helper, ...parent] : ['leer-texto', ...parent];
+    const child = spawn(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
     });
     const chunks = [];
@@ -79,7 +87,7 @@ export function readNative({ root, relativePath, pythonExecutable, confirm }) {
 }
 
 /** Solo el anfitrión de confianza recibe estas operaciones administrativas. */
-export function createTextReader({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3' }) {
+export function createTextReader({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeTextReaderExecutable }) {
   const grants = new WeakMap();
   const denied = () => new MotorError('READ_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta lectura.');
   const excluded = () => new MotorError('PATH_EXCLUDED', 'El usuario excluyó esa ubicación del acceso de Mind.');
@@ -114,7 +122,7 @@ export function createTextReader({ loadAuthorizedFolder, pythonExecutable = proc
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
       const content = await readNative({
-        root: folder.path, relativePath: grant.relativePath, pythonExecutable,
+        root: folder.path, relativePath: grant.relativePath, pythonExecutable, nativeTextReaderExecutable,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();
