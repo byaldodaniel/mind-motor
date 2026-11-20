@@ -2,12 +2,10 @@ name: Ejecutable nativo (seis destinos)
 # Compila nativo/rust para los seis destinos de Mind y ejecuta sus pruebas
 # donde el ejecutor corre esa plataforma. Cada destino declara por separado
 # «compilado» y «ejecutado»: compilar no acredita que funcione.
+# Solo se ejecuta a mano: en un repositorio privado los minutos de macOS y
+# Windows cuentan varias veces contra la cuota de Actions.
 on:
   workflow_dispatch:
-  push:
-    paths: ['nativo/**', '.github/workflows/nativo.yml', 'src/**']
-  pull_request:
-    paths: ['nativo/**', '.github/workflows/nativo.yml', 'src/**']
 permissions:
   contents: read
 jobs:
@@ -32,14 +30,20 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup target add ${{ matrix.target }}
           rustc --version
-      - name: Enlazador autocontenido para Linux musl
-        if: contains(matrix.target, 'linux-musl')
+      - name: Opciones de compilación reproducible y enlazador
         shell: bash
         run: |
-          LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
-          T="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
-          echo "CARGO_TARGET_${T}_LINKER=$LLD" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_${T}_RUSTFLAGS=-C linker-flavor=ld.lld -C link-self-contained=yes" >> "$GITHUB_ENV"
+          # Sin rutas locales ni marcas de fecha dentro del ejecutable.
+          FLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/mind --remap-path-prefix=$HOME/.cargo=/cargo"
+          case '${{ matrix.target }}' in
+            *-windows-msvc) FLAGS="$FLAGS -C link-arg=/Brepro" ;;
+            *-linux-musl)
+              LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+              T="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+              echo "CARGO_TARGET_${T}_LINKER=$LLD" >> "$GITHUB_ENV"
+              FLAGS="$FLAGS -C linker-flavor=ld.lld -C link-self-contained=yes" ;;
+          esac
+          echo "RUSTFLAGS=$FLAGS" >> "$GITHUB_ENV"
       - name: Compilar
         shell: bash
         run: cargo build --release --locked --manifest-path nativo/rust/Cargo.toml --target ${{ matrix.target }}

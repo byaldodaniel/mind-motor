@@ -35,10 +35,14 @@ $env:PATH = (Join-Path $install 'bin') + ';' + (Join-Path $hostLib 'self-contain
 $lld = Join-Path $hostLib 'rust-lld.exe'
 $effective = if ($Target) { $Target } else { 'x86_64-pc-windows-gnu' }
 switch -Wildcard ($effective) {
-  'x86_64-pc-windows-gnu' { $flags = @('-C', "dlltool=$($llvm.FullName)", '-C', "linker=$lld", '-C', 'linker-flavor=ld.lld', '-C', 'link-self-contained=yes') }
+  'x86_64-pc-windows-gnu' { $flags = @('-C', "dlltool=$($llvm.FullName)", '-C', "linker=$lld", '-C', 'linker-flavor=ld.lld', '-C', 'link-self-contained=yes', '-C', 'link-arg=--no-insert-timestamp') }
   '*-unknown-linux-musl' { $flags = @('-C', "linker=$lld", '-C', 'linker-flavor=ld.lld', '-C', 'link-self-contained=yes') }
   default { throw "Destino $effective sin receta local: compílalo en CI con su SDK (ver nativo/README.md)." }
 }
+# Compilación reproducible: las rutas locales de la fuente y del registro de
+# crates no quedan dentro del ejecutable.
+$flags += @('--remap-path-prefix', "$((Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path)=/mind",
+            '--remap-path-prefix', "$($env:CARGO_HOME)=/cargo")
 $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]31
 & (Join-Path $install 'bin\cargo.exe') @buildArgs
 exit $LASTEXITCODE
