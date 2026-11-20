@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openMotor } from '../src/motor.js';
 import { readBaseContents } from './helpers/base-content.js';
+import { catalogFile, catalogScope, removeCatalog } from './helpers/catalog.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const development = path.dirname(motorDirectory);
@@ -24,7 +25,9 @@ async function fixture(t, { index = true } = {}) {
   const motor = await openMotor({ baseDirectory: base });
   const scope = await motor.authorizeFolder(folder);
   if (index) await motor.indexFolder(scope.id);
-  return { root, base, folder, motor, scope, filename: path.join(base, `folder-index-${scope.id}.json`) };
+  return { root, base, folder, motor, scope, filename: path.join(base, `folder-index-${scope.id}.json`),
+    // Estado publicado del índice en catalog.sqlite.
+    published: () => catalogScope(base, scope.id) };
 }
 
 async function create(motor, scope, relativePath, content = 'Texto ficticio creado por Mind\n') {
@@ -96,9 +99,10 @@ test('conceder y retirar siguen en el anfitrión; permisos de lectura y creació
 });
 
 test('sin índice vigente la creación no inventa uno; la reconciliación lo incorpora', async (t) => {
-  const { folder, motor, scope, filename } = await fixture(t, { index: false });
+  const { folder, motor, scope, filename, published } = await fixture(t, { index: false });
   const { result } = await create(motor, scope, 'nuevo.txt');
   assert.deepEqual(result.index, { status: 'not-indexed', generation: null, code: null });
+  assert.equal(await published(), null);
   await assert.rejects(fs.access(filename));
   assert.equal((await motor.searchFiles({ folderIds: [scope.id], query: 'nuevo' })).scopes[0].status, 'not-indexed');
   await motor.indexFolder(scope.id);
@@ -107,8 +111,8 @@ test('sin índice vigente la creación no inventa uno; la reconciliación lo inc
 });
 
 test('ante conflictos no publica metadatos y deja la reconciliación explícita', async (t) => {
-  const { folder, motor, scope, filename } = await fixture(t);
-  const before = await fs.readFile(filename, 'utf8');
+  const { folder, motor, scope, filename, published } = await fixture(t);
+  const before = await published();
 
   // Carpeta padre creada después del último recorrido: el índice no la conoce.
   await fs.mkdir(path.join(folder, 'Nueva carpeta'));
@@ -119,7 +123,7 @@ test('ante conflictos no publica metadatos y deja la reconciliación explícita'
   await fs.rm(path.join(folder, 'existente.txt'));
   const replaced = (await create(motor, scope, 'existente.txt', 'Contenido distinto y más largo\n')).result;
   assert.deepEqual(replaced.index, { status: 'needs-reconciliation', generation: 1, code: 'INDEX_ENTRY_CONFLICT' });
-  assert.equal(await fs.readFile(filename, 'utf8'), before, 'El índice queda intacto');
+  assert.equal(await published(), before, 'El índice queda intacto');
   assert.equal((await motor.searchFiles({ folderIds: [scope.id], query: 'hija' })).total, 0);
 
   const reconciled = await motor.indexFolder(scope.id);
@@ -131,7 +135,7 @@ test('ante conflictos no publica metadatos y deja la reconciliación explícita'
 });
 
 test('un fallo al actualizar el índice no anula la creación ya realizada', async (t) => {
-  const { folder, motor, scope, filename } = await fixture(t);
+  const { folder, motor, scope, filename, published } = await fixture(t);
   await fs.writeFile(filename, '{dañado');
   const { result } = await create(motor, scope, 'tras-fallo.txt', 'ficticio\n');
   assert.deepEqual(result.index, { status: 'needs-reconciliation', generation: null, code: 'RECORD_CORRUPT' });
@@ -139,12 +143,22 @@ test('un fallo al actualizar el índice no anula la creación ya realizada', asy
   assert.equal(await fs.readFile(filename, 'utf8'), '{dañado');
 });
 
+test('un catálogo dañado tampoco anula la creación ya publicada ni se repara', async (t) => {
+  const { base, folder, motor, scope } = await fixture(t);
+  await removeCatalog(base);
+  await fs.writeFile(catalogFile(base), '{dañado');
+  const { result } = await create(motor, scope, 'tras-fallo.txt', 'ficticio\n');
+  assert.deepEqual(result.index, { status: 'needs-reconciliation', generation: null, code: 'INDEX_CORRUPT' });
+  assert.equal(await fs.readFile(path.join(folder, 'tras-fallo.txt'), 'utf8'), 'ficticio\n');
+  assert.equal(await fs.readFile(catalogFile(base), 'utf8'), '{dañado');
+});
+
 test('crear un nombre existente falla sin tocar el original ni el índice', async (t) => {
-  const { folder, motor, scope, filename } = await fixture(t);
-  const before = await fs.readFile(filename, 'utf8');
+  const { folder, motor, scope, filename, published } = await fixture(t);
+  const before = await published();
   const original = await fs.stat(path.join(folder, 'existente.txt'));
   await assert.rejects(create(motor, scope, 'existente.txt', 'sobrescritura'), { code: 'FILE_EXISTS' });
   assert.equal(await fs.readFile(path.join(folder, 'existente.txt'), 'utf8'), 'Nota ficticia previa');
   assert.equal((await fs.stat(path.join(folder, 'existente.txt'))).mtimeMs, original.mtimeMs);
-  assert.equal(await fs.readFile(filename, 'utf8'), before);
+  assert.equal(await published(), before);
 });

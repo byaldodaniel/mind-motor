@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { MotorError } from './errors.js';
@@ -9,6 +10,7 @@ import {
   saveScopeIndexToCatalog,
   saveScopeBranchToCatalog,
   removeScopeFromCatalog,
+  CATALOG_FILENAME,
 } from './sqlite-catalog.js';
 
 const VALID_SCOPE_ID = /^[a-f0-9]{64}$/;
@@ -109,13 +111,13 @@ function deepFreeze(index) {
 /** Persistencia de índices en la Base; un archivo versionado por ámbito. */
 export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYTES } = {}) {
   const cache = new Map();
-  function remember(scopeId, key, index) {
+  function remember(scopeId, physical, key, index) {
     cache.delete(scopeId);
     // Account for strings and object overhead, not only the number of entries.
     const bytes = index.entries.reduce((sum, entry) => sum + 256 + entry.path.length * 2, 512)
       + index.issues.reduce((sum, issue) => sum + 128 + issue.path.length * 2 + issue.code.length * 2, 0);
     if (!CACHE_ENABLED || bytes > maxBytes || os.freemem() < os.totalmem() * 0.08) { cache.clear(); return; }
-    cache.set(scopeId, { identity: key, index, size: index.entries.length, bytes });
+    cache.set(scopeId, { identity: `${physical}|${key}`, index, size: index.entries.length, bytes });
     let total = [...cache.values()].reduce((sum, item) => sum + item.size, 0);
     let totalBytes = [...cache.values()].reduce((sum, item) => sum + item.bytes, 0);
     for (const [id, item] of cache) {
@@ -124,6 +126,22 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
       total -= item.size;
       totalBytes -= item.bytes;
     }
+  }
+  /**
+   * Identidad física del catálogo y de su diario WAL. Cualquier escritura, también
+   * una ajena al Motor, la cambia: la caché solo se reutiliza si el archivo no cambió
+   * (como hacía la caché de folder-index-<id>.json con su stat). Igual que entonces, una
+   * escritura ajena dentro del mismo intervalo de la fecha de archivo que la última
+   * escritura, con el mismo tamaño, no se distingue.
+   */
+  async function catalogIdentity() {
+    const parts = [];
+    for (const suffix of ['', '-wal']) {
+      const info = await fs.lstat(path.join(baseDirectory, `${CATALOG_FILENAME}${suffix}`), { bigint: true })
+        .catch((error) => (error.code === 'ENOENT' ? null : Promise.reject(error)));
+      parts.push(info ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` : '-');
+    }
+    return parts.join('|');
   }
   function filename(scopeId) {
     validateScopeId(scopeId);
@@ -138,7 +156,8 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
     },
     /**
      * Índice validado desde SQLite (`catalog.sqlite`), con caché en memoria ligada
-     * a generación y revisión del ámbito; si existe un legado JSON previo, lo migra.
+     * a generación y revisión del ámbito y a la identidad física del catálogo; si
+     * existe un legado JSON previo, lo migra.
      * @returns {Promise<FolderIndex | null>}
      */
     async load(scopeId) {
@@ -164,16 +183,17 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
           if (!['EACCES', 'EPERM', 'EROFS'].includes(error?.code)) throw error;
         }
         const frozen = deepFreeze(index);
-        if (revision) remember(scopeId, `${index.generation}:${revision}:${index.updatedAt}`, frozen);
+        if (revision) remember(scopeId, await catalogIdentity(), `${index.generation}:${revision}:${index.updatedAt}`, frozen);
         return frozen;
       }
 
+      const physical = await catalogIdentity();
       const meta = await getScopeMetaFromCatalog(baseDirectory, scopeId);
       if (meta === null) {
         cache.delete(scopeId);
         return null;
       }
-      const metaKey = `${meta.generation}:${meta.revision}:${meta.updatedAt}`;
+      const metaKey = `${physical}|${meta.generation}:${meta.revision}:${meta.updatedAt}`;
       const cached = !CACHE_ENABLED ? null : cache.get(scopeId);
       if (cached && cached.identity === metaKey) {
         cache.delete(scopeId);
@@ -191,7 +211,10 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
         throw new MotorError('INDEX_CORRUPT', 'El índice guardado no tiene el formato esperado.');
       }
       const frozen = deepFreeze(index);
-      remember(scopeId, `${index.generation}:${revision}:${index.updatedAt}`, frozen);
+      // Solo se recuerda si el catálogo no cambió mientras se leía.
+      if ((await catalogIdentity()) === physical) {
+        remember(scopeId, physical, `${index.generation}:${revision}:${index.updatedAt}`, frozen);
+      }
       return frozen;
     },
 
@@ -206,7 +229,7 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
       const revision = await saveScopeIndexToCatalog(baseDirectory, normalizedIndex);
       await removeJson(filename(index.scopeId)).catch(() => {});
       const frozen = deepFreeze(normalizedIndex);
-      remember(index.scopeId, `${normalizedIndex.generation}:${revision}:${normalizedIndex.updatedAt}`, frozen);
+      remember(index.scopeId, await catalogIdentity(), `${normalizedIndex.generation}:${revision}:${normalizedIndex.updatedAt}`, frozen);
       return frozen;
     },
 
@@ -227,7 +250,7 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
       });
       if (branch.mergedIndex) {
         const frozen = deepFreeze(branch.mergedIndex);
-        remember(branch.scopeId, `${branch.generation}:${revision}:${branch.updatedAt}`, frozen);
+        remember(branch.scopeId, await catalogIdentity(), `${branch.generation}:${revision}:${branch.updatedAt}`, frozen);
         return frozen;
       }
       return null;

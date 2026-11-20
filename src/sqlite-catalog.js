@@ -161,7 +161,12 @@ function runTransaction(db, fn) {
 }
 
 function parseIssues(raw) {
-  const parsed = JSON.parse(raw || '[]');
+  let parsed;
+  try {
+    parsed = JSON.parse(raw || '[]');
+  } catch (cause) {
+    throw new MotorError('INDEX_CORRUPT', 'Lista de incidencias corrupta en el catálogo.', { cause });
+  }
   if (!Array.isArray(parsed)) throw new MotorError('INDEX_CORRUPT', 'Lista de incidencias corrupta en el catálogo.');
   return parsed;
 }

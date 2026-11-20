@@ -1,11 +1,10 @@
 // Barreras exclusivamente en los procesos de prueba; el Motor no incluye hooks.
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { syncBuiltinESMExports } from 'node:module';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const config = JSON.parse(process.argv[2]);
-const indexFile = path.join(config.base, `folder-index-${config.id}.json`);
 const lockFile = path.join(config.base, `folder-index-${config.id}.lock`);
 const send = (phase, extra = {}) => process.send({ phase, ...extra });
 async function barrier(phase) {
@@ -14,6 +13,23 @@ async function barrier(phase) {
   send(phase);
   await released;
 }
+
+// La publicación del índice es una transacción en catalog.sqlite: la barrera se
+// sitúa justo antes, dentro de la coordinación del ámbito, como antes lo hacía
+// el renombrado atómico de folder-index-<id>.json.
+const realCatalog = new URL('../../src/sqlite-catalog.js', import.meta.url).href;
+const barrierCatalog = new URL('./catalog_barrier.mjs', import.meta.url).href;
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const resolved = nextResolve(specifier, context);
+    return resolved.url === realCatalog && context.parentURL !== barrierCatalog
+      ? { ...resolved, url: barrierCatalog } : resolved;
+  },
+});
+globalThis.__mindCatalogPublish = async () => {
+  if (config.pausePublish) await barrier('before-publish');
+  if (config.failPublish) throw Object.assign(new Error('Fallo de publicación inyectado'), { code: 'EIO' });
+};
 
 const realOpen = fs.open;
 let notified = false;
@@ -26,14 +42,6 @@ fs.open = async function (filename, ...args) {
     }
     throw error;
   }
-};
-const realRename = fs.rename;
-fs.rename = async function (source, target) {
-  if (target === indexFile) {
-    if (config.pausePublish) await barrier('before-publish');
-    if (config.failPublish) throw Object.assign(new Error('Fallo de publicación inyectado'), { code: 'EIO' });
-  }
-  return realRename.call(this, source, target);
 };
 syncBuiltinESMExports();
 

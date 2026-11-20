@@ -69,7 +69,7 @@ test('MCP notifications/cancelled stops a queued buscar and leaves the session u
   await until(async () => (await governor.status()).cola.length === 2);
   send({ method: 'notifications/cancelled', params: { requestId: 2 } });
   const cancelled = await until(() => messages.get(2));
-  assert.equal(cancelled.result.isError, true);
+  assert.equal(cancelled.result.isError, true, JSON.stringify(cancelled));
   assert.equal(cancelled.result.structuredContent.error.codigo, 'REQUEST_CANCELLED');
   assert.equal((await governor.status()).cola.length, 1, 'Only the unrelated held work remains queued');
   release(); await held;

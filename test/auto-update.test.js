@@ -284,6 +284,20 @@ test('descubrir guarda las novedades con la oferta y las limpia al quedar al dí
   assert.equal((await readUpdateState(g.root)).novedades, null);
 });
 
+/**
+ * Node ejecutable para un producto ficticio. El enlace duro es lo más rápido,
+ * pero Windows lo deniega (EPERM) si el Node de la prueba está en una carpeta
+ * protegida como Program Files, y no existe entre volúmenes (EXDEV): se copia.
+ */
+async function linkOrCopyNode(target) {
+  try {
+    await fs.link(process.execPath, target);
+  } catch (error) {
+    if (!['EPERM', 'EACCES', 'EXDEV'].includes(error.code)) throw error;
+    await fs.copyFile(process.execPath, target);
+  }
+}
+
 test('el arranque que cargó la entrega anterior cede argumentos y código de salida al iniciador actual', async t => {
   const { relayUpdatedProgram } = await import('../src/auto-update.js');
   const { productRuntime } = await import('../src/layout.js');
@@ -292,7 +306,7 @@ test('el arranque que cargó la entrega anterior cede argumentos y código de sa
   const manifest = { layoutVersion: 2 };
   const node = productRuntime(root, manifest).nodeExecutable;
   await fs.mkdir(path.dirname(node), { recursive: true });
-  await fs.link(process.execPath, node);
+  await linkOrCopyNode(node);
   const output = path.join(root, 'argumentos.json');
   await fs.writeFile(path.join(root, 'Sistema/arranque.cjs'),
     'require("node:fs").writeFileSync(process.argv[2],JSON.stringify(process.argv.slice(3)));process.exitCode=7;');
@@ -320,7 +334,7 @@ test('bin directo espera antes de leer Programa o manifiesto y abre la entrega a
     packageRevision: 1, layoutVersion: 2, updateProtocolVersion: 2, files: {} };
   const runtime = productRuntime(root, manifest);
   await fs.mkdir(path.dirname(runtime.nodeExecutable), { recursive: true });
-  await fs.link(process.execPath, runtime.nodeExecutable);
+  await linkOrCopyNode(runtime.nodeExecutable);
   const output = path.join(root, 'reabierto.json');
   await fs.writeFile(path.join(root, 'Sistema/arranque.cjs'),
     'require("node:fs").writeFileSync(process.argv[2],JSON.stringify(process.argv.slice(3)));');

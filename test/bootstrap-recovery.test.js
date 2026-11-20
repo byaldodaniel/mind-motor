@@ -177,7 +177,20 @@ async function handoffFixture(f, phase = 'aplicando') {
     'return {waited:true};}',
   ].join('\n'));
   const record = { format: 'mind-update-handoff', version: 1, id, phase };
-  async function write(next) { await fs.writeFile(marker, JSON.stringify({ ...record, phase: next })); }
+  // Temporal y renombrado, como writeHandoff: un writeFile directo deja ver el
+  // archivo vacío a quien lo sondea a la vez. En Windows, renombrar sobre un
+  // archivo que otro proceso está leyendo da EPERM un instante: se reintenta
+  // como storage.writeJson.
+  async function write(next) {
+    const temporary = `${marker}.${randomUUID()}.tmp`;
+    await fs.writeFile(temporary, JSON.stringify({ ...record, phase: next }));
+    for (let attempt = 0; ; attempt += 1) {
+      try { await fs.rename(temporary, marker); return; } catch (error) {
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 6) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 10 * 2 ** attempt));
+      }
+    }
+  }
   await write(phase);
   return { marker, worker, helper, write };
 }

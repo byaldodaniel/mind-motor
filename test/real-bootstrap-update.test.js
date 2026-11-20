@@ -58,7 +58,12 @@ test('real interrupted product restores itself through installed bootstrap and i
   await fs.mkdir(path.dirname(node), { recursive: true });
   await fs.copyFile(process.execPath, node);
   await fs.chmod(node, 0o755);
-  await fs.cp(sourceDirectory, pythonDirectory, { recursive: true });
+  // Solo el intérprete y su biblioteca estándar: un Python instalado puede traer decenas
+  // de miles de archivos (site-packages, documentación, Tcl) que se copiarían y sellarían
+  // dos veces sin aportar nada al ensayo, y agotarían el plazo.
+  const skipped = new Set(['site-packages', 'test', 'tests', '__pycache__', 'Doc', 'Scripts', 'include', 'libs', 'share', 'tcl', 'Tools']);
+  await fs.cp(sourceDirectory, pythonDirectory, { recursive: true,
+    filter: (from) => from === sourceDirectory || !skipped.has(path.basename(from)) });
   await fs.writeFile(path.join(motor, 'fixture-release.txt'), 'Original revision; fictional data only.\n');
   await seal(root, 0);
   await fs.cp(root, incoming, { recursive: true });

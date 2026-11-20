@@ -15,11 +15,15 @@ async function rootFixture(t) {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   return root;
 }
+// Solo lo que el intérprete aislado (-I) necesita para arrancar. Un Python instalado
+// puede traer decenas de miles de archivos en site-packages, documentación o Tcl:
+// enlazarlos todos agota el plazo de la prueba sin aportar nada al ensayo.
+const RUNTIME_SKIP = new Set(['site-packages', 'test', 'tests', '__pycache__', 'Doc', 'Scripts', 'include', 'libs', 'share', 'tcl', 'Tools']);
 async function linkRuntime(source, destination) {
   await fs.mkdir(destination, { recursive: true });
   for (const item of await fs.readdir(source, { withFileTypes: true })) {
     const from = path.join(source, item.name), to = path.join(destination, item.name);
-    if (item.isDirectory()) await linkRuntime(from, to);
+    if (item.isDirectory()) { if (!RUNTIME_SKIP.has(item.name)) await linkRuntime(from, to); }
     else if (item.isFile()) {
       try { await fs.link(from, to); } catch (e) { if (e.code !== 'EXDEV') throw e; await fs.copyFile(from, to); }
     } else throw Error('El ensayo nativo requiere runtime de archivos regulares');
@@ -46,6 +50,23 @@ async function nativeWorker(t) {
   assert.ok(owner.processBirth);
   return { child, closed, owner };
 }
+
+// En Windows, renombrar sobre relevo.json mientras un iniciador lo lee da EPERM:
+// writeHandoff reintenta como storage.writeJson. Un lector que mantiene el archivo
+// abierto 60 ms lo reproducía siempre sin el reintento.
+test('un lector momentáneo de relevo.json no hace fallar writeHandoff', { skip: process.platform !== 'win32' && 'EPERM de renombrado propio de Windows' }, async t => {
+  const root = await rootFixture(t);
+  const id = randomUUID();
+  await writeHandoff(root, { id, phase: 'aplicando' });
+  const reader = await fs.open(handoffPath(root), 'r');
+  const released = delay(60).then(() => reader.close());
+  try {
+    await writeHandoff(root, { id, phase: 'completada' });
+  } finally {
+    await released;
+  }
+  assert.equal((await readHandoff(root)).phase, 'completada');
+});
 
 test('marca terminal sin snapshot no bloquea y marca rota se conserva', async t => {
   const root = await rootFixture(t), record = { id: randomUUID(), phase: 'completada' };

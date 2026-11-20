@@ -7,6 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openMotor, MotorError } from '../src/motor.js';
 import { createFolderIndexer } from '../src/indexer.js';
 import { mergeScan } from '../src/index-scan.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import {
+  alterCatalog, catalogBytes, catalogFile, catalogScope, catalogScopeIds, legacyIndexFiles, removeCatalog,
+} from './helpers/catalog.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const developmentDirectory = path.dirname(motorDirectory);
@@ -108,8 +112,9 @@ test('la indexación inicial guarda rutas relativas, tipos, tamaños y fechas', 
   assert.equal(entry(index, 'Proyectos').type, 'directory');
   assert.equal(entry(index, 'Proyectos').size, null);
   assert.ok(index.entries.every((item) => !path.isAbsolute(item.path) && !item.path.includes('\\')));
-  const files = (await fs.readdir(base)).filter((name) => name.startsWith('folder-index-'));
-  assert.deepEqual(files, [`folder-index-${scope.id}.json`]);
+  // Un único ámbito publicado en el catálogo y ningún índice del formato anterior.
+  assert.deepEqual(await catalogScopeIds(base), [scope.id]);
+  assert.deepEqual(await legacyIndexFiles(base), []);
 });
 
 test('no lee el contenido ni modifica, copia o mueve los originales', async (t) => {
@@ -119,7 +124,8 @@ test('no lee el contenido ni modifica, copia o mueve los originales', async (t) 
   await indexer.indexFolder(scope.id);
   await indexer.indexFolder(scope.id);
   assert.deepEqual(await snapshot(folder), before);
-  const stored = await fs.readFile(path.join(base, `folder-index-${scope.id}.json`), 'utf8');
+  const stored = await catalogBytes(base);
+  assert.ok(stored.length > 0);
   assert.ok(!stored.includes('ficticio'), 'El índice no contiene texto de los documentos');
 });
 
@@ -210,7 +216,7 @@ test('registra los enlaces sin seguirlos ni guardar su destino', async (t) => {
   if (process.platform !== 'win32') assert.equal(entry(index, 'enlace-archivo').type, 'link');
   assert.equal(result.totals.links, process.platform === 'win32' ? 1 : 2);
   assert.ok(!paths(index).some((item) => item.includes('secreto-ajeno')));
-  const stored = await fs.readFile(path.join(base, `folder-index-${scope.id}.json`), 'utf8');
+  const stored = await catalogBytes(base);
   assert.ok(!stored.includes('Fuera del'), 'No se guarda el destino del enlace');
 });
 
@@ -284,7 +290,7 @@ test('una carpeta sustituida por un enlace hacia fuera no aporta nombres ajenos'
   assert.deepEqual(result.changes, {
     added: [], modified: ['Proyectos'], removed: ['Proyectos/Fotos', 'Proyectos/plan.md'],
   });
-  const stored = await fs.readFile(path.join(base, `folder-index-${scope.id}.json`), 'utf8');
+  const stored = await catalogBytes(base);
   assert.ok(!stored.includes('nombre-ajeno'));
 });
 
@@ -295,20 +301,20 @@ test('sin el recorrido seguro se deniega la indexación y no se escribe nada', a
     pythonExecutable: path.join(base, 'python-inexistente'),
   });
   await assert.rejects(unavailable.indexFolder(scope.id), { code: 'SAFE_SCAN_UNAVAILABLE' });
-  assert.deepEqual((await fs.readdir(base)).filter((name) => name.startsWith('folder-index-')), []);
+  assert.deepEqual(await catalogScopeIds(base), []);
+  assert.deepEqual(await legacyIndexFiles(base), []);
 });
 
 test('una raíz desaparecida, redirigida o denegada falla sin alterar el índice anterior', async (t) => {
   const { root, base, folder, scope, indexer } = await fixture(t);
   await indexer.indexFolder(scope.id);
-  const filename = path.join(base, `folder-index-${scope.id}.json`);
-  const saved = await fs.readFile(filename, 'utf8');
+  const saved = await catalogScope(base, scope.id);
   const moved = path.join(root, 'movida');
   await fs.rename(folder, moved);
   await assert.rejects(indexer.indexFolder(scope.id), { code: 'SCOPE_UNAVAILABLE' });
   await fs.symlink(moved, folder, linkType);
   await assert.rejects(indexer.indexFolder(scope.id), { code: 'SCOPE_CHANGED' });
-  assert.equal(await fs.readFile(filename, 'utf8'), saved);
+  assert.equal(await catalogScope(base, scope.id), saved);
   assert.equal((await indexer.readFolderIndex(scope.id)).generation, 1);
 
   await fs.unlink(folder).catch(() => fs.rmdir(folder));
@@ -319,7 +325,7 @@ test('una raíz desaparecida, redirigida o denegada falla sin alterar el índice
   } finally {
     await restore();
   }
-  assert.equal(await fs.readFile(filename, 'utf8'), saved);
+  assert.equal(await catalogScope(base, scope.id), saved);
 });
 
 test('solo indexa ámbitos que el Motor resuelve como autorizados', async (t) => {
@@ -340,7 +346,8 @@ test('solo indexa ámbitos que el Motor resuelve como autorizados', async (t) =>
   await assert.rejects(forged(folder, 'c'.repeat(64)).indexFolder(scope.id), { code: 'INVALID_SCOPE' });
   await assert.rejects(forged(root).indexFolder(scope.id), { code: 'SCOPE_OVERLAPS_INTERNAL' });
   await assert.rejects(forged(path.join(base, 'dentro')).indexFolder(scope.id), { code: 'SCOPE_OVERLAPS_INTERNAL' });
-  assert.deepEqual((await fs.readdir(base)).filter((name) => name.startsWith('folder-index-')), []);
+  assert.deepEqual(await catalogScopeIds(base), []);
+  assert.deepEqual(await legacyIndexFiles(base), []);
 
   await indexer.indexFolder(scope.id);
   assert.equal(await motor.revokeFolder(scope.id), true);
@@ -360,24 +367,139 @@ test('una retirada durante el recorrido impide publicar el índice', async (t) =
     return resolve(id);
   } });
   await assert.rejects(indexer.indexFolder(scope.id), { code: 'FOLDER_NOT_AUTHORIZED' });
-  assert.deepEqual((await fs.readdir(base)).filter((name) => name.startsWith('folder-index-')), []);
+  assert.deepEqual(await catalogScopeIds(base), []);
+  assert.deepEqual(await legacyIndexFiles(base), []);
 });
 
 test('superar el límite de entradas no publica un índice parcial', async (t) => {
   const { base, folder, motor, scope, indexer } = await fixture(t);
   await indexer.indexFolder(scope.id);
-  const saved = await fs.readFile(path.join(base, `folder-index-${scope.id}.json`), 'utf8');
+  const saved = await catalogScope(base, scope.id);
   const limited = createFolderIndexer({ baseDirectory: base, resolveScope: registryResolver(motor), maxEntries: 4 });
   await fs.writeFile(path.join(folder, 'quinto.txt'), 'ficticio');
   await assert.rejects(limited.indexFolder(scope.id), { code: 'INDEX_LIMIT_EXCEEDED' });
-  assert.equal(await fs.readFile(path.join(base, `folder-index-${scope.id}.json`), 'utf8'), saved);
+  assert.equal(await catalogScope(base, scope.id), saved);
 });
 
-test('los índices corruptos o enlazados fallan de forma explícita y no se reparan', async (t) => {
+const corrupt = (error) => ['RECORD_CORRUPT', 'INDEX_CORRUPT'].includes(error.code);
+
+/** Daños de filas del catálogo que la validación del índice debe rechazar. */
+function catalogDamages(scopeId, first) {
+  return [
+    ['UPDATE folder_entries SET path = ? WHERE scope_id = ? AND path = ?', '../fuera', scopeId, first],
+    ['UPDATE folder_entries SET identity = ? WHERE scope_id = ? AND path = ?', 'identidad inventada', scopeId, first],
+    ['UPDATE folder_entries SET type = ? WHERE scope_id = ? AND path = ?', 'raro', scopeId, first],
+    ['UPDATE folder_entries SET state = ? WHERE scope_id = ? AND path = ?', 'inventado', scopeId, first],
+    ['UPDATE folder_scopes SET generation = ? WHERE scope_id = ?', 0, scopeId],
+    ['UPDATE folder_scopes SET root = ? WHERE scope_id = ?', 'relativa', scopeId],
+    ['UPDATE folder_scopes SET created_at = ? WHERE scope_id = ?', 'ayer', scopeId],
+    ['UPDATE folder_scopes SET authorization_generation = ? WHERE scope_id = ?', 'otra', scopeId],
+    ['UPDATE folder_scopes SET issues_json = ? WHERE scope_id = ?', '{"no":"lista"}', scopeId],
+  ];
+}
+
+test('un catálogo dañado falla de forma explícita al abrirlo y no se repara', async (t) => {
+  const { base, motor, scope, indexer } = await fixture(t);
+  await indexer.indexFolder(scope.id);
+  const first = (await indexer.readFolderIndex(scope.id)).entries[0].path;
+  for (const [sql, ...params] of catalogDamages(scope.id, first)) {
+    await alterCatalog(base, sql, ...params);
+    const damaged = await catalogScope(base, scope.id);
+    // Instancia nueva, como tras reiniciar el Motor: no hay caché previa.
+    const opened = createFolderIndexer({ baseDirectory: base, resolveScope: registryResolver(motor) });
+    await assert.rejects(opened.readFolderIndex(scope.id), corrupt, sql);
+    await assert.rejects(opened.indexFolder(scope.id), corrupt, sql);
+    assert.equal(await catalogScope(base, scope.id), damaged, `No se reparó: ${sql}`);
+    // Se restaura un catálogo sano para el daño siguiente.
+    await removeCatalog(base);
+    await opened.indexFolder(scope.id);
+  }
+
+  // Un archivo que no es SQLite tampoco se sustituye por uno nuevo, ni con la instancia abierta.
+  await removeCatalog(base);
+  await fs.writeFile(catalogFile(base), '{incompleto');
+  await assert.rejects(indexer.readFolderIndex(scope.id), corrupt);
+  await assert.rejects(indexer.indexFolder(scope.id), corrupt);
+  assert.equal(await fs.readFile(catalogFile(base), 'utf8'), '{incompleto');
+});
+
+// La caché en memoria se liga también a la identidad física de catalog.sqlite (y su
+// WAL): un daño en las filas que no toque generation/revision/updated_at se detecta
+// igual en una instancia abierta, que no lo sobrescribe al reconciliar. Como con
+// folder-index-<id>.json, la identidad depende de la fecha del archivo: el daño se
+// hace pasado un instante de la última escritura (dentro del mismo intervalo de
+// fecha y con el mismo tamaño no se distinguiría).
+test('una instancia abierta detecta el daño del catálogo y no lo sobrescribe', async (t) => {
+  const { base, scope, indexer } = await fixture(t);
+  await indexer.indexFolder(scope.id);
+  const first = (await indexer.readFolderIndex(scope.id)).entries[0].path;
+  for (const [sql, ...params] of catalogDamages(scope.id, first)) {
+    await delay(100);
+    await alterCatalog(base, sql, ...params);
+    const damaged = await catalogScope(base, scope.id);
+    await assert.rejects(indexer.readFolderIndex(scope.id), corrupt, sql);
+    await assert.rejects(indexer.indexFolder(scope.id), corrupt, sql);
+    assert.equal(await catalogScope(base, scope.id), damaged, `No se reparó: ${sql}`);
+    await removeCatalog(base);
+    await indexer.indexFolder(scope.id);
+  }
+});
+
+test('mientras el catálogo no cambia, la instancia reutiliza el índice en memoria', async (t) => {
+  const { scope, indexer } = await fixture(t);
+  await indexer.indexFolder(scope.id);
+  const first = await indexer.readFolderIndex(scope.id);
+  assert.equal(await indexer.readFolderIndex(scope.id), first);
+  await indexer.indexFolder(scope.id);
+  const next = await indexer.readFolderIndex(scope.id);
+  assert.notEqual(next, first);
+  assert.equal(next.generation, 2);
+  assert.equal(await indexer.readFolderIndex(scope.id), next);
+});
+
+test('una lista de incidencias ilegible en el catálogo se informa como INDEX_CORRUPT', async (t) => {
+  const { base, motor, scope, indexer } = await fixture(t);
+  await indexer.indexFolder(scope.id);
+  await alterCatalog(base, 'UPDATE folder_scopes SET issues_json = ? WHERE scope_id = ?', '{', scope.id);
+  const damaged = await catalogScope(base, scope.id);
+  const opened = createFolderIndexer({ baseDirectory: base, resolveScope: registryResolver(motor) });
+  await assert.rejects(opened.readFolderIndex(scope.id), { code: 'INDEX_CORRUPT' });
+  await assert.rejects(opened.indexFolder(scope.id), { code: 'INDEX_CORRUPT' });
+  assert.equal(await catalogScope(base, scope.id), damaged);
+});
+
+test('un catálogo enlazado se rechaza sin seguir el enlace', async (t) => {
   const { root, base, scope, indexer } = await fixture(t);
   const result = await indexer.indexFolder(scope.id);
+  assert.equal(result.generation, 1);
+  // Enlace de carpeta (junction en Windows) en el lugar del catálogo.
+  await removeCatalog(base);
+  const destination = path.join(root, 'destino-ajeno');
+  await fs.mkdir(destination);
+  await fs.symlink(destination, catalogFile(base), linkType);
+  await assert.rejects(indexer.readFolderIndex(scope.id), corrupt);
+  await assert.rejects(indexer.indexFolder(scope.id), corrupt);
+  assert.deepEqual(await fs.readdir(destination), []);
+  await fs.unlink(catalogFile(base)).catch(() => fs.rmdir(catalogFile(base)));
+
+  // Enlace duro: el mismo archivo sería escribible desde fuera de la Base.
+  const foreign = path.join(root, 'catalogo-ajeno.sqlite');
+  await fs.writeFile(foreign, '');
+  await fs.link(foreign, catalogFile(base));
+  await assert.rejects(indexer.readFolderIndex(scope.id), corrupt);
+  await assert.rejects(indexer.indexFolder(scope.id), corrupt);
+  assert.equal((await fs.readFile(foreign)).length, 0);
+});
+
+test('un índice JSON heredado dañado o enlazado falla de forma explícita y no se migra', async (t) => {
+  // r3 aún migra `folder-index-<id>.json` al catálogo: esa lectura conserva sus garantías.
+  const { root, base, scope, indexer } = await fixture(t);
+  await indexer.indexFolder(scope.id);
+  const published = await catalogScope(base, scope.id);
+  const index = await indexer.readFolderIndex(scope.id);
+  const valid = { format: 'mind-folder-index', version: 3, ...index,
+    entries: index.entries.map((item) => ({ ...item })) };
   const filename = path.join(base, `folder-index-${scope.id}.json`);
-  const valid = JSON.parse(await fs.readFile(filename, 'utf8'));
   const variants = [
     '{incompleto', 'null', '{}',
     JSON.stringify({ ...valid, version: 4 }),
@@ -389,18 +511,19 @@ test('los índices corruptos o enlazados fallan de forma explícita y no se repa
   ];
   for (const text of variants) {
     await fs.writeFile(filename, text);
-    await assert.rejects(indexer.readFolderIndex(scope.id), (error) => ['RECORD_CORRUPT', 'INDEX_CORRUPT'].includes(error.code));
-    await assert.rejects(indexer.indexFolder(scope.id), (error) => ['RECORD_CORRUPT', 'INDEX_CORRUPT'].includes(error.code));
+    await assert.rejects(indexer.readFolderIndex(scope.id), corrupt);
+    await assert.rejects(indexer.indexFolder(scope.id), corrupt);
     assert.equal(await fs.readFile(filename, 'utf8'), text);
+    assert.equal(await catalogScope(base, scope.id), published, 'El catálogo no absorbe el heredado dañado');
   }
-  assert.equal(await indexer.removeFolderIndex(scope.id), true);
+  await fs.rm(filename);
   const destination = path.join(root, 'destino-ajeno');
   await fs.mkdir(destination);
   await fs.symlink(destination, filename, linkType);
   await assert.rejects(indexer.readFolderIndex(scope.id), { code: 'RECORD_LINK' });
   await assert.rejects(indexer.indexFolder(scope.id), { code: 'RECORD_LINK' });
   assert.deepEqual(await fs.readdir(destination), []);
-  assert.equal(result.generation, 1);
+  assert.equal(await catalogScope(base, scope.id), published);
 });
 
 test('serializa indexaciones del mismo ámbito incluso entre instancias sin recorridos simultáneos', async (t) => {
@@ -430,7 +553,7 @@ test('ámbitos distintos mantienen índices independientes', async (t) => {
   assert.deepEqual(paths(await indexer.readFolderIndex(other.id)), ['unico.txt']);
   assert.equal(await indexer.removeFolderIndex(other.id), true);
   assert.equal((await indexer.readFolderIndex(scope.id)).entries.length, 4);
-  assert.equal((await fs.readdir(base)).filter((name) => name.startsWith('folder-index-')).length, 1);
+  assert.deepEqual(await catalogScopeIds(base), [scope.id]);
 });
 
 test('las tuberías y otros especiales se registran sin abrirse', { skip: process.platform === 'win32' && 'FIFO POSIX' }, async (t) => {

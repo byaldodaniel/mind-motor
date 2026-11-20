@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { resolveWorkOutput, rememberOutput } from './work-routing.js';
 import { processDiagnostics } from './process-supervisor.js';
-import { withRequestContext } from './request-context.js';
+import { withRequestContext, requestSignal } from './request-context.js';
 import { MotorError } from './errors.js';
 import { textVersion } from './text-modifier.js';
 import { documentFormat } from './document-reader.js';
@@ -302,6 +302,15 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
     return { content: read.content, version: textVersion(read.content) };
   }
 
+  /**
+   * Un fallo de índice de una carpeta se informa como estado de esa carpeta, pero la
+   * cancelación de la solicitud no es un estado: se propaga y llega como REQUEST_CANCELLED.
+   */
+  function notCancelled(error) {
+    if (requestSignal()?.aborted) throw error;
+    return error;
+  }
+
   /** Carpetas en las que el agente puede encontrar, con su índice y su rastro de eliminados. */
   async function findableContext() {
     const context = [];
@@ -540,7 +549,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         try {
           return { folder, ensure: await session.ensureIndex(folder.id, { timeoutMs: 1_500, allowStale: true }) };
         } catch (error) {
-          return { folder, ensure: { status: 'unavailable', code: error?.code ?? 'INDEX_UNAVAILABLE' } };
+          return { folder, ensure: { status: 'unavailable', code: notCancelled(error)?.code ?? 'INDEX_UNAVAILABLE' } };
         }
       }));
       const byEnsure = new Map(ensureOutcomes.map((item) => [item.folder.id, item.ensure]));
@@ -642,7 +651,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
           const authorized = await motor.getAuthorizedFolder(folder.id).catch(() => folder);
           return { folder: authorized ?? folder, ensure, index };
         } catch (error) {
-          return { folder, ensure: { status: 'unavailable', code: error?.code ?? 'INDEX_UNAVAILABLE' }, index: null };
+          return { folder, ensure: { status: 'unavailable', code: notCancelled(error)?.code ?? 'INDEX_UNAVAILABLE' }, index: null };
         }
       }));
 
@@ -715,7 +724,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         if (args.carpeta !== undefined) await requireAccess(folder, 'encontrar');
         else if (!(await policy.get(folder.id))?.access.encontrar) continue;
         // Reconciliar antes cuando esté disponible permite detectar lo eliminado hace un momento sin bloquearse.
-        await session.ensureIndex(folder.id, { timeoutMs: 1_500, allowStale: true }).catch(() => null);
+        await session.ensureIndex(folder.id, { timeoutMs: 1_500, allowStale: true }).catch((error) => notCancelled(error) && null);
         await session.settled(folder.id);
         const index = await motor.readFolderIndex(folder.id).catch(() => null);
         const existing = new Set(index?.entries.map((entry) => entry.path) ?? []);

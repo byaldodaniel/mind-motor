@@ -54,6 +54,21 @@ export async function readHandoff(root) {
   if (value?.format !== 'mind-update-handoff' || value.version !== 1 || !UUID.test(value.id ?? '') || !HANDOFF_PHASES.has(value.phase)) throw fail('UPDATE_HANDOFF_INVALID', 'El registro del relevo no corresponde a una operación conocida.');
   return value;
 }
+/**
+ * Sustituye el archivo con un renombrado atómico. En Windows, si otro proceso (un
+ * iniciador que comprueba el relevo) lo tiene abierto en ese instante, el renombrado
+ * da EPERM/EACCES/EBUSY: se reintenta brevemente, como storage.writeJson, sin borrar
+ * ni copiar sobre el destino.
+ */
+async function replaceFile(temporary, file) {
+  for (let attempt = 0; ; attempt++) {
+    try { await fs.rename(temporary, file); return; }
+    catch (e) {
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(e.code) || attempt >= 4) throw e;
+      await delay(10 * 2 ** attempt);
+    }
+  }
+}
 export async function writeHandoff(root, value) {
   if (!UUID.test(value.id ?? '') || !HANDOFF_PHASES.has(value.phase)) throw fail('UPDATE_HANDOFF_INVALID', 'Estado de relevo no válido.');
   await ensureUpdateDirectory(root, true);
@@ -61,7 +76,7 @@ export async function writeHandoff(root, value) {
   const handle = await fs.open(temporary, 'wx', 0o600);
   try { await handle.writeFile(JSON.stringify({ ...value, format: 'mind-update-handoff', version: 1 }) + '\n'); await handle.sync(); }
   finally { await handle.close(); }
-  try { await fs.rename(temporary, file); } catch (e) { await fs.rm(temporary, { force: true }); throw e; }
+  try { await replaceFile(temporary, file); } catch (e) { await fs.rm(temporary, { force: true }); throw e; }
   // Cada snapshot conserva su último dueño y fase aun después de empezar otro relevo.
   const directory = handoffDirectory(root, value.id);
   const info = await fs.lstat(directory).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
@@ -69,7 +84,7 @@ export async function writeHandoff(root, value) {
     await ensureHandoffDirectory(root, value.id);
     const mirror = path.join(directory, 'registro.json'), temp = mirror + '.' + randomUUID() + '.tmp';
     await fs.writeFile(temp, JSON.stringify({ ...value, format: 'mind-update-handoff', version: 1 }) + '\n', { flag: 'wx', mode: 0o600 });
-    await fs.rename(temp, mirror);
+    try { await replaceFile(temp, mirror); } catch (e) { await fs.rm(temp, { force: true }); throw e; }
   }
 }
 export async function handoffOwner(record, pythonExecutable) {

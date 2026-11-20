@@ -16,6 +16,7 @@ import { productPaths, productRuntime } from '../src/layout.js';
 import { releaseOf, createSignedPackageDescriptor } from '../src/package-descriptor.js';
 import { UNIVERSAL_TARGETS, readManifestFile, hashFile, scanTree } from '../src/product-files.js';
 import { writeZip } from '../src/archive.js';
+import { BASE_FORMAT_VERSION } from '../src/base-format.js';
 import { identifyCurrentProcess, inspectProcessOwners } from '../src/process-identity.js';
 import { startCentralMotor } from '../src/motor-central.js';
 import { checkHealthyConnector, httpRequest, connectorPaths, stopCentralMotor } from '../src/connector.js';
@@ -46,7 +47,9 @@ async function fixture(t) {
     'Sistema/Programa/Motor/src/update-channel.json': channel, [nodeRelative]: 'node ficticio', [pythonRelative]: 'python ficticio' };
   const current = { format: 'mind-product', version: 1, mindVersion: '1.0.4', packageRevision: 1,
     layoutVersion: 2, updateProtocolVersion: 2, platform: 'win32', arch: 'x64', targets: UNIVERSAL_TARGETS,
-    baseFormatVersion: 2, files: Object.fromEntries(Object.entries(files).map(([file, data]) => [file, sha(data)])), links: {} };
+    // Como construir-paquetes.mjs: el paquete declara el formato de Base de su Motor.
+    // Con un formato menor, el Motor real (copiado de src) elevaría la Base al arrancar.
+    baseFormatVersion: BASE_FORMAT_VERSION, files: Object.fromEntries(Object.entries(files).map(([file, data]) => [file, sha(data)])), links: {} };
   for (const [name, data] of Object.entries(files)) await put(root, name, data);
   await put(root, 'Sistema/mind-producto.json', JSON.stringify(current));
   const incomingFiles = { ...files, 'Sistema/Programa/Motor/app.txt': 'programa nuevo ficticio' };
@@ -64,7 +67,7 @@ async function fixture(t) {
   await writeUpdateState(root, { phase: 'disponible', release: releaseOf(incoming), manifestSha256: feed.manifestSha256,
     package: feed.packages[0], envelope: { payload: payload.toString('base64'), signature: sign(null, payload, privateKey).toString('base64') } });
   const layout = { product: true, root, manifest: current, ...productPaths(root, current), pythonExecutable: python };
-  await put(root, 'Sistema/Base/mind-base.json', JSON.stringify({ format: 'mind-base', version: 2,
+  await put(root, 'Sistema/Base/mind-base.json', JSON.stringify({ format: 'mind-base', version: BASE_FORMAT_VERSION,
     baseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', createdAt: '2026-01-01T00:00:00.000Z' }));
   await put(root, 'Sistema/Base/continuidad.md', 'Decisión ficticia que se conserva.');
   await put(root, 'Conversaciones/recurso.txt', 'Recurso ficticio.');

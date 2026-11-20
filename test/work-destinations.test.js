@@ -111,10 +111,22 @@ test('un proyecto puede usar otro almacén autorizado fuera de la raíz abierta 
  await assert.rejects(tools.call('crear',{ruta:'otro.txt',contenido:'No.',proyecto:'Brisa'},{}),{code:'ACCESS_NOT_GRANTED'});
 });
 
-test('el almacén predeterminado conserva el flujo manual fuera de un proyecto abierto',async t=>{
+test('abrir el cliente en la raíz de Mind abre su almacén Conversaciones, no la instalación',async t=>{
  const f=await agentFixture(t);const layout={...f.layout,userDataDirectory:path.join(f.mind,'Conversaciones')};
  const session=await f.open({layout});
  const workspace=createWorkspaceAccess(session,{paths:[],cwd:f.mind});
+ await workspace.initialize(connection());
+ assert.equal(workspace.active(),true);
+ const open=await workspace.session.motor.listAuthorizedFolders();
+ assert.deepEqual(open.map(folder=>folder.path),[await fs.realpath(layout.userDataDirectory)]);
+});
+
+test('el almacén predeterminado conserva el flujo manual fuera de un proyecto abierto',async t=>{
+ const f=await agentFixture(t);const layout={...f.layout,userDataDirectory:path.join(f.mind,'Conversaciones')};
+ const session=await f.open({layout});
+ // Directorio inicial que no es una carpeta de trabajo válida: ningún proyecto queda abierto.
+ // (La raíz de Mind ya no sirve para esto: r3 la sustituye por Conversaciones.)
+ const workspace=createWorkspaceAccess(session,{paths:[],cwd:path.join(f.root,'inexistente')});
  const conn=connection({onElicit:()=>({action:'accept',content:{acceso:'completo'}})});
  await workspace.initialize(conn);
  assert.equal(workspace.active(),false);

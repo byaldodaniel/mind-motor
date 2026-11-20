@@ -376,8 +376,10 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
           if (existing) return { status: 'current', stale: true, code: state.halted };
           return { status: 'unavailable', code: state.halted };
         }
-        if (existing) {
-          if (observe && observer && !state?.ready) void begin(folderId);
+        // Solo con observación (propia o de otra sesión) el índice guardado se mantiene al
+        // día; con observe=false cada consulta reconcilia bajo demanda, como se documenta arriba.
+        if (existing && observe) {
+          if (observer && !state?.ready) void begin(folderId);
           return { status: 'current', stale: false };
         }
       }
