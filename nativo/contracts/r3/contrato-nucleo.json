@@ -122,8 +122,8 @@
       "tools"
     ],
     "instrucciones": {
-      "bytes": 1393,
-      "sha256": "3df6120b5ab176501726cd1d7e9045f0490695322657c734f887aeffa2fd5cb5"
+      "bytes": 1435,
+      "sha256": "075d750241797cdd2d0a18b9fb30aaf0f8e755f9af2c350b928fea421b159ce7"
     },
     "herramientas": [
       {
@@ -186,13 +186,22 @@
       },
       {
         "nombre": "mind",
-        "esquemaSha256": "335ac61bf53f85b2c3895c0552892ebfda235f5f1db7f2b077eb8b5cf328f89c",
+        "esquemaSha256": "306614dad11adab140fab99c250932576e4c3d6b7a43028d4339982791db75c3",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 234
+      },
+      {
+        "nombre": "mind_cambiar",
+        "esquemaSha256": "56219429003a4e03e7827683e25e1247ecf28153c3464ccc5bc0dae905711009",
         "anotaciones": {
           "readOnlyHint": false,
           "destructiveHint": true,
           "openWorldHint": false
         },
-        "descripcionBytes": 231
+        "descripcionBytes": 276
       },
       {
         "nombre": "modificar",
@@ -227,9 +236,9 @@
       }
     ],
     "presupuesto": {
-      "herramientas": 10,
-      "catalogoBytes": 7620,
-      "instruccionesBytes": 1393
+      "herramientas": 11,
+      "catalogoBytes": 8278,
+      "instruccionesBytes": 1435
     }
   }
 }

@@ -32,7 +32,9 @@ test('modo de catálogo: núcleo por defecto, completo solo si se pide', () => {
   assert.equal(catalogMode('cualquiera', {}), 'nucleo');
   const inner = { definitions: [{ name: 'estado' }], call: () => 'interno' };
   assert.equal(withCatalog(inner, 'completo'), inner);
-  assert.equal(CORE_DEFINITIONS.length, 10);
+  assert.equal(CORE_DEFINITIONS.length, 11);
+  assert.equal(CORE_DEFINITIONS.find((d) => d.name === 'mind').annotations.readOnlyHint, true);
+  assert.equal(CORE_DEFINITIONS.find((d) => d.name === 'mind_cambiar').annotations.destructiveHint, true);
   assert.ok(Buffer.byteLength(CORE_INSTRUCTIONS) < 2048);
 });
 
@@ -41,7 +43,8 @@ test('cada herramienta núcleo llega a la operación interna con su nombre origi
   const names = ['estado', 'buscar', 'agrupar', 'conversaciones_buscar', 'continuidad_consultar', 'explorar', 'crear', 'crear_carpeta',
     'editar', 'modificar', 'mover', 'borrar', 'asignar_propiedades', 'conversacion_guardar', 'continuidad_registrar', 'solicitar_acceso',
     'retirar_acceso', 'funciones'];
-  const inner = { definitions: names.map((name) => ({ name, description: name, inputSchema: {} })), call: async (name, args) => { calls.push([name, args]); return { ok: true }; } };
+  const readOnly = new Set(['estado', 'buscar', 'agrupar', 'conversaciones_buscar', 'continuidad_consultar', 'explorar', 'funciones']);
+  const inner = { definitions: names.map((name) => ({ name, description: name, inputSchema: {}, annotations: { readOnlyHint: readOnly.has(name) } })), call: async (name, args) => { calls.push([name, args]); return { ok: true }; } };
   const core = withCatalog(inner);
   await core.call('buscar', { consulta: 'x' });
   await core.call('buscar', { en: 'marcas', consulta: 'pendiente', agrupar_por: 'archivo' });
@@ -71,6 +74,15 @@ test('cada herramienta núcleo llega a la operación interna con su nombre origi
   await assert.rejects(core.call('modificar', { ruta: 'a', ediciones: [], contenido: 'z' }), { code: 'INVALID_ARGUMENTS' });
   const help = await core.call('mind', { operacion: 'ayuda', detalle: 'funciones' });
   assert.equal(help.operacion, 'funciones');
+  assert.equal(help.herramienta, 'mind');
+  // mind solo consulta; lo que cambia datos va por mind_cambiar, y al revés.
+  await assert.rejects(core.call('mind', { operacion: 'borrar', argumentos: { ruta: 'a' } }), { code: 'USE_MIND_CAMBIAR' });
+  await assert.rejects(core.call('mind_cambiar', { operacion: 'funciones' }), { code: 'USE_MIND' });
+  await core.call('mind_cambiar', { operacion: 'borrar', argumentos: { ruta: 'a' } });
+  assert.deepEqual(calls.at(-1), ['borrar', { ruta: 'a' }]);
+  const listing = await core.call('mind', { operacion: 'ayuda' });
+  assert.ok(listing.mind.some((op) => op.nombre === 'funciones'));
+  assert.ok(listing.mind_cambiar.some((op) => op.nombre === 'borrar'));
 });
 
 async function setup(t, files) {

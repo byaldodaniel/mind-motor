@@ -27,7 +27,7 @@ export const CORE_INSTRUCTIONS = `Mind trabaja con los archivos que el usuario a
 3. Escribir: "crear" nunca sobrescribe; "modificar" exige la version leída (o "ediciones" puntuales). "organizar" mueve, renombra, borra a la papelera y restaura.
 4. Guardar lo importante: "guardar" en conversacion (titulo, importante; con id y revision al actualizar), continuidad o resultado. Crea archivos en los destinos que devuelve "retomar".
 5. Permisos: la carpeta abierta en el cliente tiene acceso durante la sesión. Para otra, "acceso" solicitar con permisos mínimos. El usuario decide; nunca afirmes que autorizó algo. Las confirmaciones pendientes se resuelven con "mind autorizar" en la consola.
-6. Lo demás (funciones, índices, respaldo, actualizaciones, traslados, preferencias): "mind" con operacion "ayuda".
+6. Lo demás (funciones, índices, respaldo, actualizaciones, traslados, preferencias): "mind" consulta y "mind_cambiar" modifica; operacion "ayuda" las lista.
 
 Si una respuesta trae aviso_actualizacion, responde primero lo pedido y añade el aviso en una línea; aplica una actualización solo si el usuario lo pide. Informa con exactitud lo hecho y lo que falló.`;
 
@@ -203,11 +203,21 @@ export const CORE_DEFINITIONS = Object.freeze([
   },
   {
     name: 'mind',
-    title: 'Otras operaciones de Mind',
-    description: 'Ejecuta cualquier operación de Mind por su nombre (funciones, índices, respaldo, actualizaciones, destinos, preferencias, traslados…). operacion "ayuda" lista las disponibles; con detalle devuelve su descripción y parámetros.',
+    title: 'Consultas de Mind',
+    description: 'Ejecuta por su nombre cualquier operación de Mind que solo consulta (destinos, preferencias, funciones, índices, papelera, actualización…). operacion "ayuda" lista las disponibles en mind y mind_cambiar; con detalle describe una.',
     inputSchema: OPEN({
-      operacion: { type: 'string', description: '"ayuda" o el nombre de una operación.' },
+      operacion: { type: 'string', description: '"ayuda" o el nombre de una operación de consulta.' },
       detalle: { type: 'string', description: 'Con ayuda: operación a describir.' },
+      argumentos: { type: 'object', description: 'Parámetros de la operación.' },
+    }, ['operacion']),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'mind_cambiar',
+    title: 'Cambios en Mind',
+    description: 'Ejecuta por su nombre una operación de Mind que cambia algo (configurar destinos o preferencias, funciones, índices, respaldo, traslados, aplicar actualizaciones…). Las que borran o activan algo siguen pidiendo confirmación al usuario. mind {operacion:"ayuda"} las lista.',
+    inputSchema: OPEN({
+      operacion: { type: 'string', description: 'Nombre de la operación.' },
       argumentos: { type: 'object', description: 'Parámetros de la operación.' },
     }, ['operacion']),
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -215,6 +225,8 @@ export const CORE_DEFINITIONS = Object.freeze([
 ]);
 
 const invalid = (message) => new MotorError('INVALID_ARGUMENTS', message);
+// Una operación interna solo consulta si lo declara así su propia definición de r3.
+const readOnly = (definition) => definition?.annotations?.readOnlyHint === true;
 const plain = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
 
 function route(name, args) {
@@ -349,12 +361,30 @@ export function withCatalog(inner, mode = 'nucleo') {
         if (detalle) {
           const definition = internal.get(detalle);
           if (!definition) throw new MotorError('UNKNOWN_TOOL', `Operación desconocida: ${String(detalle).slice(0, 60)}.`);
-          return { operacion: definition.name, descripcion: definition.description, parametros: definition.inputSchema, anotaciones: definition.annotations ?? null };
+          return { operacion: definition.name, herramienta: readOnly(definition) ? 'mind' : 'mind_cambiar',
+            descripcion: definition.description, parametros: definition.inputSchema, anotaciones: definition.annotations ?? null };
         }
+        const all = [...internal.values()];
+        const list = (defs) => defs.map((d) => ({ nombre: d.name, titulo: d.title ?? d.name }));
         return {
-          operaciones: [...internal.values()].map((d) => ({ nombre: d.name, titulo: d.title ?? d.name })),
+          mind: list(all.filter(readOnly)),
+          mind_cambiar: list(all.filter((d) => !readOnly(d))),
           nota: 'mind {operacion:"ayuda", detalle:"<nombre>"} describe sus parámetros.',
         };
+      }
+      const definition = internal.get(operacion);
+      if (definition && !readOnly(definition)) {
+        throw new MotorError('USE_MIND_CAMBIAR', `${operacion} cambia datos: usa mind_cambiar.`);
+      }
+      return run(operacion, plain(argumentos), context);
+    },
+
+    mind_cambiar(args, context) {
+      const { operacion, argumentos = {}, ...rest } = plain(args);
+      if (Object.keys(rest).length > 0) throw invalid(`Parámetros desconocidos: ${Object.keys(rest).join(', ')}. Pasa los de la operación en argumentos.`);
+      const definition = internal.get(operacion);
+      if (definition && readOnly(definition)) {
+        throw new MotorError('USE_MIND', `${operacion} solo consulta: usa mind.`);
       }
       return run(operacion, plain(argumentos), context);
     },
