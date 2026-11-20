@@ -1,4 +1,5 @@
 mod bridge;
+mod build_recipe;
 mod host;
 mod scan;
 mod view_cli;

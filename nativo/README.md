@@ -85,6 +85,38 @@ $env:MIND_NATIVE_EXE = (Resolve-Path '.\nativo\rust\target\release\mind-native-r
 node --test nativo/test/vista-compartida.test.mjs
 ```
 
+## Compilación de vistas (Etapa 4)
+
+Con una Base ficticia y el anfitrión de vistas en marcha, guarda una receta
+JSON dentro de la copia del proyecto. Indica el programa con ruta absoluta,
+sus argumentos y, opcionalmente, el plazo en milisegundos.
+
+```json
+{"programa":"C:\\ruta\\node.exe","argumentos":["build.mjs"],"plazo_ms":30000}
+```
+
+El programa arranca en la copia con los permisos de la cuenta local. Debe
+guardar `index.html` y sus archivos de vista en la carpeta temporal que indica
+`MIND_SALIDA`. Revisa la receta y usa el valor `autorizacion` de la respuesta
+para ejecutar esa receta desde una consola local de confianza.
+
+```text
+vista receta --proyecto NOMBRE --copia ABS --receta ABS
+vista construir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]
+```
+
+Con el ID de una vista existente, Mind actualiza esa dirección solo si la
+compilación y la validación terminan bien y la vista conserva la versión
+vigente al empezar. El informe muestra lo solicitado y lo servido. Durante
+la ejecución, el plazo o Ctrl+C cancelan el proceso directo de la receta.
+
+Prueba con Node y Python y una Base ficticia, usando el binario Rust y
+`MIND_TEST_BUNDLED_PYTHON` o `MIND_PYTHON`.
+
+```powershell
+node --test nativo/test/compilacion-vista.test.mjs
+```
+
 ## Compilación reproducible
 
 `build.ps1` quita del ejecutable las rutas locales (`--remap-path-prefix`) y,

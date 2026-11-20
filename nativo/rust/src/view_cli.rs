@@ -13,17 +13,18 @@ use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
 use reqwest::{Client, Method, StatusCode};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::{process::Command, time::timeout};
 use uuid::Uuid;
 
 use crate::{
     bridge::{base_id, regular_json},
+    build_recipe::{BuildError, Recipe},
     views::{MAX_VIEW_BYTES, MAX_VIEW_FILES},
 };
 
-const USAGE: &str = "vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS [--id UUID --version N]\nvista consultar|cerrar --base ABS --id UUID";
+const USAGE: &str = "vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS [--id UUID --version N]\nvista consultar|cerrar --base ABS --id UUID\nvista receta --proyecto NOMBRE --copia ABS --receta ABS\nvista construir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]";
 const MAX_PATH: usize = 1024;
 const MAX_DIRECTORIES: usize = 256;
 
@@ -46,6 +47,11 @@ struct Publication<'a> {
     copia: String,
     git: Option<Git>,
     archivos: Vec<Asset>,
+}
+
+struct ViewError {
+    status: Option<StatusCode>,
+    message: String,
 }
 
 struct Host {
@@ -111,6 +117,45 @@ impl Host {
         }
         Ok(host)
     }
+
+    async fn request(
+        &self,
+        id: Option<Uuid>,
+        method: Method,
+        version: Option<u64>,
+        publication: Option<&Publication<'_>>,
+    ) -> Result<Value, ViewError> {
+        let route = id.map_or_else(|| "/vistas".to_owned(), |id| format!("/vistas/{id}"));
+        let expected = match method {
+            Method::POST => StatusCode::CREATED,
+            Method::DELETE => StatusCode::NO_CONTENT,
+            _ => StatusCode::OK,
+        };
+        let mut request = self.client.request(method, self.url(&route)).bearer_auth(&self.token);
+        if let Some(version) = version {
+            request = request.header(reqwest::header::IF_MATCH, format!("\"{version}\""));
+        }
+        if let Some(publication) = publication {
+            request = request.json(publication);
+        }
+        let response = request.send().await.map_err(|_| ViewError {
+            status: None, message: "El anfitrión local no respondió a la operación.".into(),
+        })?;
+        let status = response.status();
+        if status == expected && status == StatusCode::NO_CONTENT {
+            return Ok(json!({"id": id.map(|id| id.to_string()), "cerrada": true}));
+        }
+        let body = small_json(response).await.map_err(|message| ViewError {
+            status: (!status.is_success()).then_some(status), message,
+        })?;
+        if status != expected {
+            return Err(ViewError {
+                status: Some(status),
+                message: format!("Mind devolvió {status}: {}", body["error"].as_str().unwrap_or("Error de la vista")),
+            });
+        }
+        Ok(body)
+    }
 }
 
 fn port_in(value: &Value, field: &str) -> Option<u16> {
@@ -145,7 +190,7 @@ async fn small_json(response: reqwest::Response) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|_| "El anfitrión respondió con datos inválidos.".into())
 }
 
-fn is_link(metadata: &Metadata) -> bool {
+pub(crate) fn is_link(metadata: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -247,7 +292,7 @@ fn snapshot(root: &Path) -> Result<Vec<Asset>, String> {
 }
 
 #[cfg(windows)]
-fn open_asset(root: &Path, relative: &str) -> io::Result<File> {
+pub(crate) fn open_asset(root: &Path, relative: &str) -> io::Result<File> {
     use std::{
         ffi::{c_void, OsString},
         os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
@@ -276,7 +321,7 @@ fn open_asset(root: &Path, relative: &str) -> io::Result<File> {
 }
 
 #[cfg(unix)]
-fn open_asset(root: &Path, relative: &str) -> io::Result<File> {
+pub(crate) fn open_asset(root: &Path, relative: &str) -> io::Result<File> {
     use std::{
         ffi::CString,
         os::{fd::{AsRawFd, FromRawFd}, unix::ffi::OsStrExt},
@@ -307,7 +352,7 @@ fn open_asset(root: &Path, relative: &str) -> io::Result<File> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_asset(_: &Path, _: &str) -> io::Result<File> {
+pub(crate) fn open_asset(_: &Path, _: &str) -> io::Result<File> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "Apertura segura no disponible"))
 }
 
@@ -387,7 +432,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     let mut pairs = args.chunks_exact(2);
     for pair in &mut pairs {
         let key = pair[0].as_str();
-        if !matches!(key, "--base" | "--id" | "--version" | "--proyecto" | "--copia" | "--contenido")
+        if !matches!(key, "--base" | "--id" | "--version" | "--proyecto" | "--copia" | "--contenido" | "--receta" | "--autorizar")
             || options.insert(key, pair[1].as_str()).is_some()
         {
             return Err(USAGE.into());
@@ -396,9 +441,11 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     if !pairs.remainder().is_empty() {
         return Err(USAGE.into());
     }
+    if matches!(operation.as_str(), "receta" | "construir") {
+        return run_recipe(operation, options).await;
+    }
     let base = path_option(options.remove("--base"))?;
-    let id = options.remove("--id").map(Uuid::parse_str).transpose()
-        .map_err(|_| "Indica un ID válido de vista.")?;
+    let id = view_id(options.remove("--id"))?;
     let version = options.remove("--version").map(str::parse::<u64>).transpose()
         .map_err(|_| "Indica una versión numérica de vista.")?;
     let publish = if operation == "abrir" && id.is_some() == version.is_some() && version != Some(0) {
@@ -436,31 +483,99 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     };
 
     let host = Host::connect(&base).await?;
-    let route = id.map_or_else(|| "/vistas".to_owned(), |id| format!("/vistas/{id}"));
-    let (method, expected) = match operation.as_str() {
-        "abrir" if id.is_some() => (Method::PUT, StatusCode::OK),
-        "abrir" => (Method::POST, StatusCode::CREATED),
-        "consultar" => (Method::GET, StatusCode::OK),
-        "cerrar" => (Method::DELETE, StatusCode::NO_CONTENT),
+    let method = match operation.as_str() {
+        "abrir" if id.is_some() => Method::PUT,
+        "abrir" => Method::POST,
+        "consultar" => Method::GET,
+        "cerrar" => Method::DELETE,
         _ => return Err(USAGE.into()),
     };
-    let mut request = host.client.request(method, host.url(&route)).bearer_auth(host.token);
-    if let Some(version) = version {
-        request = request.header(reqwest::header::IF_MATCH, format!("\"{version}\""));
-    }
-    if let Some(publish) = publish {
-        request = request.json(&publish);
-    }
-    let response = request.send().await.map_err(|_| "El anfitrión local no respondió a la operación.")?;
-    let status = response.status();
-    if status == StatusCode::NO_CONTENT && expected == status {
-        println!("{}", serde_json::json!({ "id": id.unwrap().to_string(), "cerrada": true }));
-        return Ok(());
-    }
-    let body = small_json(response).await?;
-    if status != expected {
-        return Err(format!("Mind devolvió {status}: {}", body["error"].as_str().unwrap_or("Error de la vista")));
-    }
+    let body = host.request(id, method, version, publish.as_ref()).await.map_err(|error| error.message)?;
     println!("{body}");
     Ok(())
+}
+
+fn view_id(value: Option<&str>) -> Result<Option<Uuid>, String> {
+    value.map(Uuid::parse_str).transpose().map_err(|_| "Indica un ID válido de vista.".into())
+}
+
+async fn run_recipe(operation: &str, mut options: BTreeMap<&str, &str>) -> Result<(), String> {
+    let project = options.remove("--proyecto").map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 512 && !name.chars().any(char::is_control))
+        .ok_or("Indica el nombre del proyecto.")?;
+    let copy = directory(&path_option(options.remove("--copia"))?)?;
+    let file = path_option(options.remove("--receta"))?;
+    let recipe = Recipe::load(project, &copy, &file)?;
+    if operation == "receta" {
+        if !options.is_empty() {
+            return Err(USAGE.into());
+        }
+        println!("{}", recipe.review());
+        return Ok(());
+    }
+
+    let base = path_option(options.remove("--base"))?;
+    let approved = options.remove("--autorizar").ok_or("Autoriza explícitamente esta receta con --autorizar.")?;
+    let id = view_id(options.remove("--id"))?;
+    if !options.is_empty() {
+        return Err(USAGE.into());
+    }
+    recipe.authorize(approved)?;
+    let copy_id = base_id(&copy).ok_or("No se pudo identificar la copia.")?;
+    let git = git_info(&copy).await?;
+    let host = Host::connect(&base).await?;
+    let previous = if let Some(id) = id {
+        let current = host.request(Some(id), Method::GET, None, None).await.map_err(|error| error.message)?;
+        if current["proyecto"].as_str() != Some(project) || current["copia"].as_str() != Some(copy_id.as_str()) {
+            return Err("La vista pertenece a otro proyecto o copia.".into());
+        }
+        Some(current["version"].as_u64().ok_or("El anfitrión no devolvió la versión de la vista.")?)
+    } else {
+        None
+    };
+    let requested = json!({"proyecto": project, "copia": copy_id, "git": git, "receta": approved});
+    let attempted = prepare_build(&recipe, &copy, &git).await;
+    let failure = match attempted {
+        Ok(assets) => {
+            let publication = Publication { proyecto: project, copia: copy_id, git, archivos: assets };
+            let method = if previous.is_some() { Method::PUT } else { Method::POST };
+            match host.request(id, method, previous, Some(&publication)).await {
+                Ok(served) => {
+                    println!("{}", json!({"estado": "publicada", "solicitada": requested, "servida": served}));
+                    return Ok(());
+                }
+                Err(error) => {
+                    let estado = match error.status {
+                        Some(StatusCode::PRECONDITION_FAILED | StatusCode::NOT_FOUND) if previous.is_some() => "desactualizada",
+                        None => "indeterminada",
+                        _ => "fallo",
+                    };
+                    BuildError { estado, motivo: error.message }
+                }
+            }
+        }
+        Err(failure) => failure,
+    };
+
+    let served = match id {
+        Some(id) => host.request(Some(id), Method::GET, None, None).await.unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+    println!("{}", json!({
+        "estado": failure.estado, "motivo": failure.motivo, "solicitada": requested, "servida": served,
+    }));
+    Err(failure.motivo)
+}
+
+async fn prepare_build(recipe: &Recipe, copy: &Path, before: &Option<Git>) -> Result<Vec<Asset>, BuildError> {
+    let failure = |motivo| BuildError { estado: "fallo", motivo };
+    let output = recipe.build(copy).await?;
+    let assets = snapshot(output.path()).map_err(failure)?;
+    if &git_info(copy).await.map_err(failure)? != before {
+        return Err(BuildError {
+            estado: "desactualizada",
+            motivo: "La copia de Git cambió durante la compilación.".into(),
+        });
+    }
+    Ok(assets)
 }
