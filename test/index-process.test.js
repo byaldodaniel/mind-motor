@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { openMotor } from '../src/motor.js';
+import { catalogScope, catalogScopeRow } from './helpers/catalog.js';
 
 const development = fileURLToPath(new URL('../..', import.meta.url));
 const worker = new URL('./fixtures/index_process.mjs', import.meta.url);
@@ -30,7 +31,8 @@ async function fixture(t) {
     await fs.rm(root, { recursive: true, force: true });
   });
   return { root, base, folder, motor, children, id: scope.id,
-    filename: path.join(base, `folder-index-${scope.id}.json`),
+    // Estado publicado del índice en catalog.sqlite (fila del ámbito y entradas).
+    published: () => catalogScope(base, scope.id),
     lock: path.join(base, `folder-index-${scope.id}.lock`) };
 }
 
@@ -125,7 +127,8 @@ test('recorrido fuera del bloqueo: una modificación concurrente invalida la ins
 
 test('retirada espera una publicación activa, elimina el índice y no lo revive al reautorizar', { timeout: 30000 }, async (t) => {
   const f = await fixture(t);
-  const before = JSON.parse(await fs.readFile(f.filename, 'utf8'));
+  const before = await catalogScopeRow(f.base, f.id);
+  assert.ok(before?.authorization_generation);
   const active = start(t, f, { operation: 'modify', relativePath: 'a.txt', previous: 'inicial', content: 'modificación ficticia', pausePublish: true });
   await active.wait('before-publish');
   const revoke = start(t, f, { operation: 'revoke' });
@@ -133,13 +136,13 @@ test('retirada espera una publicación activa, elimina el índice y no lo revive
   active.release();
   await success(active);
   assert.equal(await success(revoke), true);
-  await assert.rejects(fs.stat(f.filename), { code: 'ENOENT' });
+  assert.equal(await f.published(), null, 'La retirada eliminó el índice del catálogo');
   await assert.rejects(f.motor.readFolderIndex(f.id), { code: 'FOLDER_NOT_AUTHORIZED' });
   const scope = await f.motor.authorizeFolder(f.folder);
   assert.equal(scope.id, f.id);
   assert.equal(await f.motor.readFolderIndex(f.id), null);
   await f.motor.indexFolder(f.id);
-  assert.notEqual((await f.motor.readFolderIndex(f.id)).authorizationGeneration, before.authorizationGeneration);
+  assert.notEqual((await f.motor.readFolderIndex(f.id)).authorizationGeneration, before.authorization_generation);
 });
 
 for (const operation of ['scan', 'record-create', 'record-modify']) {
@@ -152,10 +155,10 @@ for (const operation of ['scan', 'record-create', 'record-modify']) {
     await success(start(t, f, { operation: 'revoke' }));
     await f.motor.authorizeFolder(f.folder);
     await f.motor.indexFolder(f.id);
-    const current = await fs.readFile(f.filename, 'utf8');
+    const current = await f.published();
     pending.release();
     assert.equal((await pending.result()).code, 'INDEX_SCOPE_CHANGED');
-    assert.equal(await fs.readFile(f.filename, 'utf8'), current);
+    assert.equal(await f.published(), current);
     assert.notEqual((await f.motor.readFolderIndex(f.id)).authorizationGeneration, old.authorizationGeneration);
   });
 }
@@ -174,7 +177,7 @@ test('removeFolderIndex espera la publicación y la retirada gana al finalizar',
 
 test('bloqueo viejo vivo se respeta; abandonado por un proceso terminado se recupera solo', { timeout: 30000 }, async (t) => {
   const f = await fixture(t);
-  const original = await fs.readFile(f.filename, 'utf8');
+  const original = await f.published();
   const owner = start(t, f, { operation: 'scan', pausePublish: true });
   await owner.wait('before-publish');
   const lock = await fs.readFile(f.lock, 'utf8');
@@ -189,7 +192,7 @@ test('bloqueo viejo vivo se respeta; abandonado por un proceso terminado se recu
   await owner.exit;
   // El dueño terminó sin liberar: el bloqueo quedó abandonado y nada se publicó.
   assert.equal(await fs.readFile(f.lock, 'utf8'), lock);
-  assert.equal(await fs.readFile(f.filename, 'utf8'), original);
+  assert.equal(await f.published(), original);
   // Recuperación automática aprobada (opción B): mismo equipo y proceso dueño inexistente.
   const abandonedWaiter = start(t, f, { operation: 'scan' });
   await abandonedWaiter.wait('contended');
@@ -216,10 +219,10 @@ test('dos carpetas distintas publican independientemente, aun con otra coordinac
 
 test('fallo ordinario libera coordinación, limpia temporal y conserva índice; creación avisa reconciliación', { timeout: 30000 }, async (t) => {
   const f = await fixture(t);
-  const original = await fs.readFile(f.filename, 'utf8');
+  const original = await f.published();
   const result = await success(start(t, f, { operation: 'create', relativePath: 'nuevo.txt', content: 'ficticio', failPublish: true }));
   assert.deepEqual(result.index, { status: 'needs-reconciliation', generation: null, code: 'EIO' });
-  assert.equal(await fs.readFile(f.filename, 'utf8'), original);
+  assert.equal(await f.published(), original);
   assert.ok(!(await fs.readdir(f.base)).some((name) => name.endsWith('.lock') || name.endsWith('.tmp')));
   assert.equal(await fs.readFile(path.join(f.folder, 'nuevo.txt'), 'utf8'), 'ficticio');
   assert.equal((await f.motor.indexFolder(f.id)).generation, 2);

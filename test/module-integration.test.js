@@ -6,6 +6,9 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openMotor } from '../src/motor.js';
 import { createFolderIndexer } from '../src/indexer.js';
+import {
+  catalogFile, catalogScope, catalogScopeRow, legacyIndexFiles, publishCatalogScope,
+} from './helpers/catalog.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const development = path.dirname(motorDirectory);
@@ -24,8 +27,10 @@ async function fixture(t) {
   await fs.writeFile(path.join(folder, 'anterior.txt'), 'Contenido ficticio');
   const motor = await openMotor({ baseDirectory: base });
   const scope = await motor.authorizeFolder(folder);
-  const filename = path.join(base, `folder-index-${scope.id}.json`);
-  return { root, base, folder, motor, scope, filename };
+  // Índice heredado (JSON) que r3 todavía lee y migra a catalog.sqlite.
+  const legacy = path.join(base, `folder-index-${scope.id}.json`);
+  const published = () => catalogScope(base, scope.id);
+  return { root, base, folder, motor, scope, legacy, published };
 }
 
 test('Motor indexa y reconcilia solo ids del registro; continuidad y funciones son administración del anfitrión', async (t) => {
@@ -51,13 +56,13 @@ test('Motor indexa y reconcilia solo ids del registro; continuidad y funciones s
   const requester = {};
   await assert.rejects(motor.readTextFile({ requester, authorization: scope.id }), { code: 'READ_NOT_AUTHORIZED' });
   assert.deepEqual((await fs.readdir(base)).sort(), [
-    `folder-authorization-${scope.id}.json`, `folder-index-${scope.id}.json`, 'mind-base.json', 'resource-queue',
+    'catalog.sqlite', `folder-authorization-${scope.id}.json`, 'mind-base.json', 'resource-queue',
   ].sort());
   assert.deepEqual(await fs.readdir(path.join(base, 'resource-queue')), [], 'La cola queda vacía al terminar');
 });
 
 test('el índice y su vínculo de autorización sobreviven a un proceso nuevo', async (t) => {
-  const { base, motor, scope, filename } = await fixture(t);
+  const { base, motor, scope } = await fixture(t);
   await motor.indexFolder(scope.id);
   const source = `
     import { openMotor } from ${JSON.stringify(pathToFileURL(path.join(motorDirectory, 'src/motor.js')).href)};
@@ -67,20 +72,21 @@ test('el índice y su vínculo de autorización sobreviven a un proceso nuevo', 
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), await motor.readFolderIndex(scope.id));
-  const saved = JSON.parse(await fs.readFile(filename, 'utf8'));
+  const saved = await catalogScopeRow(base, scope.id);
   const registered = JSON.parse(await fs.readFile(path.join(base, `folder-authorization-${scope.id}.json`), 'utf8'));
-  assert.equal(saved.version, 3);
-  assert.equal(saved.authorizationGeneration, registered.generation);
+  assert.equal(JSON.parse(await fs.readFile(path.join(base, 'mind-base.json'), 'utf8')).version, 3);
+  assert.ok(registered.generation);
+  assert.equal(saved.authorization_generation, registered.generation);
 });
 
 test('retirar elimina el índice y deniega a instancias abiertas sin modificar originales', async (t) => {
-  const { base, folder, motor, scope, filename } = await fixture(t);
+  const { base, folder, motor, scope, published } = await fixture(t);
   await motor.indexFolder(scope.id);
   const other = await openMotor({ baseDirectory: base });
   const original = path.join(folder, 'anterior.txt');
   const before = await fs.stat(original);
   assert.equal(await other.revokeFolder(scope.id), true);
-  await assert.rejects(fs.stat(filename), { code: 'ENOENT' });
+  assert.equal(await published(), null);
   await assert.rejects(motor.readFolderIndex(scope.id), { code: 'FOLDER_NOT_AUTHORIZED' });
   await assert.rejects(motor.indexFolder(scope.id), { code: 'FOLDER_NOT_AUTHORIZED' });
   assert.equal(await motor.revokeFolder(scope.id), false);
@@ -89,16 +95,16 @@ test('retirar elimina el índice y deniega a instancias abiertas sin modificar o
 });
 
 test('retirar y reautorizar invalida incluso un índice viejo restaurado o publicado tarde', async (t) => {
-  const { base, folder, motor, scope, filename } = await fixture(t);
+  const { base, folder, motor, scope, published } = await fixture(t);
   await motor.indexFolder(scope.id);
-  const previous = await fs.readFile(filename, 'utf8');
+  const previous = await published();
   const other = await openMotor({ baseDirectory: base });
   await other.revokeFolder(scope.id);
   await fs.unlink(path.join(folder, 'anterior.txt'));
   await fs.writeFile(path.join(folder, 'actual.txt'), 'Actual ficticio');
   const reauthorized = await other.authorizeFolder(folder);
   assert.equal(reauthorized.id, scope.id);
-  await fs.writeFile(filename, previous); // Simula una publicación tardía de otro proceso.
+  await publishCatalogScope(base, previous); // Simula una publicación tardía de otro proceso.
   assert.equal(await motor.readFolderIndex(scope.id), null);
   const result = await motor.indexFolder(scope.id);
   assert.equal(result.mode, 'initial');
@@ -108,35 +114,54 @@ test('retirar y reautorizar invalida incluso un índice viejo restaurado o publi
 });
 
 test('los índices v1 sin vínculo nunca se ofrecen como vigentes; se reconstruyen', async (t) => {
-  const { motor, scope, filename, folder } = await fixture(t);
+  const { motor, scope, legacy, folder } = await fixture(t);
   await motor.indexFolder(scope.id);
-  const index = JSON.parse(await fs.readFile(filename, 'utf8'));
-  delete index.authorizationGeneration;
-  index.version = 1;
-  await fs.writeFile(filename, JSON.stringify(index));
+  const { authorizationGeneration, ...current } = await motor.readFolderIndex(scope.id);
+  assert.ok(authorizationGeneration);
+  // Un índice JSON v1 heredado no tenía vínculo con la concesión.
+  const index = { format: 'mind-folder-index', version: 1, ...current,
+    entries: current.entries.map(({ identity, ...item }) => item) };
+  await fs.writeFile(legacy, JSON.stringify(index));
   await fs.unlink(path.join(folder, 'anterior.txt'));
+  assert.equal(await motor.readFolderIndex(scope.id), null);
+  assert.deepEqual(await legacyIndexFiles(motor.baseDirectory), [], 'El heredado se migró al catálogo');
+  assert.equal(await motor.readFolderIndex(scope.id), null, 'Migrado sigue sin vínculo vigente');
+  assert.equal((await motor.indexFolder(scope.id)).mode, 'initial');
+  assert.deepEqual((await motor.readFolderIndex(scope.id)).entries, []);
+});
+
+test('un índice sin vínculo en el catálogo tampoco se ofrece como vigente', async (t) => {
+  let { base, motor, scope, folder, published } = await fixture(t);
+  await motor.indexFolder(scope.id);
+  const unbound = JSON.parse(await published());
+  unbound.scope.authorization_generation = null;
+  await publishCatalogScope(base, JSON.stringify(unbound));
+  await fs.unlink(path.join(folder, 'anterior.txt'));
+  // Motor recién abierto: que una instancia abierta tampoco lo ofrezca depende de la
+  // caché del índice (fallo de r3 registrado en indexer.test.js).
+  motor = await openMotor({ baseDirectory: base });
   assert.equal(await motor.readFolderIndex(scope.id), null);
   assert.equal((await motor.indexFolder(scope.id)).mode, 'initial');
   assert.deepEqual((await motor.readFolderIndex(scope.id)).entries, []);
 });
 
 test('un registro de carpeta heredado v1 tampoco revive índices al reautorizar', async (t) => {
-  const { base, folder, motor, scope, filename } = await fixture(t);
+  const { base, folder, motor, scope, published } = await fixture(t);
   await fs.writeFile(path.join(base, `folder-authorization-${scope.id}.json`), JSON.stringify({
     format: 'mind-folder-authorization', version: 1, ...scope,
   }));
   await motor.indexFolder(scope.id);
-  const old = await fs.readFile(filename, 'utf8');
-  assert.equal(JSON.parse(old).authorizationGeneration, null);
+  const old = await published();
+  assert.equal(JSON.parse(old).scope.authorization_generation, null);
   await motor.revokeFolder(scope.id);
   await motor.authorizeFolder(folder);
-  await fs.writeFile(filename, old);
+  await publishCatalogScope(base, old);
   assert.equal(await motor.readFolderIndex(scope.id), null);
   assert.equal((await motor.indexFolder(scope.id)).mode, 'initial');
 });
 
 test('un ciclo de retirada y concesión durante el recorrido impide publicar', async (t) => {
-  const { base, folder, motor, scope, filename } = await fixture(t);
+  const { base, folder, motor, scope, published } = await fixture(t);
   let calls = 0;
   const indexer = createFolderIndexer({ baseDirectory: base, resolveScope: async (id) => {
     if (++calls === 3) {
@@ -147,16 +172,20 @@ test('un ciclo de retirada y concesión durante el recorrido impide publicar', a
     return { id, path: registration.path, generation: registration.generation };
   } });
   await assert.rejects(indexer.indexFolder(scope.id), { code: 'INDEX_SCOPE_CHANGED' });
-  await assert.rejects(fs.stat(filename), { code: 'ENOENT' });
+  assert.equal(await published(), null);
 });
 
-test('un fallo de limpieza se informa con la carpeta ya retirada, sin seguir el enlace', async (t) => {
-  const { root, motor, scope, filename } = await fixture(t);
+for (const [where, linkName, code] of [
+  ['catálogo', (base) => catalogFile(base), 'INDEX_CORRUPT'],
+  ['índice heredado', (base, id) => path.join(base, `folder-index-${id}.json`), 'RECORD_LINK'],
+]) test(`un fallo de limpieza (${where} enlazado) se informa con la carpeta ya retirada, sin seguir el enlace`, async (t) => {
+  const { root, base, motor, scope } = await fixture(t);
+  const filename = linkName(base, scope.id);
   const target = path.join(root, 'ajeno');
   await fs.mkdir(target);
   await fs.writeFile(path.join(target, 'conservar.txt'), 'Ficticio ajeno');
   await fs.symlink(target, filename, process.platform === 'win32' ? 'junction' : 'dir');
-  await assert.rejects(motor.revokeFolder(scope.id), { code: 'RECORD_LINK' });
+  await assert.rejects(motor.revokeFolder(scope.id), { code });
   assert.deepEqual(await motor.listAuthorizedFolders(), []);
   await assert.rejects(motor.readFolderIndex(scope.id), { code: 'FOLDER_NOT_AUTHORIZED' });
   assert.deepEqual(await fs.readdir(target), ['conservar.txt']);
@@ -165,8 +194,8 @@ test('un fallo de limpieza se informa con la carpeta ya retirada, sin seguir el 
 });
 
 test('Motor usa el mismo intérprete configurado y falla cerrado si no está disponible', async (t) => {
-  const { base, root, scope, filename } = await fixture(t);
+  const { base, root, scope, published } = await fixture(t);
   const motor = await openMotor({ baseDirectory: base, pythonExecutable: path.join(root, 'python-inexistente') });
   await assert.rejects(motor.indexFolder(scope.id), { code: 'SAFE_SCAN_UNAVAILABLE' });
-  await assert.rejects(fs.stat(filename), { code: 'ENOENT' });
+  assert.equal(await published(), null);
 });

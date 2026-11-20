@@ -136,12 +136,16 @@ test('índices antiguos se reconcilian y propiedades sin identidad se preservan 
   for (const entry of properties.entries) delete entry.identity;
   await fs.writeFile(propertiesFile, `${JSON.stringify(properties)}\n`);
   const original = await fs.readFile(propertiesFile, 'utf8');
+  // Índice JSON v2 heredado (sin identidades): r3 lo lee y lo migra a catalog.sqlite.
   const indexFile = path.join(base, `folder-index-${folderId}.json`);
-  const index = JSON.parse(await fs.readFile(indexFile, 'utf8'));
-  index.version = 2;
-  for (const entry of index.entries) delete entry.identity;
+  const current = await session.motor.readFolderIndex(folderId);
+  const index = { format: 'mind-folder-index', version: 2, ...current,
+    entries: current.entries.map(({ identity, ...entry }) => entry) };
   await fs.writeFile(indexFile, `${JSON.stringify(index)}\n`);
-  assert.equal((await session.motor.readFolderIndex(folderId)).entries[0].identity, undefined);
+  const migrated = await session.motor.readFolderIndex(folderId);
+  assert.ok(migrated.entries.length > 0);
+  assert.ok(migrated.entries.every((entry) => entry.identity === null), 'sin identidad tras migrar');
+  await assert.rejects(fs.access(indexFile), { code: 'ENOENT' });
   await assert.rejects(session.motor.setProperties(folderId, 'notas.txt', { set: { nuevo: true } }), { code: 'ENTRY_IDENTITY_UNAVAILABLE' });
   await session.reindex(folderId);
   assert.deepEqual((await call('propiedades', { ruta: 'notas.txt' })).data.propiedades, {});

@@ -7,6 +7,7 @@ import { openMotor, textVersion } from '../src/motor.js';
 import { createFolderRegistry } from '../src/folders.js';
 import { createFolderIndexer } from '../src/indexer.js';
 import { readBaseContents } from './helpers/base-content.js';
+import { catalogFile, catalogScope, removeCatalog } from './helpers/catalog.js';
 
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 const development = path.dirname(motorDirectory);
@@ -27,7 +28,9 @@ async function fixture(t, { index = true } = {}) {
   const motor = await openMotor({ baseDirectory: base });
   const scope = await motor.authorizeFolder(folder);
   if (index) await motor.indexFolder(scope.id);
-  return { root, base, folder, motor, scope, filename: path.join(base, `folder-index-${scope.id}.json`) };
+  return { root, base, folder, motor, scope, filename: path.join(base, `folder-index-${scope.id}.json`),
+    // Estado publicado del índice en catalog.sqlite.
+    published: () => catalogScope(base, scope.id) };
 }
 
 async function read(motor, scope, relativePath) {
@@ -87,15 +90,15 @@ test('lectura → versión → modificación autorizada → búsqueda → nueva 
 });
 
 test('VERSION_CONFLICT explícito: un cambio ajeno no se sobrescribe ni toca el índice', async (t) => {
-  const { folder, motor, scope, filename } = await fixture(t);
+  const { folder, motor, scope, filename, published } = await fixture(t);
   const seen = await read(motor, scope, 'Proyectos/Acta.txt');
   // Otro programa guarda el archivo después de que el agente lo leyera.
   await fs.writeFile(path.join(folder, 'Proyectos', 'Acta.txt'), 'Cambio ajeno del usuario.\n');
-  const indexBefore = await fs.readFile(filename, 'utf8');
+  const indexBefore = await published();
   await assert.rejects(modify(motor, scope, 'Proyectos/Acta.txt', textVersion(seen), `${seen}añadido\n`),
     { code: 'VERSION_CONFLICT' });
   assert.equal(await fs.readFile(path.join(folder, 'Proyectos', 'Acta.txt'), 'utf8'), 'Cambio ajeno del usuario.\n');
-  assert.equal(await fs.readFile(filename, 'utf8'), indexBefore);
+  assert.equal(await published(), indexBefore);
 
   // Releer y reintentar sobre la versión actual sí publica.
   const current = await read(motor, scope, 'Proyectos/Acta.txt');
@@ -152,9 +155,10 @@ test('conceder y retirar siguen en el anfitrión; lectura, creación y modificac
 });
 
 test('sin índice vigente la modificación no inventa uno; la reconciliación lo incorpora', async (t) => {
-  const { motor, scope, filename } = await fixture(t, { index: false });
+  const { motor, scope, filename, published } = await fixture(t, { index: false });
   const { result } = await modify(motor, scope, 'Proyectos/Acta.txt', textVersion('Acta ficticia inicial.\n'), 'Nueva acta\n');
   assert.deepEqual(result.index, { status: 'not-indexed', generation: null, code: null });
+  assert.equal(await published(), null);
   await assert.rejects(fs.access(filename));
   await motor.indexFolder(scope.id);
   const [entry] = (await motor.searchFiles({ folderIds: [scope.id], query: 'acta' })).results;
@@ -162,20 +166,20 @@ test('sin índice vigente la modificación no inventa uno; la reconciliación lo
 });
 
 test('un índice que no conocía el archivo no se corrige a ciegas: pide reconciliación', async (t) => {
-  const { folder, motor, scope, filename } = await fixture(t);
+  const { folder, motor, scope, filename, published } = await fixture(t);
   // Archivo creado fuera de Mind después del último recorrido.
   await fs.writeFile(path.join(folder, 'externo.txt'), 'Nota ficticia externa\n');
-  const before = await fs.readFile(filename, 'utf8');
+  const before = await published();
   const { result } = await modify(motor, scope, 'externo.txt', textVersion('Nota ficticia externa\n'), 'Editada\n');
   assert.deepEqual(result.index, { status: 'needs-reconciliation', generation: 1, code: 'INDEX_ENTRY_MISSING' });
-  assert.equal(await fs.readFile(filename, 'utf8'), before, 'El índice queda intacto');
+  assert.equal(await published(), before, 'El índice queda intacto');
   assert.equal(await fs.readFile(path.join(folder, 'externo.txt'), 'utf8'), 'Editada\n');
   const reconciled = await motor.indexFolder(scope.id);
   assert.deepEqual(reconciled.changes, { added: ['externo.txt'], modified: [], removed: [] });
 });
 
 test('un fallo al actualizar el índice no anula la modificación ya publicada', async (t) => {
-  const { folder, motor, scope, filename } = await fixture(t);
+  const { folder, motor, scope, filename, published } = await fixture(t);
   await fs.writeFile(filename, '{dañado');
   const { result } = await modify(motor, scope, 'Proyectos/Acta.txt', textVersion('Acta ficticia inicial.\n'), 'Tras fallo\n');
   assert.deepEqual(result.index, { status: 'needs-reconciliation', generation: null, code: 'RECORD_CORRUPT' });
@@ -183,18 +187,28 @@ test('un fallo al actualizar el índice no anula la modificación ya publicada',
   assert.equal(await fs.readFile(filename, 'utf8'), '{dañado');
 });
 
+test('un catálogo dañado tampoco anula la modificación ya publicada ni se repara', async (t) => {
+  const { base, folder, motor, scope } = await fixture(t);
+  await removeCatalog(base);
+  await fs.writeFile(catalogFile(base), '{dañado');
+  const { result } = await modify(motor, scope, 'Proyectos/Acta.txt', textVersion('Acta ficticia inicial.\n'), 'Tras fallo\n');
+  assert.deepEqual(result.index, { status: 'needs-reconciliation', generation: null, code: 'INDEX_CORRUPT' });
+  assert.equal(await fs.readFile(path.join(folder, 'Proyectos', 'Acta.txt'), 'utf8'), 'Tras fallo\n');
+  assert.equal(await fs.readFile(catalogFile(base), 'utf8'), '{dañado');
+});
+
 test('el indexador reconoce una entrada ya vigente y no sustituye otro tipo con ese nombre', async (t) => {
-  const { motor, scope, filename } = await fixture(t);
+  const { motor, scope, filename, published } = await fixture(t);
   const { result } = await modify(motor, scope, 'Proyectos/Acta.txt', textVersion('Acta ficticia inicial.\n'), 'Otra acta\n');
   assert.deepEqual(result.index, { status: 'updated', generation: 2, code: null });
   // Mismo mecanismo y cola que usa openMotor, con el resolutor del registro.
   const { loadAuthorizedFolder } = createFolderRegistry(motor.baseDirectory, await fs.realpath(motorDirectory));
   const indexer = createFolderIndexer({ baseDirectory: motor.baseDirectory, resolveScope: loadAuthorizedFolder });
   assert.deepEqual(await indexer.recordModifiedFile(scope.id, result.indexEntry), { status: 'current', generation: 2, code: null });
-  const before = await fs.readFile(filename, 'utf8');
+  const before = await published();
   assert.deepEqual(await indexer.recordModifiedFile(scope.id, { ...result.indexEntry, path: 'Proyectos' }),
     { status: 'needs-reconciliation', generation: 2, code: 'INDEX_ENTRY_CONFLICT' });
   assert.deepEqual(await indexer.recordModifiedFile(scope.id, { ...result.indexEntry, type: 'directory' }),
     { status: 'needs-reconciliation', generation: null, code: 'INVALID_MODIFIED_ENTRY' });
-  assert.equal(await fs.readFile(filename, 'utf8'), before);
+  assert.equal(await published(), before);
 });
