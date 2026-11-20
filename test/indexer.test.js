@@ -7,7 +7,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openMotor, MotorError } from '../src/motor.js';
 import { createFolderIndexer } from '../src/indexer.js';
 import { mergeScan } from '../src/index-scan.js';
-import { INDEX_CACHE_RACY_MS } from '../src/index-store.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   alterCatalog, catalogBytes, catalogFile, catalogScope, catalogScopeIds, legacyIndexFiles, removeCatalog,
@@ -426,12 +425,16 @@ test('un catálogo dañado falla de forma explícita al abrirlo y no se repara',
 
 // La caché en memoria se liga también a la identidad física de catalog.sqlite (y su
 // WAL): un daño en las filas que no toque generation/revision/updated_at se detecta
-// igual en una instancia abierta, que no lo sobrescribe al reconciliar.
+// igual en una instancia abierta, que no lo sobrescribe al reconciliar. Como con
+// folder-index-<id>.json, la identidad depende de la fecha del archivo: el daño se
+// hace pasado un instante de la última escritura (dentro del mismo intervalo de
+// fecha y con el mismo tamaño no se distinguiría).
 test('una instancia abierta detecta el daño del catálogo y no lo sobrescribe', async (t) => {
   const { base, scope, indexer } = await fixture(t);
   await indexer.indexFolder(scope.id);
   const first = (await indexer.readFolderIndex(scope.id)).entries[0].path;
   for (const [sql, ...params] of catalogDamages(scope.id, first)) {
+    await delay(100);
     await alterCatalog(base, sql, ...params);
     const damaged = await catalogScope(base, scope.id);
     await assert.rejects(indexer.readFolderIndex(scope.id), corrupt, sql);
@@ -445,17 +448,13 @@ test('una instancia abierta detecta el daño del catálogo y no lo sobrescribe',
 test('mientras el catálogo no cambia, la instancia reutiliza el índice en memoria', async (t) => {
   const { scope, indexer } = await fixture(t);
   await indexer.indexFolder(scope.id);
-  // Pasado el margen de fechas poco fiables, la caché se vuelve a usar sin releer.
-  await delay(INDEX_CACHE_RACY_MS + 100);
   const first = await indexer.readFolderIndex(scope.id);
   assert.equal(await indexer.readFolderIndex(scope.id), first);
   await indexer.indexFolder(scope.id);
   const next = await indexer.readFolderIndex(scope.id);
   assert.notEqual(next, first);
   assert.equal(next.generation, 2);
-  await delay(INDEX_CACHE_RACY_MS + 100);
-  const settled = await indexer.readFolderIndex(scope.id);
-  assert.equal(await indexer.readFolderIndex(scope.id), settled);
+  assert.equal(await indexer.readFolderIndex(scope.id), next);
 });
 
 test('una lista de incidencias ilegible en el catálogo se informa como INDEX_CORRUPT', async (t) => {

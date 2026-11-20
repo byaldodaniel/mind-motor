@@ -98,13 +98,6 @@ function validRecord(data, scopeId) {
 /** Entradas totales que se conservan en memoria por instancia (LRU por carpeta). */
 export const INDEX_CACHE_MAX_ENTRIES = 600_000;
 export const INDEX_CACHE_MAX_BYTES = 128 * 1024 ** 2;
-/**
- * Margen de fechas de archivo poco fiables. Una escritura ajena dentro del mismo
- * intervalo del reloj de archivos (milisegundos en NTFS, hasta 2 s en FAT) puede
- * dejar la misma identidad física: lo guardado en caché tan cerca de la última
- * escritura se vuelve a validar al leerlo, como hace Git con las fechas «racy».
- */
-export const INDEX_CACHE_RACY_MS = 2000;
 // Solo para medir el comportamiento sin caché en las comparativas.
 const CACHE_ENABLED = process.env.MIND_SIN_CACHE_INDICE !== '1';
 
@@ -124,8 +117,7 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
     const bytes = index.entries.reduce((sum, entry) => sum + 256 + entry.path.length * 2, 512)
       + index.issues.reduce((sum, issue) => sum + 128 + issue.path.length * 2 + issue.code.length * 2, 0);
     if (!CACHE_ENABLED || bytes > maxBytes || os.freemem() < os.totalmem() * 0.08) { cache.clear(); return; }
-    const racy = Date.now() - physical.newestMs < INDEX_CACHE_RACY_MS;
-    cache.set(scopeId, { identity: `${physical.key}|${key}`, racy, index, size: index.entries.length, bytes });
+    cache.set(scopeId, { identity: `${physical}|${key}`, index, size: index.entries.length, bytes });
     let total = [...cache.values()].reduce((sum, item) => sum + item.size, 0);
     let totalBytes = [...cache.values()].reduce((sum, item) => sum + item.bytes, 0);
     for (const [id, item] of cache) {
@@ -138,18 +130,18 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
   /**
    * Identidad física del catálogo y de su diario WAL. Cualquier escritura, también
    * una ajena al Motor, la cambia: la caché solo se reutiliza si el archivo no cambió
-   * (como hacía la caché de folder-index-<id>.json con su stat).
+   * (como hacía la caché de folder-index-<id>.json con su stat). Igual que entonces, una
+   * escritura ajena dentro del mismo intervalo de la fecha de archivo que la última
+   * escritura, con el mismo tamaño, no se distingue.
    */
   async function catalogIdentity() {
     const parts = [];
-    let newestMs = 0;
     for (const suffix of ['', '-wal']) {
       const info = await fs.lstat(path.join(baseDirectory, `${CATALOG_FILENAME}${suffix}`), { bigint: true })
         .catch((error) => (error.code === 'ENOENT' ? null : Promise.reject(error)));
       parts.push(info ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` : '-');
-      if (info) newestMs = Math.max(newestMs, Number(info.mtimeNs / 1_000_000n), Number(info.ctimeNs / 1_000_000n));
     }
-    return { key: parts.join('|'), newestMs };
+    return parts.join('|');
   }
   function filename(scopeId) {
     validateScopeId(scopeId);
@@ -201,9 +193,9 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
         cache.delete(scopeId);
         return null;
       }
-      const metaKey = `${physical.key}|${meta.generation}:${meta.revision}:${meta.updatedAt}`;
+      const metaKey = `${physical}|${meta.generation}:${meta.revision}:${meta.updatedAt}`;
       const cached = !CACHE_ENABLED ? null : cache.get(scopeId);
-      if (cached && !cached.racy && cached.identity === metaKey) {
+      if (cached && cached.identity === metaKey) {
         cache.delete(scopeId);
         cache.set(scopeId, cached);
         return cached.index;
@@ -220,7 +212,7 @@ export function createIndexStore(baseDirectory, { maxBytes = INDEX_CACHE_MAX_BYT
       }
       const frozen = deepFreeze(index);
       // Solo se recuerda si el catálogo no cambió mientras se leía.
-      if ((await catalogIdentity()).key === physical.key) {
+      if ((await catalogIdentity()) === physical) {
         remember(scopeId, physical, `${index.generation}:${revision}:${index.updatedAt}`, frozen);
       }
       return frozen;
