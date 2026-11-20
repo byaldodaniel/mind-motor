@@ -184,34 +184,15 @@ impl Recipe {
     }
 
     pub(crate) async fn build(&self, copy: &Path) -> Result<BuildOutput, BuildError> {
-        if copy != self.copy {
-            return Err(BuildError::failed("La copia cambió después de revisar la receta."));
-        }
         let output = BuildOutput::create()?;
         let temp = output.owned.join("temp");
-        let mut command = Command::new(&self.command.programa);
-        command
-            .current_dir(copy)
-            .args(&self.command.argumentos)
-            .env_clear()
-            .env("MIND_SALIDA", output.path())
-            .env("TEMP", &temp)
-            .env("TMP", &temp)
-            .env("TMPDIR", &temp)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        for name in ["PATH", "SystemRoot", "WINDIR"] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
+        let mut command = self.command(copy, &temp).map_err(BuildError::failed)?;
+        command.env("MIND_SALIDA", output.path());
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
         let mut child = command.spawn()
             .map_err(|error| BuildError::failed(format!("No se pudo iniciar la compilación: {error}")))?;
-        let deadline = sleep(Duration::from_millis(self.command.plazo_ms));
+        let deadline = sleep(self.deadline());
         tokio::select! {
             biased;
             interrupt = tokio::signal::ctrl_c() => {
@@ -235,6 +216,34 @@ impl Recipe {
         }
         output.validate()?;
         Ok(output)
+    }
+
+    pub(crate) fn deadline(&self) -> Duration {
+        Duration::from_millis(self.command.plazo_ms)
+    }
+
+    pub(crate) fn command(&self, copy: &Path, temp: &Path) -> Result<Command, String> {
+        if copy != self.copy {
+            return Err("La copia cambió después de revisar la receta.".into());
+        }
+        let mut command = Command::new(&self.command.programa);
+        command
+            .current_dir(copy)
+            .args(&self.command.argumentos)
+            .env_clear()
+            .env("TEMP", &temp)
+            .env("TMP", &temp)
+            .env("TMPDIR", &temp)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        for name in ["PATH", "SystemRoot", "WINDIR"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        Ok(command)
     }
 }
 

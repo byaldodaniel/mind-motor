@@ -29,7 +29,7 @@ const MAX_PATH: usize = 1024;
 const MAX_DIRECTORIES: usize = 256;
 
 #[derive(Serialize, PartialEq, Eq)]
-struct Git {
+pub(crate) struct Git {
     rama: Option<String>,
     revision: Option<String>,
     cambios: bool,
@@ -54,18 +54,18 @@ struct ViewError {
     message: String,
 }
 
-struct Host {
-    client: Client,
+pub(crate) struct Host {
+    pub(crate) client: Client,
     port: u16,
     token: String,
 }
 
 impl Host {
-    fn url(&self, route: &str) -> String {
+    pub(crate) fn url(&self, route: &str) -> String {
         format!("http://127.0.0.1:{}{route}", self.port)
     }
 
-    async fn connect(base: &Path) -> Result<Self, String> {
+    pub(crate) async fn connect(base: &Path) -> Result<Self, String> {
         let identity = base_id(base).ok_or("La Base indicada no está disponible.")?;
         let record = regular_json(&base.join("anfitrion.json"))
             .ok_or("Primero inicia el anfitrión con vistas habilitadas.")?;
@@ -177,7 +177,7 @@ fn verified_proof(token: &str, nonce: &str, base: &str, port: u16, health: &Valu
     mac.verify_slice(&bytes).is_ok()
 }
 
-async fn small_json(response: reqwest::Response) -> Result<Value, String> {
+pub(crate) async fn small_json(response: reqwest::Response) -> Result<Value, String> {
     let mut chunks = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = chunks.next().await {
@@ -202,7 +202,7 @@ pub(crate) fn is_link(metadata: &Metadata) -> bool {
     }
 }
 
-fn path_option(value: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn path_option(value: Option<&str>) -> Result<PathBuf, String> {
     let path = PathBuf::from(value.ok_or(USAGE)?);
     if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
         return Err("Indica una ruta absoluta sin componentes «..».".into());
@@ -210,7 +210,7 @@ fn path_option(value: Option<&str>) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn directory(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn directory(path: &Path) -> Result<PathBuf, String> {
     let metadata = fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if !metadata.is_dir() || is_link(&metadata) {
         return Err(format!("{} debe ser un directorio real.", path.display()));
@@ -356,7 +356,7 @@ pub(crate) fn open_asset(_: &Path, _: &str) -> io::Result<File> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "Apertura segura no disponible"))
 }
 
-async fn git_info(copy: &Path) -> Result<Option<Git>, String> {
+pub(crate) async fn git_info(copy: &Path) -> Result<Option<Git>, String> {
     for ancestor in copy.ancestors() {
         match fs::symlink_metadata(ancestor.join(".git")) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -495,7 +495,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn view_id(value: Option<&str>) -> Result<Option<Uuid>, String> {
+pub(crate) fn view_id(value: Option<&str>) -> Result<Option<Uuid>, String> {
     value.map(Uuid::parse_str).transpose().map_err(|_| "Indica un ID válido de vista.".into())
 }
 

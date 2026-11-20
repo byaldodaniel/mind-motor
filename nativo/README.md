@@ -11,6 +11,7 @@ Modos del ejecutable Rust:
 - `scan`: enumeración segura de un directorio por petición JSONL.
 - `anfitrion`: entrada HTTP privada al Motor Central y alojamiento local opcional de vistas.
 - `vista`: abre, consulta, reemplaza o cierra una vista estática.
+- `servicio`: abre, consulta o cierra una aplicación local con su archivo SQLite.
 
 ## Contenido
 
@@ -115,6 +116,40 @@ Prueba con Node y Python y una Base ficticia, usando el binario Rust y
 
 ```powershell
 node --test nativo/test/compilacion-vista.test.mjs
+```
+
+## Aplicaciones locales y SQLite (Etapa 4)
+
+En una Base ficticia, inicia el anfitrión con `--puerto-vistas 0 --servicios-prueba`.
+Desde la consola local, revisa la receta con `vista receta`, luego utiliza su valor
+`autorizacion` para abrir el servicio.
+
+```text
+servicio abrir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]
+servicio estado --base ABS --id UUID
+servicio cerrar --base ABS --id UUID
+```
+
+- **Base de datos.** `MIND_SQLITE` indica el archivo persistente asignado al proyecto
+  y a esa copia. La aplicación lo abre con su biblioteca SQLite. Durante un reemplazo
+  se comparte el archivo, así que ambas versiones deben ser compatibles con su esquema.
+- **Arranque.** Escucha en `MIND_HOST` (`127.0.0.1`) y elige un puerto libre con
+  `MIND_PORT` (`0`). Escribe `{"puerto": N}` en `MIND_LISTO` y responde a `GET /health`
+  con éxito y la cabecera `X-Mind-Listo` igual a `MIND_LISTO_TOKEN`. La comprobación de
+  salud es de solo lectura.
+- **Apertura.** El enlace de Mind lleva a la aplicación que está lista. Con un ID
+  existente, solo cambia de destino tras comprobar la versión nueva. Vuelve a abrir
+  el enlace de Mind para llegar al nuevo destino desde una pestaña anterior.
+- **Cierre.** `servicio estado` muestra la salud y, en Windows, el número de procesos
+  y su memoria residente. `servicio cerrar` apaga el servicio y conserva el archivo
+  SQLite. La administración de servicios usa una credencial local de la Base de prueba.
+
+La [prueba de servicios](test/servicios-sqlite.test.mjs) incluye una aplicación
+ficticia con SQLite y un proceso hijo. Ejecútala con el binario Rust en
+`MIND_NATIVE_EXE`.
+
+```powershell
+node --test nativo/test/servicios-sqlite.test.mjs
 ```
 
 ## Compilación reproducible

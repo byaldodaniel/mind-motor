@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
-use crate::{bridge::{base_id, regular_json}, views::Views, MAX_MESSAGE};
+use crate::{bridge::{base_id, regular_json}, services::Services, views::Views, MAX_MESSAGE};
 
 pub(crate) type Body = BoxBody<Bytes, std::io::Error>;
 
@@ -30,6 +30,7 @@ struct Host {
     motor: Mutex<Option<Motor>>,
     started: String,
     views: Option<Arc<Views>>,
+    services: Option<Arc<Services>>,
 }
 
 pub(crate) fn full(status: StatusCode, value: Value) -> Response<Body> {
@@ -39,7 +40,7 @@ pub(crate) fn full(status: StatusCode, value: Value) -> Response<Body> {
 }
 
 /// Igualdad en tiempo constante para el token.
-fn same(a: &[u8], b: &[u8]) -> bool { a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 }
+pub(crate) fn same(a: &[u8], b: &[u8]) -> bool { a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 }
 
 /// Un navegador en el puerto de vistas nunca comparte origen con la API privada.
 fn allowed_origin(req: &Request<Incoming>, port: u16) -> bool {
@@ -94,6 +95,12 @@ impl Host {
         let path = req.uri().path().to_owned();
         if path == "/health" && req.method() == Method::GET {
             return Ok(self.health(req.uri().query()).await);
+        }
+        if path == "/servicios" || path.starts_with("/servicios/") {
+            return Ok(match &self.services {
+                Some(services) => services.control(req).await,
+                None => full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"})),
+            });
         }
         let control = self.views.as_ref().filter(|_| path == "/vistas" || path.starts_with("/vistas/"));
         if path != "/mcp" && path != "/rpc" && control.is_none() {
@@ -198,6 +205,12 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .build().map_err(|e| e.to_string())?;
     let views = preview.as_ref().map(|(_, port)| Arc::new(Views::new(*port)));
+    let services = if args.iter().any(|arg| arg == "--servicios-prueba") {
+        let (_, public_port) = preview.as_ref().ok_or("--servicios-prueba requiere --puerto-vistas")?;
+        Some(Arc::new(Services::new(&base, port, *public_port, client.clone())?))
+    } else {
+        None
+    };
     let mut record = json!({
         "version": 1, "port": port, "pid": std::process::id(), "baseId": base_identity,
         "url": format!("http://127.0.0.1:{port}/mcp"),
@@ -206,17 +219,26 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         record["puertoVistas"] = json!(port);
     }
     let host = Arc::new(Host {
-        base: base.clone(), base_id: base_identity, port, client, motor: Mutex::new(None), started, views: views.clone(),
+        base: base.clone(), base_id: base_identity, port, client, motor: Mutex::new(None), started, views: views.clone(), services: services.clone(),
     });
     let path = base.join("anfitrion.json");
     let temporary = base.join(format!(".anfitrion-{}.tmp", Uuid::new_v4().simple()));
     std::fs::write(&temporary, serde_json::to_vec(&record).unwrap_or_default()).and_then(|_| std::fs::rename(&temporary, &path)).map_err(|e| format!("No se pudo registrar el anfitrión: {e}"))?;
     println!("{record}");
     if let (Some((listener, _)), Some(views)) = (preview, views) {
-        tokio::spawn(serve_views(listener, views));
+        tokio::spawn(serve_views(listener, views, services));
     }
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
-        let (stream, _) = match listener.accept().await { Ok(s) => s, Err(_) => continue };
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            signal = &mut shutdown, if host.services.is_some() => {
+                signal.map_err(|error| error.to_string())?;
+                return host.services.as_ref().expect("services enabled").shutdown().await;
+            }
+        };
+        let (stream, _) = match accepted { Ok(stream) => stream, Err(_) => continue };
         let host = host.clone();
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |req| host.clone().handle(req));
@@ -225,14 +247,35 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-async fn serve_views(listener: TcpListener, views: Arc<Views>) {
+#[cfg(unix)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        interrupt = tokio::signal::ctrl_c() => interrupt,
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
+async fn serve_views(listener: TcpListener, views: Arc<Views>, services: Option<Arc<Services>>) {
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
         let views = views.clone();
+        let services = services.clone();
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |req| {
                 let views = views.clone();
-                async move { Ok::<_, Infallible>(views.serve(req).await) }
+                let services = services.clone();
+                async move {
+                    if let Some(services) = services.filter(|_| req.uri().path().starts_with("/app/")) {
+                        return Ok::<_, Infallible>(services.open_link(req).await);
+                    }
+                    Ok(views.serve(req).await)
+                }
             });
             let _ = hyper::server::conn::http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service).await;

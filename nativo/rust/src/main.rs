@@ -2,6 +2,9 @@ mod bridge;
 mod build_recipe;
 mod host;
 mod scan;
+mod service_cli;
+mod service_process;
+mod services;
 mod view_cli;
 mod views;
 use std::io::{self, BufRead, Write};
@@ -17,8 +20,10 @@ fn main() {
             .map_err(|e|e.to_string()).and_then(|rt|rt.block_on(host::run(&args[1..]))),
         Some("vista") => tokio::runtime::Builder::new_current_thread().enable_all().build()
             .map_err(|e| e.to_string()).and_then(|rt| rt.block_on(view_cli::run(&args[1..]))),
+        Some("servicio") => tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .map_err(|e| e.to_string()).and_then(|rt| rt.block_on(service_cli::run(&args[1..]))),
         Some("version") => {println!("mind-native-rust-pilot 0.1.0"); Ok(())},
-        _ => Err("usage: mind-native-rust-pilot bridge --base ABS --cwd ABS --paths JSON --launch-command ABS [--launch-arg ARG] | scan | anfitrion --base ABS [--port N] [--puerto-vistas N] | vista abrir|consultar|cerrar".into())
+        _ => Err("usage: mind-native-rust-pilot bridge --base ABS --cwd ABS --paths JSON --launch-command ABS [--launch-arg ARG] | scan | anfitrion --base ABS [--port N] [--puerto-vistas N] [--servicios-prueba] | vista | servicio".into())
     };
     if let Err(error) = result {eprintln!("{error}");std::process::exit(2)}
 }
