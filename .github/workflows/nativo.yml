@@ -1,0 +1,76 @@
+name: Ejecutable nativo (seis destinos)
+# Compila nativo/rust para los seis destinos de Mind y ejecuta sus pruebas
+# donde el ejecutor corre esa plataforma. Cada destino declara por separado
+# «compilado» y «ejecutado»: compilar no acredita que funcione.
+on:
+  workflow_dispatch:
+  push:
+    paths: ['nativo/**', '.github/workflows/nativo.yml', 'src/**']
+  pull_request:
+    paths: ['nativo/**', '.github/workflows/nativo.yml', 'src/**']
+permissions:
+  contents: read
+jobs:
+  nativo:
+    name: ${{ matrix.destino }}
+    runs-on: ${{ matrix.ejecutor }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { destino: win32-x64,    ejecutor: windows-latest, target: x86_64-pc-windows-msvc,     ejecutar: true,  exe: mind-native.exe }
+          - { destino: win32-arm64,  ejecutor: windows-latest, target: aarch64-pc-windows-msvc,    ejecutar: false, exe: mind-native.exe }
+          - { destino: darwin-arm64, ejecutor: macos-14,       target: aarch64-apple-darwin,       ejecutar: true,  exe: mind-native }
+          - { destino: darwin-x64,   ejecutor: macos-14,       target: x86_64-apple-darwin,        ejecutar: false, exe: mind-native }
+          - { destino: linux-x64,    ejecutor: ubuntu-24.04,   target: x86_64-unknown-linux-musl,  ejecutar: true,  exe: mind-native }
+          - { destino: linux-arm64,  ejecutor: ubuntu-24.04,   target: aarch64-unknown-linux-musl, ejecutar: false, exe: mind-native }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+          rustc --version
+      - name: Enlazador autocontenido para Linux musl
+        if: contains(matrix.target, 'linux-musl')
+        shell: bash
+        run: |
+          LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+          T="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          echo "CARGO_TARGET_${T}_LINKER=$LLD" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${T}_RUSTFLAGS=-C linker-flavor=ld.lld -C link-self-contained=yes" >> "$GITHUB_ENV"
+      - name: Compilar
+        shell: bash
+        run: cargo build --release --locked --manifest-path nativo/rust/Cargo.toml --target ${{ matrix.target }}
+      - name: Registrar binario
+        shell: bash
+        run: |
+          src="nativo/rust/target/${{ matrix.target }}/release/mind-native-rust-pilot"
+          [ -f "$src.exe" ] && src="$src.exe"
+          mkdir -p salida/${{ matrix.destino }}
+          cp "$src" salida/${{ matrix.destino }}/${{ matrix.exe }}
+          node -e "const fs=require('fs'),c=require('crypto');const f=process.argv[1];const b=fs.readFileSync(f);fs.writeFileSync('salida/${{ matrix.destino }}/resultado.json',JSON.stringify({destino:'${{ matrix.destino }}',target:'${{ matrix.target }}',compilado:true,ejecutado:false,bytes:b.length,sha256:c.createHash('sha256').update(b).digest('hex')},null,2))" "salida/${{ matrix.destino }}/${{ matrix.exe }}"
+      - uses: actions/setup-node@v4
+        if: matrix.ejecutar
+        with:
+          node-version: 24.22.1
+      - uses: actions/setup-python@v5
+        if: matrix.ejecutar
+        with:
+          python-version: '3.12'
+      - name: Probar contrato r3 y ejecutable
+        if: matrix.ejecutar
+        shell: bash
+        env:
+          MIND_AGENT_STARTUP: '0'
+        run: |
+          export MIND_NATIVE_EXE="$PWD/salida/${{ matrix.destino }}/${{ matrix.exe }}"
+          node --test --test-concurrency=1 nativo/test/contrato-r3.test.mjs nativo/test/bridge-contract.test.mjs nativo/test/bridge-boundary.test.mjs nativo/test/invalid-mcp.test.mjs nativo/test/scan.test.mjs
+          node -e "const f='salida/${{ matrix.destino }}/resultado.json';const j=JSON.parse(require('fs').readFileSync(f));j.ejecutado=true;require('fs').writeFileSync(f,JSON.stringify(j,null,2))"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nativo-${{ matrix.destino }}
+          path: salida/${{ matrix.destino }}
+          if-no-files-found: warn

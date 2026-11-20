@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mind:connector:health:v1",
+  "title": "Current successful /health compatible subset",
+  "type": "object",
+  "required": [
+    "ok",
+    "baseId",
+    "port"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "baseId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "proof": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "pid": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "motorVersion": {
+      "type": "string"
+    },
+    "packageRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "startedAt": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "activeRequests": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessions": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": true,
+  "$comment": "Require proof matching fresh nonce and expected baseId/port BEFORE Bearer. baseId is connector path hash, not durable Base UUID. Schema alone does not authenticate."
+}

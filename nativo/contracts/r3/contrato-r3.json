@@ -1,0 +1,679 @@
+{
+  "formato": "mind-contrato",
+  "version": 1,
+  "origen": {
+    "motorVersion": "1.0.4",
+    "nota": "Capturado del Motor Central de src/ sobre una Base ficticia."
+  },
+  "base": {
+    "formatVersion": 3,
+    "catalogo": "catalog.sqlite",
+    "esquemaCatalogo": [
+      {
+        "type": "index",
+        "name": "idx_document_marks_tag_status",
+        "tabla": "document_marks",
+        "sql": "CREATE INDEX idx_document_marks_tag_status ON document_marks(tag, status, scope_id, relative_path)"
+      },
+      {
+        "type": "table",
+        "name": "document_marks",
+        "tabla": "document_marks",
+        "sql": "CREATE TABLE document_marks ( scope_id TEXT NOT NULL, relative_path TEXT NOT NULL, block_index INTEGER NOT NULL, heading TEXT, line_number INTEGER NOT NULL, block_type TEXT NOT NULL, tag TEXT NOT NULL, raw_tag TEXT NOT NULL, status TEXT NOT NULL, excerpt TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (scope_id, relative_path, block_index, tag) )"
+      },
+      {
+        "type": "table",
+        "name": "folder_entries",
+        "tabla": "folder_entries",
+        "sql": "CREATE TABLE folder_entries ( scope_id TEXT NOT NULL, path TEXT NOT NULL, type TEXT NOT NULL, size INTEGER, modified_at TEXT, changed_at TEXT, created_at TEXT, identity TEXT, state TEXT NOT NULL, reason TEXT, PRIMARY KEY (scope_id, path) )"
+      },
+      {
+        "type": "table",
+        "name": "folder_scopes",
+        "tabla": "folder_scopes",
+        "sql": "CREATE TABLE folder_scopes ( scope_id TEXT PRIMARY KEY, root TEXT NOT NULL, authorization_generation TEXT, generation INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, issues_json TEXT NOT NULL DEFAULT '[]', revision TEXT NOT NULL DEFAULT '' )"
+      },
+      {
+        "type": "table",
+        "name": "scanned_files",
+        "tabla": "scanned_files",
+        "sql": "CREATE TABLE scanned_files ( scope_id TEXT NOT NULL, relative_path TEXT NOT NULL, fingerprint TEXT NOT NULL, scanned_at TEXT NOT NULL, PRIMARY KEY (scope_id, relative_path) )"
+      },
+      {
+        "type": "table",
+        "name": "tag_aliases",
+        "tabla": "tag_aliases",
+        "sql": "CREATE TABLE tag_aliases ( alias TEXT PRIMARY KEY, canonical_tag TEXT NOT NULL, user_defined INTEGER NOT NULL DEFAULT 0 )"
+      }
+    ]
+  },
+  "conector": {
+    "baseId": "string",
+    "motorVersion": "string",
+    "pid": "number",
+    "port": "number",
+    "startedAt": "string",
+    "url": "string",
+    "version": "number"
+  },
+  "http": {
+    "health": {
+      "status": 200,
+      "campos": {
+        "activeRequests": "number",
+        "backgroundBusy": "boolean",
+        "baseId": "string",
+        "independence": "string",
+        "lastActivityAt": "number",
+        "launch": "string",
+        "motorVersion": "string",
+        "ok": "boolean",
+        "packageRevision": "number",
+        "pid": "number",
+        "port": "number",
+        "previousEnd": "string",
+        "proof": "string",
+        "queue": "object",
+        "sessions": "number",
+        "startedAt": "string",
+        "state": "string"
+      }
+    },
+    "rpcSinToken": {
+      "status": 401
+    },
+    "rpcPing": {
+      "status": 200,
+      "campos": [
+        "activeRequests",
+        "baseId",
+        "ok",
+        "pid",
+        "port",
+        "sessions",
+        "state"
+      ]
+    },
+    "rpcAccionDesconocida": {
+      "status": 400,
+      "codigo": "UNKNOWN_RPC_ACTION"
+    },
+    "rpcAcciones": [
+      "apagar",
+      "estado",
+      "herramienta",
+      "inicio",
+      "ping",
+      "quietud",
+      "verificar-actualizacion"
+    ]
+  },
+  "mcp": {
+    "versionesProtocolo": [
+      "2025-11-25",
+      "2025-06-18",
+      "2025-03-26",
+      "2024-11-05"
+    ],
+    "versionNegociada": "2025-11-25",
+    "sesionEnCabecera": true,
+    "capacidades": [
+      "tools"
+    ],
+    "instrucciones": {
+      "bytes": 6150,
+      "sha256": "45c7a2357009c193999d023cea8a19a1b79f5fdd78eaa2a9258e0a29efb9e15a"
+    },
+    "herramientas": [
+      {
+        "nombre": "activar_funcion",
+        "esquemaSha256": "280880c43547fd21eaa2a8905cc6449b7c87f77920163021366c5c71cbef9f30",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 176
+      },
+      {
+        "nombre": "actualizacion_aplicar",
+        "esquemaSha256": "13bfa0dde0a636fac9b22750245e62172f324db985028b7758d00af7c4396ca5",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": true
+        },
+        "descripcionBytes": 503
+      },
+      {
+        "nombre": "actualizacion_consultar",
+        "esquemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 282
+      },
+      {
+        "nombre": "actualizacion_posponer",
+        "esquemaSha256": "beb672e180cc87dab9c9d3486b6657de467f39081245744c5254f285c915c502",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 206
+      },
+      {
+        "nombre": "actualizar_indice",
+        "esquemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 104
+      },
+      {
+        "nombre": "agrupar",
+        "esquemaSha256": "46e6dbdf9ccbdb8a6d7d4a2fec01de8e5ffdb3f85b541399c3f2fd17be799796",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 298
+      },
+      {
+        "nombre": "asignar_propiedades",
+        "esquemaSha256": "3f40df78978828c5df9bb5b61077f8e408215b0c31f82873b016f13e4b80c348",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 184
+      },
+      {
+        "nombre": "borrar",
+        "esquemaSha256": "651486402f1fe287df65d639bdae192fdd1e3502a77c554db9557c1222b744f6",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 227
+      },
+      {
+        "nombre": "buscar",
+        "esquemaSha256": "0542fb08d2492ec4ef155d80cc51e71eb535fdd42eafb2cb919f9ce21cec57f7",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 208
+      },
+      {
+        "nombre": "continuidad_actualizar",
+        "esquemaSha256": "335247bbc7929736331f7f0649d3d744eb4ded92fb618b31a7277bc3e00e1ce8",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 102
+      },
+      {
+        "nombre": "continuidad_consultar",
+        "esquemaSha256": "1b9005f34761b9c502d1fb56fe6407d1c722fde6e99273f2966c8a3a9517d453",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 151
+      },
+      {
+        "nombre": "continuidad_exportar",
+        "esquemaSha256": "f9075c4b187e3cd41cd2fa9c4924e9de1940c987e6be6b3e245f70885869001e",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 124
+      },
+      {
+        "nombre": "continuidad_importar",
+        "esquemaSha256": "926618564ee2b68bde015877d2ec006ae5489a77e8a0807734dbbb87268e5bb0",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 128
+      },
+      {
+        "nombre": "continuidad_registrar",
+        "esquemaSha256": "b8ecfa4efd75bea0e60cb7c78c4bcd62745441933b325def8c889830a7f11ea0",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 234
+      },
+      {
+        "nombre": "conversacion_configurar",
+        "esquemaSha256": "67754a08ecb9ab22f5d9cdccf3c5a673b7241fa827768f65c5a57cf2d8cf0880",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 285
+      },
+      {
+        "nombre": "conversacion_guardar",
+        "esquemaSha256": "38a8c7e883fdd044bd6744712d3d702d1560d260764c676fb2c203eccbb76e92",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 274
+      },
+      {
+        "nombre": "conversacion_leer",
+        "esquemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 167
+      },
+      {
+        "nombre": "conversacion_preferencias",
+        "esquemaSha256": "70a69e6fb687862c07793cf5ca6526605e02ce6d68c1ad815e26f8d2ab22ef97",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 208
+      },
+      {
+        "nombre": "conversacion_trasladar",
+        "esquemaSha256": "17e81ada5c57360f85535e74da2ca627dc0a7399c65c9f307e9cee2a109cbcb6",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 403
+      },
+      {
+        "nombre": "conversaciones_buscar",
+        "esquemaSha256": "6974c3ba265994b6d3008bfa4e94d6a7e8b6f28a34c7e6e669c8e431f0889b25",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 403
+      },
+      {
+        "nombre": "conversaciones_preparar",
+        "esquemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 277
+      },
+      {
+        "nombre": "crear",
+        "esquemaSha256": "f2369bf7eca65f5fbe983c9dcbf2673394e45ce714189470bd20ffac190e2574",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 186
+      },
+      {
+        "nombre": "crear_carpeta",
+        "esquemaSha256": "f3a6866b89fe365f844556cee2029dee1dbe4db2523bd416ee777a914cbe2c72",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 127
+      },
+      {
+        "nombre": "crear_funcion",
+        "esquemaSha256": "719f13376e2e10bfef83dbd1147cfa4a863f7dc50faceebb8d43171db5588126",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 190
+      },
+      {
+        "nombre": "crear_indice",
+        "esquemaSha256": "91d631cd94d078726ee4d959069fc1431c63c82312b167c7a9938216da77e03c",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 194
+      },
+      {
+        "nombre": "crear_respaldo",
+        "esquemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 237
+      },
+      {
+        "nombre": "desactivar_funcion",
+        "esquemaSha256": "f6a9e54146e9e84cf92fe867a5ed8897d415778610aadc0a42b0fbb6a4df2416",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 80
+      },
+      {
+        "nombre": "destino_resolver",
+        "esquemaSha256": "f2b6402fb5d4aba8307db68b80d8f9024f79c951f68ad26722c8c760804c7727",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 397
+      },
+      {
+        "nombre": "destinos_configurar",
+        "esquemaSha256": "bd3e7ece320fd67cfeb218a89c54ead3c602b2df907efb1671ebae0fbba94d22",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 281
+      },
+      {
+        "nombre": "destinos_consultar",
+        "esquemaSha256": "02a3d86c4157e3df8d875bded9ca3ba5ddf069cbc9ebf42704f944a79870596f",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 354
+      },
+      {
+        "nombre": "editar",
+        "esquemaSha256": "0081ceca203948cc6e43ccbfd238a30cc9fc5376f30a41f81a1055eb807294b1",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 212
+      },
+      {
+        "nombre": "ejecutar_funcion",
+        "esquemaSha256": "f6a9e54146e9e84cf92fe867a5ed8897d415778610aadc0a42b0fbb6a4df2416",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 121
+      },
+      {
+        "nombre": "eliminados",
+        "esquemaSha256": "0b20733156bd198f934b8751039a345b2879490f7640f7ca9fe9ee96f4127f2b",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 199
+      },
+      {
+        "nombre": "estado",
+        "esquemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 189
+      },
+      {
+        "nombre": "explorar",
+        "esquemaSha256": "1c79ef681f2d41732afc9ad94a68729c67366dc82c6e2e33f20937582b59c110",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 137
+      },
+      {
+        "nombre": "funciones",
+        "esquemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 183
+      },
+      {
+        "nombre": "historial_funcion",
+        "esquemaSha256": "3b1efeb583b85c6f47681337b9709c2423a4a490cdaf58f3de9c14a72c205daf",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 79
+      },
+      {
+        "nombre": "indices_personalizados",
+        "esquemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 133
+      },
+      {
+        "nombre": "leer",
+        "esquemaSha256": "8ff813f1c9dee13e5947d34b929f0a30d0c6f42b16fc0e318d6b33a4b8f5b7c9",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 273
+      },
+      {
+        "nombre": "modificar",
+        "esquemaSha256": "de562ca003d6a3566ff3b46a12a7e7d8b07da24091a476fe503ff16b49a63336",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 198
+      },
+      {
+        "nombre": "modificar_funcion",
+        "esquemaSha256": "719f13376e2e10bfef83dbd1147cfa4a863f7dc50faceebb8d43171db5588126",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 109
+      },
+      {
+        "nombre": "modificar_indice",
+        "esquemaSha256": "08d5f1112366a42e3977b670820b4fb41074f5ca330cb2155f203d13cec99190",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 111
+      },
+      {
+        "nombre": "mover",
+        "esquemaSha256": "7ca1183384a1e4a2d4536e871709ad09daefa44c45581616dd5469f27201ffcc",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 219
+      },
+      {
+        "nombre": "papelera",
+        "esquemaSha256": "83c313a90dd00c61fc545f0cbff4e87331acf06a254ae21f30ccaa54ff1b350c",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 107
+      },
+      {
+        "nombre": "propiedades",
+        "esquemaSha256": "2e7c0ac50bd85755c6da6263e7a95a1b7281f3099b3338ee018c14ba42735355",
+        "anotaciones": {
+          "readOnlyHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 164
+      },
+      {
+        "nombre": "renombrar",
+        "esquemaSha256": "16e54cbe30b589f3044ec8f03cc4403bc2798aa597dfdc0e519be04dac72d2f9",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 111
+      },
+      {
+        "nombre": "restaurar",
+        "esquemaSha256": "fd93a667af1837ece464ca1c0f027bb09bdab73a9152aa250f153fc7fd197422",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 157
+      },
+      {
+        "nombre": "resultado_importar",
+        "esquemaSha256": "e8e6b999eb9cb7c254a6cbf6be84ae9dc5a7ed66f4145b50eecf16b48d0b99ec",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 364
+      },
+      {
+        "nombre": "resultado_registrar",
+        "esquemaSha256": "90710c7e459baa49bc933c85b5dbe83d19956224c034c96d396fd7e75335553b",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 233
+      },
+      {
+        "nombre": "retirar_acceso",
+        "esquemaSha256": "c98aa334a2b1ab70921a17fd88ff3d3eb26c4c5c19ab63aa7e29bcb87450d47e",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 328
+      },
+      {
+        "nombre": "retirar_funcion",
+        "esquemaSha256": "f6a9e54146e9e84cf92fe867a5ed8897d415778610aadc0a42b0fbb6a4df2416",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 94
+      },
+      {
+        "nombre": "retirar_indice",
+        "esquemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 91
+      },
+      {
+        "nombre": "solicitar_acceso",
+        "esquemaSha256": "28f04e0515a99e75611af2972d9703bfcfbe6ba714737f2bc9239405cdfcd655",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 236
+      },
+      {
+        "nombre": "vaciar_papelera",
+        "esquemaSha256": "4352c6f08a004191f034c348b4faa2f3e0996ead723f062dc660182f1e2c1fe9",
+        "anotaciones": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "descripcionBytes": 185
+      }
+    ],
+    "presupuesto": {
+      "herramientas": 54,
+      "catalogoBytes": 44272,
+      "instruccionesBytes": 6150
+    }
+  }
+}

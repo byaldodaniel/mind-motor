@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mind:connector:rpc:v1",
+  "title": "Current internal /rpc application envelope, not MCP JSON-RPC",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/success"
+    },
+    {
+      "$ref": "#/$defs/failure"
+    }
+  ],
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": [
+        "accion"
+      ],
+      "properties": {
+        "accion": {
+          "enum": [
+            "inicio",
+            "estado",
+            "herramienta",
+            "ping",
+            "quietud",
+            "apagar",
+            "verificar-actualizacion"
+          ]
+        },
+        "tool": {
+          "type": "string"
+        },
+        "args": {
+          "type": "object"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "soloSiQuieto": {
+          "type": "boolean"
+        },
+        "soloSiInactivo": {
+          "type": "boolean"
+        },
+        "motivo": {
+          "type": "string",
+          "pattern": "^[a-z-]{1,40}$"
+        }
+      },
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "accion": {
+                "const": "herramienta"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tool"
+            ]
+          }
+        }
+      ]
+    },
+    "success": {
+      "type": "object",
+      "required": [
+        "ok"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "value": {},
+        "text": {
+          "type": "string"
+        },
+        "isError": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "failure": {
+      "type": "object",
+      "required": [
+        "ok"
+      ],
+      "properties": {
+        "ok": {
+          "const": false
+        },
+        "busy": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "object",
+          "required": [
+            "codigo",
+            "mensaje"
+          ],
+          "properties": {
+            "codigo": {
+              "type": "string"
+            },
+            "mensaje": {
+              "type": "string"
+            },
+            "detalles": {}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$comment": "HTTP errors such as {error:UNAUTHORIZED} are outside application schema. ok:true plus isError:true is tool failure. Legacy RPC has no required protocolVersion."
+}

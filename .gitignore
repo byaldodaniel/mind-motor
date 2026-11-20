@@ -41,3 +41,9 @@ continuity-*.json
 /.claude/worktrees/
 /dist/
 /.cache/
+
+# Pieza nativa: compilaciones y temporales locales
+/nativo/rust/target/
+/nativo/rust/.tmp/
+/nativo/go/.cache/
+/nativo/go/bin/

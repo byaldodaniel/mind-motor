@@ -10,6 +10,12 @@ for (const [command, args] of [
   [process.platform === 'win32' ? 'python' : 'python3', ['-I', '-B', 'test/native_extract_test.py']],
   [process.platform === 'win32' ? 'python' : 'python3', ['-I', '-B', 'test/native_organizer_test.py']],
   [process.platform === 'win32' ? 'python' : 'python3', ['-I', '-B', 'test/native_result_copy_test.py']],
+  // Contrato observable de r3 que debe respetar la pieza nativa (Mind 1.0.5).
+  [process.execPath, ['--test', '--test-concurrency=1', 'nativo/test/contrato-r3.test.mjs']],
+  // Pruebas del ejecutable nativo: solo cuando se indica cuál probar.
+  ...(process.env.MIND_NATIVE_EXE ? [[process.execPath, ['--test', '--test-concurrency=1',
+    'nativo/test/bridge-contract.test.mjs', 'nativo/test/bridge-boundary.test.mjs',
+    'nativo/test/invalid-mcp.test.mjs', 'nativo/test/scan.test.mjs']]] : []),
 ]) {
   const result = spawnSync(command, args, { stdio: 'inherit', windowsHide: true, env:{...process.env,MIND_AGENT_STARTUP:'0'} });
   if (result.error) console.error(result.error.message);

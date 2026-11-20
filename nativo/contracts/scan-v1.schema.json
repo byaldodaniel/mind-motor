@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mind:pilot:scan:v1",
+  "title": "Mind native scanner pilot v1 — proposed contract",
+  "description": "One JSONL request and response per directory. Version implicit in executable/manifest. Root never grants permission. Relative and native names require semantic validation described in CONTRATOS.md.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/response"
+    }
+  ],
+  "$defs": {
+    "id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "id",
+        "root"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "relative": {
+          "type": "string",
+          "maxLength": 32767
+        },
+        "maxEntries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "default": 100000
+        }
+      },
+      "additionalProperties": false
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "name",
+        "type"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/\\\\\\u0000]+$"
+        },
+        "type": {
+          "enum": [
+            "file",
+            "directory",
+            "link",
+            "other",
+            "unknown"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "identity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(posix|nt):[0-9]+:[0-9]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "id",
+        "entries",
+        "complete"
+      ],
+      "properties": {
+        "id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entry"
+          },
+          "maxItems": 1000000
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "error"
+            ]
+          },
+          "then": {
+            "properties": {
+              "complete": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "complete": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
