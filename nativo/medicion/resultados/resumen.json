@@ -1,0 +1,622 @@
+[
+  {
+    "tarea": "t1-retomar",
+    "catalogo": "nucleo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 18.9,
+    "usage": {
+      "input_tokens": 82712,
+      "cached_input_tokens": 59776,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 197,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "retomar",
+        "error": false
+      }
+    ],
+    "respuesta": "El siguiente paso es pedir tres cotizaciones de cajas para el envío piloto de Atlas.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t1-retomar",
+    "catalogo": "completo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 19.9,
+    "usage": {
+      "input_tokens": 130659,
+      "cached_input_tokens": 109568,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 277,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "leer",
+        "error": false
+      },
+      {
+        "herramienta": "conversacion_leer",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      }
+    ],
+    "respuesta": "El siguiente paso para el envío piloto de Atlas es pedir tres cotizaciones de cajas.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t2-pendientes",
+    "catalogo": "nucleo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 20.9,
+    "usage": {
+      "input_tokens": 157208,
+      "cached_input_tokens": 135296,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 451,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      }
+    ],
+    "respuesta": "- Elegir proveedor de cajas\n- Revisar presupuesto de transporte\n- Preparar muestra para el cliente Orión\n- Llamar a logística",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t2-pendientes",
+    "catalogo": "completo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 20.5,
+    "usage": {
+      "input_tokens": 198991,
+      "cached_input_tokens": 175872,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 440,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      },
+      {
+        "herramienta": "explorar",
+        "error": false
+      },
+      {
+        "herramienta": "agrupar",
+        "error": false
+      },
+      {
+        "herramienta": "agrupar",
+        "error": false
+      }
+    ],
+    "respuesta": "- Elegir proveedor de cajas\n- Revisar presupuesto de transporte\n- Preparar muestra para el cliente Orión\n- Llamar a logística",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t3-seccion",
+    "catalogo": "nucleo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 21.3,
+    "usage": {
+      "input_tokens": 183996,
+      "cached_input_tokens": 165376,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 393,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      }
+    ],
+    "respuesta": "- **2026-11-10** — Se aprueba el empaque reciclado.\n- **2026-11-14** — El envío piloto sale el lunes 24 de noviembre.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t3-seccion",
+    "catalogo": "completo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 23,
+    "usage": {
+      "input_tokens": 213592,
+      "cached_input_tokens": 185600,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 299,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      },
+      {
+        "herramienta": "explorar",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      }
+    ],
+    "respuesta": "- **2026-11-10** — Se aprobó el empaque reciclado.\n- **2026-11-14** — Se fijó la salida del envío piloto para el lunes 24 de noviembre.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t4-guardar",
+    "catalogo": "nucleo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 24.2,
+    "usage": {
+      "input_tokens": 198001,
+      "cached_input_tokens": 176640,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 477,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "guardar",
+        "error": false
+      },
+      {
+        "herramienta": "retomar",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      }
+    ],
+    "respuesta": "Guardé y verifiqué en Mind la nueva conversación **Atlas · proveedor**.\n\n> Decisión: proveedor de cajas elegido, Cajas Norte, el 20-nov.\n\nID de Mind `ad7c9d31-0e6a-43cf-af1d-8236098887d5`.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t4-guardar",
+    "catalogo": "completo",
+    "rep": 1,
+    "code": 0,
+    "segundos": 20.9,
+    "usage": {
+      "input_tokens": 167272,
+      "cached_input_tokens": 145792,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 372,
+      "reasoning_output_tokens": 40
+    },
+    "llamadas": [
+      {
+        "herramienta": "leer",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      },
+      {
+        "herramienta": "conversacion_preferencias",
+        "error": false
+      },
+      {
+        "herramienta": "conversacion_guardar",
+        "error": true
+      }
+    ],
+    "respuesta": "«Atlas · proveedor» quedó sin guardar. El servidor MCP mindprueba exige aprobación para guardar la conversación y esta sesión no permite concederla.",
+    "error": null,
+    "acierto": false
+  },
+  {
+    "tarea": "t1-retomar",
+    "catalogo": "completo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 19.7,
+    "usage": {
+      "input_tokens": 188785,
+      "cached_input_tokens": 169472,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 431,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "leer",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      },
+      {
+        "herramienta": "conversacion_leer",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      }
+    ],
+    "respuesta": "El siguiente paso es pedir tres cotizaciones de cajas para el envío piloto de Atlas.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t1-retomar",
+    "catalogo": "nucleo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 14.5,
+    "usage": {
+      "input_tokens": 122217,
+      "cached_input_tokens": 104448,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 174,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "retomar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      }
+    ],
+    "respuesta": "El siguiente paso es pedir tres cotizaciones de cajas para el envío piloto de Atlas.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t2-pendientes",
+    "catalogo": "completo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 16.6,
+    "usage": {
+      "input_tokens": 163149,
+      "cached_input_tokens": 139648,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 347,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      },
+      {
+        "herramienta": "explorar",
+        "error": false
+      },
+      {
+        "herramienta": "agrupar",
+        "error": false
+      }
+    ],
+    "respuesta": "- Elegir proveedor de cajas\n- Revisar presupuesto de transporte\n- Preparar muestra para el cliente Orión\n- Llamar a logística",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t2-pendientes",
+    "catalogo": "nucleo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 16.3,
+    "usage": {
+      "input_tokens": 127992,
+      "cached_input_tokens": 91520,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 376,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      }
+    ],
+    "respuesta": "- Elegir proveedor de cajas\n- Revisar presupuesto de transporte\n- Preparar muestra para el cliente Orión\n- Llamar a logística",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t3-seccion",
+    "catalogo": "completo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 21.4,
+    "usage": {
+      "input_tokens": 214156,
+      "cached_input_tokens": 186368,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 301,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      }
+    ],
+    "respuesta": "- **2026-11-10** — Se aprueba el empaque reciclado.\n- **2026-11-14** — Se decide que el envío piloto salga el lunes 24 de noviembre.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t3-seccion",
+    "catalogo": "nucleo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 26.9,
+    "usage": {
+      "input_tokens": 152291,
+      "cached_input_tokens": 133248,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 413,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      }
+    ],
+    "respuesta": "- **2026-11-10** — Se aprobó el empaque reciclado.\n- **2026-11-14** — Se decidió que el envío piloto saldría el lunes 24 de noviembre.",
+    "error": null,
+    "acierto": true
+  },
+  {
+    "tarea": "t4-guardar",
+    "catalogo": "completo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 26.8,
+    "usage": {
+      "input_tokens": 156201,
+      "cached_input_tokens": 118656,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 373,
+      "reasoning_output_tokens": 13
+    },
+    "llamadas": [
+      {
+        "herramienta": "leer",
+        "error": false
+      },
+      {
+        "herramienta": "destinos_consultar",
+        "error": false
+      },
+      {
+        "herramienta": "conversacion_preferencias",
+        "error": false
+      },
+      {
+        "herramienta": "conversacion_guardar",
+        "error": true
+      }
+    ],
+    "respuesta": "No se guardó «Atlas · proveedor». La sesión bloqueó el guardado en `mindprueba` porque requiere una aprobación que esta sesión no permite solicitar.",
+    "error": null,
+    "acierto": false
+  },
+  {
+    "tarea": "t4-guardar",
+    "catalogo": "nucleo",
+    "rep": 2,
+    "code": 0,
+    "segundos": 21.5,
+    "usage": {
+      "input_tokens": 151913,
+      "cached_input_tokens": 100352,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 390,
+      "reasoning_output_tokens": 0
+    },
+    "llamadas": [
+      {
+        "herramienta": "estado",
+        "error": false
+      },
+      {
+        "herramienta": "buscar",
+        "error": false
+      },
+      {
+        "herramienta": "mind",
+        "error": false
+      },
+      {
+        "herramienta": "guardar",
+        "error": false
+      },
+      {
+        "herramienta": "leer",
+        "error": false
+      }
+    ],
+    "respuesta": "Guardé y verifiqué en Mind la nueva conversación **«Atlas · proveedor»**.\n\n> Decisión: proveedor de cajas elegido, Cajas Norte, el 20-nov.",
+    "error": null,
+    "acierto": true
+  }
+]
