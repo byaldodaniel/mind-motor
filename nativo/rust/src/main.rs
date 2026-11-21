@@ -4,6 +4,12 @@ mod continuity_read;
 mod continuity_trial;
 mod host;
 mod meaning;
+mod motor_files;
+mod motor_mcp;
+mod motor_native;
+mod motor_owner;
+mod motor_permissions;
+mod motor_records;
 mod native_parent;
 mod office_read;
 mod pending_write;
@@ -32,6 +38,8 @@ fn main() {
         Some("copiar-resultado") => result_copy::run(&args[1..]),
         Some("organizar-archivo") => organize::run(&args[1..]),
         Some("leer-documento") => office_read::run(&args[1..]),
+        Some("motor") => tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()
+            .map_err(|error| error.to_string()).and_then(|runtime| runtime.block_on(motor_native::run(&args[1..]))),
         Some("bridge") => tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()
             .map_err(|e|e.to_string()).and_then(|rt|rt.block_on(bridge::run(&args[1..]))),
         Some("anfitrion") => tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()
@@ -41,7 +49,7 @@ fn main() {
         Some("servicio") => tokio::runtime::Builder::new_current_thread().enable_all().build()
             .map_err(|e| e.to_string()).and_then(|rt| rt.block_on(service_cli::run(&args[1..]))),
         Some("version") => {println!("mind-native-rust-pilot 0.1.0"); Ok(())},
-        _ => Err("usage: mind-native-rust-pilot bridge --base ABS --cwd ABS --paths JSON --launch-command ABS [--launch-arg ARG] | scan | buscar-significado | leer-texto --parent-pid PID | anfitrion --base ABS [--port N] [--puerto-vistas N] [--servicios-prueba] | vista | servicio".into())
+        _ => Err("usage: mind-native-rust-pilot motor --base ABS | bridge --base ABS --cwd ABS --paths JSON --launch-command ABS [--launch-arg ARG] | scan | buscar-significado | leer-texto --parent-pid PID | anfitrion --base ABS [--port N] [--puerto-vistas N] [--servicios-prueba] | vista | servicio".into())
     };
     if let Err(error) = result {eprintln!("{error}");std::process::exit(2)}
 }

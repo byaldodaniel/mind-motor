@@ -44,7 +44,7 @@ pub(crate) fn full(status: StatusCode, value: Value) -> Response<Body> {
 pub(crate) fn same(a: &[u8], b: &[u8]) -> bool { a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 }
 
 /// Un navegador en el puerto de vistas nunca comparte origen con la API privada.
-fn allowed_origin(req: &Request<Incoming>, port: u16) -> bool {
+pub(crate) fn allowed_origin(req: &Request<Incoming>, port: u16) -> bool {
     fn loopback_authority(authority: &str, port: u16) -> bool {
         ["127.0.0.1", "localhost", "[::1]"].iter().any(|host| authority == format!("{host}:{port}"))
     }
@@ -260,7 +260,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-async fn shutdown_signal() -> std::io::Result<()> {
+pub(crate) async fn shutdown_signal() -> std::io::Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         interrupt = tokio::signal::ctrl_c() => interrupt,
@@ -269,7 +269,7 @@ async fn shutdown_signal() -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-async fn shutdown_signal() -> std::io::Result<()> {
+pub(crate) async fn shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 

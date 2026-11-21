@@ -144,6 +144,11 @@ fn holder(top: &File, id: Identity, name: &str) -> Result<(File, File, Identity)
     Ok((trash, folder, current))
 }
 
+pub(crate) fn create_directory(root: &str, path: &str, confirm: impl FnOnce() -> Result<()>) -> Result<()> {
+    let request = Request::Mkdir { root: root.to_owned(), relative_path: path.to_owned() };
+    run_request(request, |_| confirm()).map(|_| ())
+}
+
 fn run_request(request: Request, approve: impl FnOnce(u64) -> Result<()>) -> Result<Value> {
     match request {
         Request::Mkdir { root, relative_path } => {

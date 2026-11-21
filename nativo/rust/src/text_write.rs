@@ -121,18 +121,33 @@ fn write(request: Request, replace: bool, confirm: impl FnOnce() -> Result<()>) 
         return Err(failed);
     }
     let data = STANDARD.decode(request.content).map_err(|_| failed)?;
+    write_bytes(&request.root, &request.relative_path, &data, limit, expected, confirm)
+}
+
+#[cfg(any(unix, windows))]
+pub(crate) fn write_bytes(
+    root: &str, relative: &str, data: &[u8], limit: usize, expected: Option<&str>,
+    confirm: impl FnOnce() -> Result<()>,
+) -> Result<Report> {
     if data.len() > limit {
         return Err("TEXT_TOO_LARGE");
     }
-    check_text(&data, "INVALID_TEXT")?;
-    let (parent, name) = destination(&request.root, &request.relative_path, replace)?;
+    check_text(data, "INVALID_TEXT")?;
+    let (parent, name) = destination(root, relative, expected.is_some())?;
     match expected {
-        Some(expected) => platform::modify_text(&parent, name, &data, limit, expected, confirm),
+        Some(expected) => platform::modify_text(&parent, name, data, limit, expected, confirm),
         None => platform::create_stream(&parent, name, confirm, |file| {
-            file.write_all(&data).map_err(|error| platform::mapped(error, false))?;
+            file.write_all(data).map_err(|error| platform::mapped(error, false))?;
             Ok(data.len() as u64)
         }),
     }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn write_bytes(
+    _: &str, _: &str, _: &[u8], _: usize, _: Option<&str>, _: impl FnOnce() -> Result<()>,
+) -> Result<Report> {
+    Err("SAFE_OPEN_UNAVAILABLE")
 }
 
 #[cfg(not(any(unix, windows)))]

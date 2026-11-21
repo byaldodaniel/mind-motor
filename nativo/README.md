@@ -250,6 +250,35 @@ node --test nativo/test/vista-compartida.test.mjs
 Remove-Item Env:MIND_TEST_NATIVE_SAVE
 ```
 
+## Motor Rust autónomo y vuelta a r3 (Etapa 6)
+
+El comando de desarrollo `motor --base ABS` abre una Base r3 de formato 3
+con los permisos vigentes del disco. Arranca la entrada HTTP MCP de loopback
+y devuelve su URL y la credencial de sesión a quien lo inició. El anfitrión,
+el protocolo, los permisos y el guardado se ejecutan dentro del mismo proceso.
+El bloqueo de propietario es compatible con r3, que puede recuperar la Base
+después de comprobar que ese proceso terminó. La credencial es local al
+arranque y debe tratarse como privada.
+
+Esta entrada prueba estado, guardado y actualización de conversaciones y
+continuidad, retoma por ID, búsqueda por palabras en las conversaciones y
+las operaciones básicas de texto. Las variantes restantes y el arranque
+habitual de la instalación siguen en relevo. La entrada sirve para probarlo
+en Windows y Linux.
+
+Con `MIND_NATIVE_EXE` y el Python portable de r3 en
+`MIND_TEST_BUNDLED_PYTHON`, el ensayo extrae el código del tag `v1.0.4-r3`,
+prepara una Base temporal y arranca Rust con dos sesiones MCP. Comprueba el
+PID y el árbol de procesos, interrumpe el único proceso de Mind y arranca
+el Motor r3 extraído para verificar datos y permisos sobre la misma Base.
+Windows puede iniciar su consola del sistema (conhost.exe) por separado.
+El ensayo conserva también un registro con Markdown pendiente para comprobar
+qué recupera r3 después del corte.
+
+```powershell
+node --test nativo/test/motor-nativo-vuelta-r3.test.mjs
+```
+
 ## Compilación reproducible
 
 `build.ps1` quita del ejecutable las rutas locales (`--remap-path-prefix`) y,
