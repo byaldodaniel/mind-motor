@@ -209,6 +209,21 @@ En el arranque del Motor indica también `MIND_PUERTO_LECTURA_CONTINUIDAD`
 con el puerto que publica el anfitrión en `anfitrion.json`. Sin este puerto,
 el Motor sigue leyendo sus registros directamente.
 
+## Ensayo de escritura y vuelta a r3 (Etapa 6)
+
+Con el binario Rust en `MIND_NATIVE_EXE`, ejecuta la prueba desde el repositorio:
+
+```powershell
+node --test nativo/test/continuidad-vuelta-r3.test.mjs
+```
+
+La prueba extrae el código del tag local `v1.0.4-r3` en una carpeta temporal y
+crea una Base ficticia con ese Motor. Espera a que termine r3, ejecuta el escritor
+Rust y espera su salida antes de reabrir la misma Base con r3. El comando de
+prueba crea un registro de formato 1 sin sobrescribir archivos. La prueba
+verifica el nuevo registro por ID, su referencia al registro anterior y que la
+lectura de r3 conserva los bytes de ambos registros y de la marca de la Base.
+
 ## Compilación reproducible
 
 `build.ps1` quita del ejecutable las rutas locales (`--remap-path-prefix`) y,

@@ -1,6 +1,7 @@
 mod bridge;
 mod build_recipe;
 mod continuity_read;
+mod continuity_trial;
 mod host;
 mod meaning;
 mod native_parent;
@@ -23,6 +24,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("scan") => scanner(),
         Some("buscar-significado") => meaning::run(),
+        Some("crear-continuidad-prueba") => continuity_trial::run(&args[1..]),
         Some("leer-texto") => text_read::run(&args[1..]),
         Some("crear-texto") => text_write::create(&args[1..]),
         Some("modificar-texto") => text_write::modify(&args[1..]),
