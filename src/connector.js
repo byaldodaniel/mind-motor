@@ -18,6 +18,7 @@ import { MOTOR_VERSION } from './version.js';
 
 export const CONNECTOR_STATE_FILE = 'conector.json';
 export const CONNECTOR_SECRET_FILE = 'conector-secreto.json';
+export const CONNECTOR_CONSOLE_FILE = 'conector-consola.json';
 export const CONNECTOR_LOCK_FILE = 'conector.lock';
 export const CONNECTOR_ERROR_FILE = 'conector-error.json';
 
@@ -62,6 +63,7 @@ export function connectorPaths(baseDirectory) {
     baseDirectory,
     stateFile: path.join(baseDirectory, CONNECTOR_STATE_FILE),
     secretFile: path.join(baseDirectory, CONNECTOR_SECRET_FILE),
+    consoleFile: path.join(baseDirectory, CONNECTOR_CONSOLE_FILE),
     lockFile: path.join(baseDirectory, CONNECTOR_LOCK_FILE),
   };
 }
@@ -159,12 +161,19 @@ export async function readOrCreateSecret(baseDirectory) {
   return token;
 }
 
-export async function readSecret(baseDirectory) {
-  const { secretFile } = connectorPaths(baseDirectory);
-  const existing = await readRegularJson(secretFile);
+async function readTokenFile(filename) {
+  const existing = await readRegularJson(filename);
   return existing?.version === 1 && typeof existing.token === 'string' && existing.token.length >= 32
     ? existing.token
     : null;
+}
+
+export async function readSecret(baseDirectory) {
+  return await readTokenFile(connectorPaths(baseDirectory).secretFile);
+}
+
+export async function readConsoleToken(baseDirectory) {
+  return await readTokenFile(connectorPaths(baseDirectory).consoleFile);
 }
 
 export async function readConnectorState(baseDirectory) {
@@ -436,13 +445,14 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
 }
 
 /** Envía una petición RPC autenticada al puerto del Motor Central. */
-export async function postRpc({ port, token, payload, timeoutMs = 30_000 }) {
+export async function postRpc({ port, token, payload, timeoutMs = 30_000, headers = {} }) {
   const body = JSON.stringify(payload);
   const response = await httpRequest({
     port,
     method: 'POST',
     pathName: '/rpc',
     headers: {
+      ...headers,
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Length': String(Buffer.byteLength(body, 'utf8')),
@@ -491,11 +501,19 @@ function isRepeatableRpc(payload) {
  * Motor no llegó a recibirla (conexión rechazada), la rechazó sin procesarla
  * (se estaba apagando, credenciales de un Motor anterior) o es de solo lectura.
  */
-export async function callCentralRpc({ layout, baseDirectory, payload, startupTimeoutMs = 20_000, timeoutMs = 0 }) {
+export async function callCentralRpc({ layout, baseDirectory, payload, startupTimeoutMs = 20_000, timeoutMs = 0, console = false }) {
   for (let attempt = 0; ; attempt += 1) {
     const connection = await ensureCentralMotor({ layout, baseDirectory, startupTimeoutMs });
+    let headers;
+    if (console) {
+      const consoleToken = await readConsoleToken(connection.baseDirectory ?? baseDirectory);
+      if (!consoleToken) {
+        throw new MotorError('CONSOLE_CREDENTIAL_UNAVAILABLE', 'El Motor activo no ofrece credencial de consola.');
+      }
+      headers = { 'X-Mind-Consola': consoleToken };
+    }
     try {
-      return await postRpc({ port: connection.state.port, token: connection.token, payload, timeoutMs });
+      return await postRpc({ port: connection.state.port, token: connection.token, payload, timeoutMs, headers });
     } catch (error) {
       const notDelivered = error?.retryable === true || error?.code === 'ECONNREFUSED';
       const interrupted = ['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ETIMEDOUT'].includes(error?.code);

@@ -22,7 +22,8 @@ Para el usuario:
   apagar                     Detiene el Motor Central activo de forma limpia.
   autorizar [ruta]           Revisa y aprueba solicitudes de agentes; con una ruta,
                              autoriza esa carpeta (pregunta qué permisos conceder).
-  permisos [retirar <id>]    Lista permisos o retira una carpeta de Mind.
+  permisos [retirar <id|ruta|continuidad> [permisos...]]
+                             Lista permisos o retira una carpeta o permisos de Mind.
   permisos excluir <id> <subcarpeta>...
   permisos incluir <id> <subcarpeta>...
                              Deja fuera de Mind subcarpetas de una carpeta autorizada,
@@ -135,16 +136,19 @@ function report(error) {
 async function holdLegacyConsoleOwner(layout) {
   const { canonicalBaseDirectory, connectorPaths, readConnectorState } = await import('./connector.js');
   const base = await canonicalBaseDirectory(layout.baseDirectory);
+  const { lockFile } = connectorPaths(base);
+  const { lstat, mkdir } = await import('node:fs/promises');
+  const state = await readConnectorState(base);
+  const hasLock = state === null && await lstat(lockFile).then(() => true, () => false);
   // La propiedad depende del bloqueo, incluso si el Motor dejó de responder.
-  if (process.env.MIND_MOTOR_NATIVO !== '1' && (await readConnectorState(base))?.backend !== 'rust') return null;
+  if (process.env.MIND_MOTOR_NATIVO !== '1' && state?.backend !== 'rust' && !hasLock) return null;
   if (contains(layout.motorDirectory, layout.baseDirectory) || contains(layout.motorDirectory, base)) {
     throw new MotorError('BASE_OVERLAPS_MOTOR', 'La Base no puede estar dentro del Motor.');
   }
-  const { mkdir } = await import('node:fs/promises');
   const { acquireOwnerFileLock } = await import('./process-identity.js');
   await mkdir(base, { recursive: true, mode: 0o700 });
   try {
-    return await acquireOwnerFileLock(connectorPaths(base).lockFile, { pythonExecutable: layout.pythonExecutable });
+    return await acquireOwnerFileLock(lockFile, { pythonExecutable: layout.pythonExecutable });
   } catch (error) {
     if (error.code !== 'LOCK_BUSY') throw error;
     throw new MotorError('BASE_OCUPADA',
@@ -152,10 +156,60 @@ async function holdLegacyConsoleOwner(layout) {
   }
 }
 
+async function shouldUseNativeConsole(layout) {
+  if (process.env.MIND_MOTOR_NATIVO === '1') return true;
+  const { checkHealthyConnector } = await import('./connector.js');
+  const active = await checkHealthyConnector(layout.baseDirectory);
+  return active?.health?.backend === 'rust';
+}
+
+async function withNativeConsole(layout, task) {
+  const { ensureCentralMotor, callCentralRpc, stopCentralMotor } = await import('./connector.js');
+  const conn = await ensureCentralMotor({ layout, baseDirectory: layout.baseDirectory });
+  const rpc = (operacion, args = {}) => callCentralRpc({
+    layout,
+    baseDirectory: conn.baseDirectory,
+    console: true,
+    payload: { accion: 'consola', operacion, ...args },
+  });
+  const session = {
+    nativeConsole: true,
+    layout,
+    motor: {
+      baseDirectory: conn.baseDirectory,
+      authorizeFolder: async (ruta) => (await rpc('autorizar_carpeta', { ruta })).carpeta,
+      getAuthorizedFolder: async (id) => (await rpc('obtener_carpeta', { id })).carpeta,
+      listAuthorizedFolders: async () => (await rpc('listar_carpetas')).carpetas,
+      setFolderExclusions: async (id, excluidas) => rpc('exclusiones_carpeta', { id, excluidas }),
+      revokeFolder: async (id) => (await rpc('retirar_carpeta', { id })).retirada,
+    },
+    policy: {
+      get: async (id) => (await rpc('obtener_acceso', { id })).acceso,
+      set: async (id, permisos, { channel } = {}) => (await rpc('guardar_acceso', { id, permisos, canal: channel })).acceso,
+      remove: async (id) => (await rpc('retirar_acceso', { id })).retirado,
+      getContinuity: async () => (await rpc('obtener_continuidad')).continuidad,
+      setContinuity: async (permisos, { channel } = {}) => (await rpc('guardar_continuidad', { permisos, canal: channel })).continuidad,
+    },
+    requests: {
+      list: async () => (await rpc('listar_solicitudes')).solicitudes,
+      remove: async (id) => (await rpc('retirar_solicitud', { id })).retirada,
+    },
+    ensureIndex: async () => ({ status: 'sin-indice' }),
+    audit: async () => {},
+  };
+  try {
+    return await task(session);
+  } finally {
+    if (conn.spawned) {
+      await stopCentralMotor({ baseDirectory: conn.baseDirectory, onlyIfIdle: true }).catch(() => {});
+    }
+  }
+}
+
 /** Sesión sin observación: cada operación reconcilia bajo demanda lo que necesita. */
 async function withSession(options, task, { observe = false } = {}) {
   const { openSession } = await import('./session.js');
-  const layout = await resolveLayout({ base: options.base });
+  const layout = options.layout ?? await resolveLayout({ base: options.base });
   // macOS: retira la cuarentena de Runtime/ tras verificar sus hashes, antes del primer uso de Python.
   const { releaseQuarantine } = await import('./quarantine.js');
   const quarantine = await releaseQuarantine(layout);
@@ -186,7 +240,7 @@ async function withSession(options, task, { observe = false } = {}) {
   }
 }
 
-export async function main(args) {
+export async function main(args, io = {}) {
   try {
     const { options, command, parameters } = parse(args);
     if (command === 'mcp' && options.direct && process.env.MIND_MOTOR_NATIVO === '1') {
@@ -379,19 +433,38 @@ export async function main(args) {
       case 'permisos':
       case 'reparar': {
         const consoleModule = await import('./console.js');
-        if (command !== 'permisos' || ['retirar', 'incluir'].includes(parameters[0])) consoleModule.requireInteractive();
-        return await withSession(options, async (session) => {
-          const prompt = consoleModule.createPrompter();
+        const [action, target, ...paths] = parameters;
+        if (command === 'permisos') {
+          if (action !== undefined && !['retirar', 'excluir', 'incluir'].includes(action)) {
+            throw new MotorError('INVALID_ARGUMENTS', 'Uso: mind permisos [retirar <id|ruta|continuidad> [permisos...]|excluir <id> <subcarpeta>...|incluir <id> <subcarpeta>...]');
+          }
+          if (action === 'retirar' && !target) {
+            throw new MotorError('INVALID_ARGUMENTS', 'Indica la carpeta o "continuidad" para retirar permisos.');
+          }
+          if (['excluir', 'incluir'].includes(action) && (!target || paths.length === 0)) {
+            throw new MotorError('INVALID_ARGUMENTS', `Indica la carpeta y las rutas a ${action}.`);
+          }
+        }
+        if (command !== 'permisos' || ['retirar', 'incluir'].includes(action)) {
+          consoleModule.requireInteractive(io.input, io.output);
+        }
+        const layout = await resolveLayout({ base: options.base });
+        const useNative = ['autorizar', 'permisos'].includes(command) && await shouldUseNativeConsole(layout);
+        const runWith = useNative
+          ? (task) => withNativeConsole(layout, task)
+          : (task) => withSession({ ...options, layout }, task);
+        return await runWith(async (session) => {
+          const prompt = consoleModule.createPrompter(io);
           try {
             if (command === 'autorizar') {
               const folderPath = parameters.find((item) => !item.startsWith('--')) ?? null;
               const requested = ['leer', 'escribir', 'organizar'].filter((level) => parameters.includes(`--${level}`));
               await consoleModule.authorizeConsole({ session, prompt, folderPath, requested: requested.length ? requested : null });
             } else if (command === 'permisos') {
-              const [action, target, ...paths] = parameters;
               await consoleModule.permissionsConsole({
                 session, prompt,
                 revoke: action === 'retirar' ? target ?? null : null,
+                revokePermissions: action === 'retirar' && paths.length > 0 ? paths : null,
                 exclude: action === 'excluir' ? paths : null,
                 include: action === 'incluir' ? paths : null,
                 target: ['excluir', 'incluir'].includes(action) ? target ?? null : null,

@@ -1,11 +1,15 @@
-use std::{fs, path::Path};
+use std::{fs, io, path::Path};
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{motor_native::Fault, motor_owner::timestamp,
-    motor_permissions::{continuity_access, folder_status, read_file, read_json}, scan, text_write};
+    motor_permissions::{
+        continuity_access, folder_status, lower_hex, persisted_continuity_policy,
+        persisted_folder_policy, read_file, read_json, registered_folders,
+    },
+    scan, text_write};
 
 const FOLDER: &[&str] = &["encontrar", "leer", "escribir", "organizar"];
 const CONTINUITY: &[&str] = &["leer", "registrar"];
@@ -413,6 +417,19 @@ pub(crate) fn finish(
     }
 }
 
+fn is_valid_pending(record: &Value, id: &str, now: &str) -> bool {
+    let kind = record["kind"].as_str();
+    record["format"] == "mind-consent-request"
+        && record["version"] == 1
+        && record["id"] == id
+        && matches!(kind, Some("carpeta" | "continuidad" | "automatizacion" | "borrado" | "vaciado"))
+        && record["createdAt"].as_str().is_some_and(|value| value.len() == now.len())
+        && record["expiresAt"].as_str().is_some_and(|value| value.len() == now.len())
+        && record["requested"].as_array().is_some_and(|items| items.iter().all(Value::is_string))
+        && (kind != Some("carpeta")
+            || record["path"].as_str().is_some_and(|value| !value.contains('\0') && Path::new(value).is_absolute()))
+}
+
 pub(crate) fn list_pending(base: &str) -> Result<Vec<Value>, Fault> {
     let now = now()?;
     let entries = fs::read_dir(base).map_err(|_| fail("READ_FAILED", "No se pudieron listar las solicitudes."))?;
@@ -424,19 +441,56 @@ pub(crate) fn list_pending(base: &str) -> Result<Vec<Value>, Fault> {
         let Some(id) = name.strip_prefix("consent-request-").and_then(|value| value.strip_suffix(".json")) else { continue };
         if !Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id) { continue; }
         let Some(record) = read_json(base, name).ok().flatten() else { continue };
-        if record["format"] != "mind-consent-request" || record["version"] != 1 || record["id"] != id
-            || !record["createdAt"].as_str().is_some_and(|value| value.len() == now.len())
-            || !record["expiresAt"].as_str().is_some_and(|value| value.len() == now.len() && value >= now.as_str())
-            || !record["requested"].is_array()
-        {
+        if !is_valid_pending(&record, id, &now) || record["expiresAt"].as_str().is_none_or(|value| value < now.as_str()) {
             continue;
         }
-        let kind = record["kind"].as_str();
-        if !matches!(kind, Some("carpeta" | "continuidad" | "automatizacion" | "borrado" | "vaciado")) { continue; }
-        requests.push(json!({"id":id,"tipo":kind,"ruta":record["path"],"permisos":record["requested"],"creada":record["createdAt"]}));
+        requests.push(json!({"id":id,"tipo":record["kind"],"ruta":record["path"],"permisos":record["requested"],"creada":record["createdAt"]}));
     }
-    requests.sort_by(|left, right| left["creada"].as_str().cmp(&right["creada"].as_str()));
+    requests.sort_by(|left, right| {
+        left["creada"].as_str().cmp(&right["creada"].as_str())
+            .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+    });
     Ok(requests)
+}
+
+fn remove_base_file(
+    base: &str, name: &str, confirm_owner: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<bool, Fault> {
+    scan::open_directory(base, "").map_err(|code| fail(code, "No se pudo abrir la Base de forma segura."))?;
+    confirm_owner().map_err(|code| fail(code, "Cambió el propietario de la Base durante la operación."))?;
+    let path = Path::new(base).join(name);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(fail("REMOVE_FAILED", "No se pudo comprobar el archivo técnico.")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(fail("RECORD_LINK", "Un registro técnico no puede ser un enlace."));
+        }
+        Ok(_) => {}
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(fail("REMOVE_FAILED", "No se pudo retirar el archivo técnico.")),
+    }
+}
+
+fn revoke_folder_files(
+    base: &str, id: &str, confirm_owner: impl Fn() -> Result<(), &'static str>,
+) -> Result<bool, Fault> {
+    if id.len() != 64 || !lower_hex(id) {
+        return Err(fail("INVALID_AUTHORIZATION_ID", "El identificador de autorización no es válido."));
+    }
+    let removed = remove_base_file(base, &registry_file(id), &confirm_owner)?;
+    for name in [
+        policy_file(id),
+        format!("folder-properties-{id}.json"),
+        format!("trash-{id}.json"),
+        format!("folder-removed-{id}.json"),
+        format!("folder-index-{id}.json"),
+    ] {
+        remove_base_file(base, &name, &confirm_owner)?;
+    }
+    Ok(removed)
 }
 
 pub(crate) fn retire(
@@ -449,16 +503,14 @@ pub(crate) fn retire(
         value.as_bool().ok_or_else(|| fail("INVALID_ARGUMENTS", "todo debe ser booleano."))
     }).transpose()?.unwrap_or(false);
     let removing = args.get("permisos").map(|value| levels(value, FOLDER)).transpose()?;
-    if all || removing.as_ref().is_some_and(|list| list.contains(&"encontrar")) {
-        return Err(fail("NOT_YET_PORTED", "Usa la consola habitual de permisos para retirar la autorización y su índice."));
-    }
+    let revoke_all = all || removing.as_ref().is_some_and(|list| list.contains(&"encontrar"));
     let additions = args.get("excluir").map(|value| {
         let list = value.as_array().ok_or_else(|| fail("INVALID_ARGUMENTS", "excluir debe ser una lista de rutas."))?;
         list.iter().map(|item| item.as_str().filter(|value| value.encode_utf16().count() <= 1024)
             .map(str::to_owned).ok_or_else(|| fail("INVALID_ARGUMENTS", "Cada exclusión debe ser una ruta de hasta 1024 caracteres.")))
             .collect::<Result<Vec<_>, _>>()
     }).transpose()?;
-    if removing.is_none() && additions.is_none() {
+    if !revoke_all && removing.is_none() && additions.is_none() {
         return Err(fail("INVALID_ARGUMENTS", "Indica los permisos a retirar o las rutas a excluir."));
     }
     let folders = folder_status(base)?;
@@ -494,6 +546,15 @@ pub(crate) fn retire(
         return Err(changed());
     }
 
+    if revoke_all {
+        revoke_folder_files(base, id, &confirm_owner)?;
+        return Ok(json!({
+            "estado": "retirada",
+            "carpeta": id,
+            "nota": "Se retiró la autorización y su índice. Los archivos originales no se modificaron."
+        }));
+    }
+
     let mut result = json!({"estado":"actualizado","carpeta":id});
     if let Some(added) = additions {
         let previous = registry.value["exclusions"].as_array().into_iter().flatten().filter_map(Value::as_str);
@@ -526,4 +587,198 @@ pub(crate) fn retire(
         result["permisos"] = json!(retained);
     }
     Ok(result)
+}
+
+fn valid_folder_id(value: Option<&Value>) -> Result<&str, Fault> {
+    value.and_then(Value::as_str)
+        .filter(|id| id.len() == 64 && lower_hex(id))
+        .ok_or_else(|| fail("INVALID_SCOPE_ID", "El identificador de la carpeta no es válido."))
+}
+
+fn valid_channel_arg(value: Option<&Value>) -> Result<&str, Fault> {
+    value.and_then(Value::as_str)
+        .filter(|channel| matches!(*channel, "formulario-del-cliente" | "consola" | "administracion-local"))
+        .ok_or_else(|| fail("INVALID_ACCESS", "Canal de consentimiento desconocido."))
+}
+
+pub(crate) fn console(
+    paths: Paths<'_>, payload: &Value, confirm_owner: impl Fn() -> Result<(), &'static str>,
+) -> Result<Value, Fault> {
+    let base = paths.base;
+    let operation = payload["operacion"].as_str()
+        .ok_or_else(|| fail("INVALID_ARGUMENTS", "Indica la operación de consola."))?;
+    match operation {
+        "listar_carpetas" => {
+            let folders: Vec<Value> = registered_folders(base)?.into_iter().map(|folder| {
+                json!({"id": folder.id, "path": folder.root, "generation": folder.generation, "exclusions": folder.exclusions})
+            }).collect();
+            Ok(json!({"ok": true, "carpetas": folders}))
+        }
+        "obtener_carpeta" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let folder = registered_folders(base)?.into_iter().find(|folder| folder.id == id).map(|folder| {
+                json!({"id": folder.id, "path": folder.root, "generation": folder.generation, "exclusions": folder.exclusions})
+            });
+            Ok(json!({"ok": true, "carpeta": folder}))
+        }
+        "autorizar_carpeta" => {
+            let path = payload.get("ruta").and_then(Value::as_str)
+                .ok_or_else(|| fail("INVALID_FOLDER_PATH", "Indica una ruta absoluta válida."))?;
+            let canonical = candidate(&paths, path)?;
+            let id = folder_id(&canonical);
+            if let Some(existing) = registered_folders(base)?.into_iter().find(|folder| folder.id == id) {
+                return Ok(json!({"ok": true, "carpeta": {"id": existing.id, "path": existing.root}}));
+            }
+            let authority = json!({
+                "format": "mind-folder-authorization",
+                "version": 2,
+                "id": id,
+                "path": canonical,
+                "generation": Uuid::new_v4().to_string(),
+            });
+            save(base, &registry_file(&id), &authority, None, &confirm_owner)?;
+            Ok(json!({"ok": true, "carpeta": {"id": id, "path": canonical}}))
+        }
+        "exclusiones_carpeta" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let raw = payload.get("excluidas").and_then(Value::as_array)
+                .ok_or_else(|| fail("INVALID_EXCLUSIONS", "Las exclusiones deben ser una lista."))?;
+            let items = raw.iter().map(|item| {
+                item.as_str().map(str::to_owned).ok_or_else(|| fail("INVALID_EXCLUSIONS", "Cada exclusión debe ser texto."))
+            }).collect::<Result<Vec<_>, _>>()?;
+            let exclusions = normalize_exclusions(items)?;
+            let Some(folder) = registered_folders(base)?.into_iter().find(|folder| folder.id == id) else {
+                return Err(fail("FOLDER_NOT_AUTHORIZED", "Esa carpeta no está autorizada."));
+            };
+            let registry_name = registry_file(id);
+            let registry = read(base, &registry_name)?
+                .ok_or_else(|| fail("FOLDER_NOT_AUTHORIZED", "Esa carpeta no está autorizada."))?;
+            let authority = json!({
+                "format": "mind-folder-authorization",
+                "version": 3,
+                "id": id,
+                "path": folder.root,
+                "generation": folder.generation,
+                "exclusions": exclusions,
+            });
+            save(base, &registry_name, &authority, Some(&registry), &confirm_owner)?;
+            Ok(json!({"ok": true, "exclusions": exclusions, "removedEntries": 0}))
+        }
+        "retirar_carpeta" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let removed = revoke_folder_files(base, id, &confirm_owner)?;
+            Ok(json!({"ok": true, "retirada": removed}))
+        }
+        "obtener_acceso" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let Some(folder) = registered_folders(base)?.into_iter().find(|folder| folder.id == id) else {
+                return Ok(json!({"ok": true, "acceso": null}));
+            };
+            let acceso = persisted_folder_policy(base, &folder)?.map(|record| {
+                json!({
+                    "folderId": id,
+                    "access": record["access"],
+                    "grantedAt": record["grantedAt"],
+                    "channel": record["channel"],
+                })
+            });
+            Ok(json!({"ok": true, "acceso": acceso}))
+        }
+        "guardar_acceso" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let granted = levels(payload.get("permisos").unwrap_or(&Value::Null), FOLDER)?;
+            let channel = valid_channel_arg(payload.get("canal"))?;
+            let Some(folder) = registered_folders(base)?.into_iter().find(|folder| folder.id == id) else {
+                return Err(fail("FOLDER_NOT_AUTHORIZED", "La carpeta no está registrada."));
+            };
+            let registry_name = registry_file(id);
+            let policy_name = policy_file(id);
+            let policy = read(base, &policy_name)?;
+            let access: Map<_, _> = FOLDER.iter().map(|level| (level.to_string(), json!(granted.contains(level)))).collect();
+            let granted_at = now()?;
+            let generation_value = json!(folder.generation);
+            let record = json!({
+                "format": "mind-folder-access",
+                "version": 1,
+                "folderId": id,
+                "generation": generation_value,
+                "access": access,
+                "grantedAt": granted_at,
+                "channel": channel,
+            });
+            save(base, &policy_name, &record, policy.as_ref(), || {
+                confirm_owner()?;
+                let live = read_json(base, &registry_name).map_err(|error| error.code)?;
+                let live_gen = live.as_ref().and_then(|value| value.get("generation")).cloned().unwrap_or(Value::Null);
+                if live.is_some_and(|value| value["id"] == id && value["path"] == folder.root && live_gen == generation_value) {
+                    Ok(())
+                } else {
+                    Err("ACCESS_CHANGED")
+                }
+            })?;
+            Ok(json!({"ok": true, "acceso": {"folderId": id, "access": access, "grantedAt": granted_at, "channel": channel}}))
+        }
+        "retirar_acceso" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let removed = remove_base_file(base, &policy_file(id), &confirm_owner)?;
+            Ok(json!({"ok": true, "retirado": removed}))
+        }
+        "obtener_continuidad" => {
+            let policy = persisted_continuity_policy(base)?;
+            Ok(json!({"ok": true, "continuidad": policy}))
+        }
+        "guardar_continuidad" => {
+            let granted = levels(payload.get("permisos").unwrap_or(&Value::Null), CONTINUITY)?;
+            let channel = valid_channel_arg(payload.get("canal"))?;
+            let policy = read(base, POLICY)?;
+            let (leer, registrar) = (granted.contains(&"leer"), granted.contains(&"registrar"));
+            let granted_at = now()?;
+            let record = json!({
+                "format": "mind-continuity-access",
+                "version": 1,
+                "leer": leer,
+                "registrar": registrar,
+                "grantedAt": granted_at,
+                "channel": channel,
+            });
+            save(base, POLICY, &record, policy.as_ref(), &confirm_owner)?;
+            Ok(json!({"ok": true, "continuidad": {"leer": leer, "registrar": registrar, "grantedAt": granted_at, "channel": channel}}))
+        }
+        "listar_solicitudes" => {
+            let now = now()?;
+            let entries = fs::read_dir(base).map_err(|_| fail("READ_FAILED", "No se pudieron listar las solicitudes."))?;
+            let mut requests = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|_| fail("READ_FAILED", "No se pudieron listar las solicitudes."))?;
+                let filename = entry.file_name();
+                let Some(name) = filename.to_str() else { continue };
+                let Some(id) = name.strip_prefix("consent-request-").and_then(|value| value.strip_suffix(".json")) else { continue };
+                if !Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id) { continue; }
+                let stored = read_json(base, name).ok().flatten();
+                match stored {
+                    Some(record) if is_valid_pending(&record, id, &now)
+                        && record["expiresAt"].as_str().is_some_and(|value| value >= now.as_str()) =>
+                    {
+                        requests.push(record);
+                    }
+                    _ => {
+                        let _ = remove_base_file(base, name, &confirm_owner);
+                    }
+                }
+            }
+            requests.sort_by(|left, right| {
+                left["createdAt"].as_str().cmp(&right["createdAt"].as_str())
+                    .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+            });
+            Ok(json!({"ok": true, "solicitudes": requests}))
+        }
+        "retirar_solicitud" => {
+            let id = payload.get("id").and_then(Value::as_str)
+                .filter(|id| Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == *id))
+                .ok_or_else(|| fail("INVALID_REQUEST_ID", "Identificador de solicitud no válido."))?;
+            let removed = remove_base_file(base, &format!("consent-request-{id}.json"), &confirm_owner)?;
+            Ok(json!({"ok": true, "retirada": removed}))
+        }
+        _ => Err(fail("INVALID_ARGUMENTS", "Operación de consola no admitida.")),
+    }
 }

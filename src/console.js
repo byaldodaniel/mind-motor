@@ -6,6 +6,7 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import { Writable } from 'node:stream';
 import { MotorError } from './errors.js';
+import { samePath } from './paths.js';
 import { ACCESS_LEVELS, CONTINUITY_LEVELS, ACCESS_PRESETS, PRESET_LABELS, minimumPreset, normalizeAccess, describeAccess } from './access-policy.js';
 import { CONTINUITY_ACCESS_LABELS, validateCandidateFolder, untrustedText } from './consent.js';
 import { liveSessions } from './session.js';
@@ -93,9 +94,10 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
   let changes = 0;
   if (folderPath !== null) {
     const canonical = await validateCandidateFolder(folderPath, {
-      protectedDirectories: session.layout.protectedDirectories,
+      protectedDirectories: session.layout?.protectedDirectories,
       baseDirectory: motor.baseDirectory,
-      motorDirectory: session.layout.motorDirectory,
+      motorDirectory: session.layout?.motorDirectory,
+      userDataDirectory: session.layout?.userDataDirectory,
     });
     prompt.write(`Carpeta (incluye todo lo que contiene): ${canonical}`);
     const access = await choosePreset(prompt, requested ?? ['leer']);
@@ -120,9 +122,10 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
       let canonical;
       try {
         canonical = await validateCandidateFolder(request.path, {
-          protectedDirectories: session.layout.protectedDirectories,
+          protectedDirectories: session.layout?.protectedDirectories,
           baseDirectory: motor.baseDirectory,
-          motorDirectory: session.layout.motorDirectory,
+          motorDirectory: session.layout?.motorDirectory,
+          userDataDirectory: session.layout?.userDataDirectory,
         });
       } catch (error) {
         prompt.write(`No se puede autorizar: ${error.message}`);
@@ -147,10 +150,18 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
         prompt.write('Rechazada.');
       }
     } else if (request.kind === 'borrado' || request.kind === 'vaciado') {
+      if (session.nativeConsole) {
+        prompt.write('Esta solicitud requiere el Motor completo y se conserva pendiente.');
+        continue;
+      }
       // Borrado o vaciado pedido por un agente: Mind lo describe y lo ejecuta si el usuario confirma.
       const outcome = await reviewOperationRequest({ session, prompt, request });
       if (outcome.done) changes += 1;
     } else if (request.kind === 'automatizacion') {
+      if (session.nativeConsole) {
+        prompt.write('Esta solicitud requiere el Motor completo y se conserva pendiente.');
+        continue;
+      }
       // Activación automática de una función: se revisa la versión exacta solicitada.
       const outcome = await reviewAutomationRequest({ session, prompt, request });
       if (outcome.approved) changes += 1;
@@ -160,13 +171,21 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
       if (await prompt.yes('¿Autorizar?', false)) {
         const current = await policy.getContinuity();
         const access = { leer: current.leer, registrar: current.registrar };
+        let grantedAny = false;
         for (const level of CONTINUITY_LEVELS.filter((item) => request.requested.includes(item))) {
-          access[level] = await prompt.yes(`  ¿Permitir: ${CONTINUITY_ACCESS_LABELS[level].toLowerCase()}?`, false) || access[level];
+          if (await prompt.yes(`  ¿Permitir: ${CONTINUITY_ACCESS_LABELS[level].toLowerCase()}?`, false)) {
+            access[level] = true;
+            grantedAny = true;
+          }
         }
-        await policy.setContinuity(describeAccess(access, CONTINUITY_LEVELS), { channel: 'consola' });
-        await session.audit('continuidad-autorizada', { permisos: describeAccess(access, CONTINUITY_LEVELS), canal: 'consola', cliente: request.client });
-        prompt.write(`Continuidad: ${describeAccess(access, CONTINUITY_LEVELS).join(', ') || 'sin permisos'}.`);
-        changes += 1;
+        if (grantedAny) {
+          await policy.setContinuity(describeAccess(access, CONTINUITY_LEVELS), { channel: 'consola' });
+          await session.audit('continuidad-autorizada', { permisos: describeAccess(access, CONTINUITY_LEVELS), canal: 'consola', cliente: request.client });
+          prompt.write(`Continuidad: ${describeAccess(access, CONTINUITY_LEVELS).join(', ') || 'sin permisos'}.`);
+          changes += 1;
+        } else {
+          prompt.write('Rechazada.');
+        }
       } else {
         prompt.write('Rechazada.');
       }
@@ -176,12 +195,20 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
   return changes;
 }
 
+function matchFolder(item, reference) {
+  if (!reference) return false;
+  if (item.id === reference) return true;
+  return path.isAbsolute(reference)
+    ? samePath(item.path, path.resolve(reference))
+    : item.path === path.normalize(reference);
+}
+
 /** Lista y retira permisos. */
-export async function permissionsConsole({ session, prompt, revoke = null, exclude = null, include = null, target = null }) {
+export async function permissionsConsole({ session, prompt, revoke = null, revokePermissions = null, exclude = null, include = null, target = null }) {
   const { motor, policy } = session;
   const folders = await motor.listAuthorizedFolders();
   if (exclude !== null || include !== null) {
-    const folder = folders.find((item) => item.id === target || item.path === path.normalize(target ?? ''));
+    const folder = folders.find((item) => matchFolder(item, target));
     if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'Esa carpeta no está autorizada.');
     const current = (await motor.getAuthorizedFolder(folder.id))?.exclusions ?? [];
     let next = current;
@@ -199,8 +226,35 @@ export async function permissionsConsole({ session, prompt, revoke = null, exclu
     return 1;
   }
   if (revoke !== null) {
-    const folder = folders.find((item) => item.id === revoke || item.path === path.normalize(revoke));
+    if (revoke === 'continuidad' || revoke === '--continuidad') {
+      const cleaned = (revokePermissions ?? []).map((item) => String(item).replace(/^--/, ''));
+      const requested = cleaned.length > 0 ? normalizeAccess(cleaned, CONTINUITY_LEVELS) : { leer: true, registrar: true };
+      if (requested.leer) requested.registrar = true;
+      const removing = describeAccess(requested, CONTINUITY_LEVELS);
+      if (!(await prompt.yes('¿Retirar permisos de continuidad?', false))) return 0;
+      const current = await policy.getContinuity();
+      const retained = CONTINUITY_LEVELS.filter((level) => current[level] === true && !removing.includes(level));
+      await policy.setContinuity(retained, { channel: 'consola' });
+      await session.audit('continuidad-retirada', { permisos: retained, canal: 'consola' });
+      prompt.write(`Continuidad: ${retained.join(', ') || 'sin permisos'}`);
+      return 1;
+    }
+    const folder = folders.find((item) => matchFolder(item, revoke));
     if (!folder) throw new MotorError('FOLDER_NOT_AUTHORIZED', 'Esa carpeta no está autorizada.');
+    if (Array.isArray(revokePermissions) && revokePermissions.length > 0) {
+      const cleaned = revokePermissions.map((item) => String(item).replace(/^--/, ''));
+      const removing = describeAccess(normalizeAccess(cleaned, ACCESS_LEVELS), ACCESS_LEVELS);
+      if (!removing.includes('encontrar')) {
+        if (!(await prompt.yes(`¿Retirar ${removing.join(', ')} en ${folder.path}?`, false))) return 0;
+        const decision = await policy.get(folder.id);
+        const access = { ...(decision?.access ?? normalizeAccess([])) };
+        for (const level of removing) access[level] = false;
+        const saved = await policy.set(folder.id, access, { channel: 'consola' });
+        await session.audit('permisos-reducidos', { carpeta: folder.id, permisos: describeAccess(saved.access), canal: 'consola' });
+        prompt.write(`Permisos en ${folder.path}: ${describeAccess(saved.access).join(', ') || 'ninguno para agentes'}.`);
+        return 1;
+      }
+    }
     if (!(await prompt.yes(`¿Retirar ${folder.path} de Mind? Se elimina su índice; los originales no se tocan.`, false))) return 0;
     await motor.revokeFolder(folder.id);
     await policy.remove(folder.id);

@@ -26,8 +26,15 @@ impl Owner {
         });
         reject_barrier(base)?;
         let text = record.to_string();
-        text_write::write_bytes(base, LOCK, text.as_bytes(), 16 * 1024, None, || reject_barrier(base))
-            .map_err(|error| if error == "FILE_EXISTS" { "BASE_OCUPADA" } else { error })?;
+        match text_write::write_bytes(base, LOCK, text.as_bytes(), 16 * 1024, None, || reject_barrier(base)) {
+            Ok(_) => {}
+            Err("FILE_EXISTS") if recover_abandoned(base, &host) => {
+                text_write::write_bytes(base, LOCK, text.as_bytes(), 16 * 1024, None, || reject_barrier(base))
+                    .map_err(|error| if error == "FILE_EXISTS" { "BASE_OCUPADA" } else { error })?;
+            }
+            Err("FILE_EXISTS") => return Err("BASE_OCUPADA".into()),
+            Err(error) => return Err(error.into()),
+        }
         let owner = Self { base: base.to_owned(), token };
         reject_barrier(base)?;
         owner.check()?;
@@ -46,9 +53,62 @@ impl Owner {
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        if self.check().is_ok() {
+        if reject_barrier(&self.base).is_ok() && self.check().is_ok() {
             let _ = fs::remove_file(Path::new(&self.base).join(LOCK));
         }
+    }
+}
+
+struct BarrierGuard(std::path::PathBuf);
+
+impl Drop for BarrierGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
+}
+
+fn lock_owner_fields(value: &serde_json::Value) -> Option<(u32, &str, &str, &str)> {
+    if value["version"].as_u64() != Some(2) {
+        return None;
+    }
+    let pid = value["pid"].as_u64().and_then(|value| u32::try_from(value).ok()).filter(|&pid| pid >= 1)?;
+    let host = value["host"].as_str().filter(|text| !text.is_empty())?;
+    let birth = value["processBirth"].as_str().filter(|text| !text.is_empty())?;
+    let token = value["token"].as_str().filter(|text| !text.is_empty())?;
+    Some((pid, host, birth, token))
+}
+
+fn recover_abandoned(base: &str, current_host: &str) -> bool {
+    if reject_barrier(base).is_err() {
+        return false;
+    }
+    let Ok(Some(entry)) = read_json(base, LOCK) else {
+        return false;
+    };
+    let Some((pid, host, birth, token)) = lock_owner_fields(&entry) else {
+        return false;
+    };
+    if host != current_host || !is_stale_process(pid, birth) {
+        return false;
+    }
+    let barrier_path = Path::new(base).join(RECOVERY);
+    if fs::create_dir(&barrier_path).is_err() {
+        return false;
+    }
+    let _guard = BarrierGuard(barrier_path);
+    let Ok(Some(current)) = read_json(base, LOCK) else {
+        return false;
+    };
+    let Some((cur_pid, cur_host, cur_birth, cur_token)) = lock_owner_fields(&current) else {
+        return false;
+    };
+    if cur_pid != pid || cur_host != host || cur_birth != birth || cur_token != token {
+        return false;
+    }
+    match fs::remove_file(Path::new(base).join(LOCK)) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(_) => false,
     }
 }
 
@@ -62,9 +122,13 @@ fn reject_barrier(base: &str) -> Result<(), &'static str> {
 
 #[cfg(windows)]
 mod windows {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::{
-        Foundation::{FILETIME, SYSTEMTIME},
-        System::Threading::{GetCurrentProcess, GetProcessTimes},
+        Foundation::{GetLastError, FILETIME, SYSTEMTIME, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{
+            GetCurrentProcess, GetProcessTimes, OpenProcess, WaitForSingleObject,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        },
     };
 
     #[link(name = "kernel32")]
@@ -88,6 +152,29 @@ mod windows {
         Some((host, format!("win32:{ticks}")))
     }
 
+    pub(super) fn is_stale_process(pid: u32, process_birth: &str) -> bool {
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return unsafe { GetLastError() } == 87;
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let wait = unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) };
+        if wait == WAIT_OBJECT_0 {
+            return true;
+        }
+        if wait != WAIT_TIMEOUT {
+            return false;
+        }
+        let (mut birth, mut exit, mut kernel, mut user) = (
+            FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default(),
+        );
+        if unsafe { GetProcessTimes(handle.as_raw_handle(), &mut birth, &mut exit, &mut kernel, &mut user) } == 0 {
+            return false;
+        }
+        let ticks = (u64::from(birth.dwHighDateTime) << 32) | u64::from(birth.dwLowDateTime);
+        format!("win32:{ticks}") != process_birth
+    }
+
     pub(crate) fn timestamp() -> Option<String> {
         let mut time = SYSTEMTIME::default();
         unsafe { GetSystemTime(&mut time) };
@@ -97,7 +184,7 @@ mod windows {
 }
 
 #[cfg(windows)]
-use windows::identity;
+use windows::{identity, is_stale_process};
 #[cfg(windows)]
 pub(crate) use windows::timestamp;
 
@@ -113,6 +200,32 @@ fn identity() -> Option<(String, String)> {
     let stat = fs::read_to_string("/proc/self/stat").ok()?;
     let birth = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
     Some((host, format!("linux:{}:{birth}", boot.trim())))
+}
+
+#[cfg(target_os = "linux")]
+fn is_stale_process(pid: u32, process_birth: &str) -> bool {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let Some(state) = parts.first().copied() else {
+        return false;
+    };
+    if matches!(state, "Z" | "X") {
+        return true;
+    }
+    let Some(birth) = parts.get(19).copied() else {
+        return false;
+    };
+    let Ok(boot) = fs::read_to_string("/proc/sys/kernel/random/boot_id") else {
+        return false;
+    };
+    format!("linux:{}:{birth}", boot.trim()) != process_birth
 }
 
 #[cfg(unix)]
@@ -134,6 +247,10 @@ pub(crate) fn timestamp() -> Option<String> {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn identity() -> Option<(String, String)> {
     None
+}
+#[cfg(not(any(windows, target_os = "linux")))]
+fn is_stale_process(_pid: u32, _process_birth: &str) -> bool {
+    false
 }
 #[cfg(not(any(windows, unix)))]
 pub(crate) fn timestamp() -> Option<String> {

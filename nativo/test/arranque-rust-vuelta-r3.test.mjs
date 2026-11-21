@@ -4,12 +4,14 @@ import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { checkHealthyConnector } from '../../src/connector.js';
 import { probeProcesses } from '../../src/process-identity.js';
+import { main as cliMain } from '../../src/product-cli.js';
 import { RUNS } from './runs.mjs';
 import { extractR3, r3Commit } from './r3-fixture.mjs';
 
@@ -209,6 +211,50 @@ function fields(value) {
   return { id, revision, titulo, importante, archivo, referencias };
 }
 
+async function runInteractiveCli(args, respond, { native = true } = {}) {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  input.isTTY = true;
+  output.isTTY = true;
+  output.columns = 100;
+  let captured = '';
+  let seen = 0;
+  output.setEncoding('utf8');
+  output.on('data', chunk => {
+    captured += chunk;
+    const tail = captured.slice(seen);
+    if (/(?:\[[sS]\/[nN]\]|\[0-3\]:|\(Enter para ninguna\):)\s$/u.test(tail)) {
+      const answer = respond(tail, captured);
+      seen = captured.length;
+      setImmediate(() => input.write(`${answer}\n`));
+    }
+  });
+  const saved = {
+    MIND_AGENT_STARTUP: process.env.MIND_AGENT_STARTUP,
+    MIND_MOTOR_NATIVO: process.env.MIND_MOTOR_NATIVO,
+    MIND_MOTOR_NATIVO_EXE: process.env.MIND_MOTOR_NATIVO_EXE,
+  };
+  process.env.MIND_AGENT_STARTUP = '0';
+  if (native) {
+    process.env.MIND_MOTOR_NATIVO = '1';
+    process.env.MIND_MOTOR_NATIVO_EXE = path.resolve(executable);
+  } else {
+    delete process.env.MIND_MOTOR_NATIVO;
+    delete process.env.MIND_MOTOR_NATIVO_EXE;
+  }
+  try {
+    const code = await cliMain(args, { input, output });
+    assert.equal(code, 0, captured);
+    return captured;
+  } finally {
+    input.end();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras un corte', {
   skip: !executable && 'Indica MIND_NATIVE_EXE',
   timeout: 90_000,
@@ -216,6 +262,8 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
   const root = await fs.realpath(await fs.mkdtemp(path.join(RUNS, prefix)));
   const base = path.join(root, 'Base');
   const notes = path.join(root, 'Notas ficticias');
+  const extra = path.join(root, 'Notas extra ficticias');
+  const elicitFolder = path.join(root, 'Carpeta formulario ficticia');
   const cwd = path.join(root, 'Directorio de inicio ficticio');
   const binary = await fs.realpath(path.resolve(executable));
   let launcher;
@@ -256,28 +304,15 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     }
   });
 
-  await Promise.all([fs.mkdir(notes), fs.mkdir(cwd)]);
+  await Promise.all([fs.mkdir(notes), fs.mkdir(extra), fs.mkdir(elicitFolder), fs.mkdir(cwd)]);
+  await Promise.all([
+    fs.writeFile(path.join(notes, 'Apunte.txt'), 'Nota inicial en carpeta.\n'),
+    fs.writeFile(path.join(extra, 'Extra.txt'), 'Contenido en carpeta extra.\n'),
+  ]);
   const old = await extractR3(root);
-  const { openSession } = await import(JSON.parse(old('session.js')));
-  const { resolveLayout } = await import(JSON.parse(old('layout.js')));
-  const layout = await resolveLayout({ base, env });
-  const prepare = await openSession({ layout, motorVersion: '1.0.4', observe: false });
-  let folder, access, before;
-  try {
-    await prepare.start();
-    folder = await prepare.motor.authorizeFolder(notes);
-    const grant = { channel: 'administracion-local' };
-    await prepare.policy.set(folder.id, ['encontrar', 'leer', 'escribir'], grant);
-    await prepare.policy.setContinuity(['leer'], grant);
-    access = await prepare.policy.get(folder.id);
-    before = await prepare.motor.recordContinuity({ content: 'Registrado con r3 antes del arranque habitual' });
-  } finally {
-    await prepare.close();
-  }
+
   const markerPath = path.join(base, 'mind-base.json');
-  const marker = await fs.readFile(markerPath);
   const consentPath = path.join(base, 'agent-continuity-access.json');
-  const readOnly = await fs.readFile(consentPath);
   const nativeEnv = { ...env, MIND_MOTOR_NATIVO: '1', MIND_MOTOR_NATIVO_EXE: binary };
   launcher = spawn(process.execPath, ['bin/mind.js', 'motor', '--base', base], {
     cwd: repo, env: nativeEnv, stdio: 'ignore', windowsHide: true,
@@ -296,6 +331,13 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     return candidate;
   }, 'El lanzador habitual debe publicar un conector autenticado.');
   assert.notEqual(connector.health.pid, launcher.pid);
+  assert.equal(connector.health.backend, 'rust');
+  const marker = await fs.readFile(markerPath);
+  const markerJson = JSON.parse(marker.toString('utf8'));
+  assert.equal(markerJson.format, 'mind-base');
+  assert.equal(markerJson.version, 3);
+  assert.match(markerJson.baseId, /^[a-f0-9-]{36}$/u);
+
   const owner = JSON.parse(await fs.readFile(lockPath, 'utf8'));
   assert.equal(owner.pid, connector.health.pid);
   assert.equal(owner.pid, connector.state.pid);
@@ -315,66 +357,188 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     { ...options, env: nativeEnv });
   assert.equal(JSON.parse(status).motor_central.pid, owner.pid);
   assert.deepEqual(await auxiliaryProcesses(owner.pid), []);
-  for (const environment of [env, nativeEnv]) {
-    await assert.rejects(run(process.execPath, ['bin/mind.js', 'permisos', '--base', base],
-      { ...options, env: environment }), error => JSON.parse(error.stderr).error.codigo === 'BASE_OCUPADA');
-  }
   await checkStdio(base, notes, nativeEnv, owner.pid);
 
   const url = new URL('/mcp', connector.url).href;
   const first = await openMcp(url, connector.token, 'primer cliente de arranque habitual');
-  const decisions = [
-    async ({ eventId }) => {
-      assert.equal(await first.reply(eventId, { action: 'accept', content: { registrar: true } }), 202);
-      return { action: 'decline' };
-    },
-    async ({ requestId }) => {
-      await second.notify('notifications/cancelled', { requestId });
-    },
-    () => ({ action: 'accept', content: { registrar: true } }),
-  ];
-  const second = await openMcp(url, connector.token, 'segundo cliente de arranque habitual', {
-    onElicit(params, identifiers) {
-      assert.equal(params.mode, 'form');
-      assert.deepEqual(Object.keys(params.requestedSchema.properties), ['registrar']);
-      assert.equal(params.requestedSchema.properties.registrar.type, 'boolean');
-      assert.match(params.message, /continuidad/i);
-      assert.ok(decisions.length > 0, 'No se abre un formulario adicional');
-      return decisions.shift()(identifiers);
-    },
-  });
+  const second = await openMcp(url, connector.token, 'segundo cliente de arranque habitual');
   assert.notEqual(first.session, second.session);
   assert.equal((await first.call('estado')).motor_central.pid, owner.pid);
   assert.equal((await second.call('estado')).motor_central.pid, owner.pid);
-  const request = { accion: 'solicitar', continuidad: ['leer', 'registrar'], motivo: 'Guardar una nota ficticia.' };
-  const pending = await first.call('acceso', request);
-  assert.equal(pending.estado, 'pendiente');
-  assert.match(pending.solicitud, /^[a-f0-9-]{36}$/u);
-  const requestPath = path.join(base, 'consent-request-' + pending.solicitud + '.json');
-  const requestRecord = JSON.parse(await fs.readFile(requestPath, 'utf8'));
-  assert.equal(requestRecord.format, 'mind-consent-request');
-  assert.equal(requestRecord.version, 1);
-  assert.equal(requestRecord.kind, 'continuidad');
-  assert.deepEqual(requestRecord.requested, ['registrar']);
-  assert.deepEqual(await fs.readFile(consentPath), readOnly);
-  assert.equal((await second.call('acceso', request)).estado, 'rechazado');
-  await second.denied('acceso', request, 'REQUEST_CANCELLED');
-  assert.deepEqual(await fs.readFile(consentPath), readOnly);
+
+  // Solicitudes pendientes y rechazo desde consola con Rust activo.
+  const continuityReq = { accion: 'solicitar', continuidad: ['leer', 'registrar'], motivo: 'Conservar notas de trabajo.' };
+  const notesReq = { accion: 'solicitar', ruta: notes, acceso: 'completo', motivo: 'Leer y editar notas ficticias.' };
+  const pendingContinuity = await first.call('acceso', continuityReq);
+  const pendingNotes = await first.call('acceso', notesReq);
+  assert.equal(pendingContinuity.estado, 'pendiente');
+  assert.equal(pendingNotes.estado, 'pendiente');
+  for (const client of [first, second]) {
+    const state = await client.call('estado');
+    assert.equal(state.solicitudes_pendientes.length, 2);
+  }
+
+  // El cliente MCP no puede aprobar su propia solicitud ni operar la consola.
+  const consoleToken = JSON.parse(await fs.readFile(path.join(base, 'conector-consola.json'), 'utf8')).token;
+  assert.notEqual(consoleToken, connector.token);
+  async function rpcAs(extraHeaders, payload) {
+    const response = await fetch(new URL('/rpc', connector.url), {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + connector.token,
+        'Content-Type': 'application/json',
+        ...extraHeaders,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5_000),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+  for (const payload of [
+    { accion: 'consola', operacion: 'autorizar_carpeta', ruta: notes },
+    { accion: 'consola', operacion: 'guardar_acceso', id: 'x', permisos: ['encontrar'] },
+    { accion: 'consola', operacion: 'guardar_continuidad', permisos: ['leer', 'registrar'] },
+    { accion: 'consola', operacion: 'retirar_solicitud', id: pendingNotes.solicitud },
+    { accion: 'consola', operacion: 'listar_solicitudes' },
+  ]) {
+    const deniedRpc = await rpcAs({}, payload);
+    assert.equal(deniedRpc.status, 403, JSON.stringify(payload));
+    assert.equal(deniedRpc.body?.error?.codigo, 'CONSOLE_CREDENTIAL_REQUIRED');
+  }
+  const spoofedHeader = await rpcAs(
+    { 'X-Mind-Consola': connector.token },
+    { accion: 'consola', operacion: 'autorizar_carpeta', ruta: notes },
+  );
+  assert.equal(spoofedHeader.status, 403);
+  assert.equal(spoofedHeader.body?.error?.codigo, 'CONSOLE_CREDENTIAL_REQUIRED');
+  const approveViaTool = await rpcAs({}, {
+    accion: 'herramienta',
+    tool: 'acceso',
+    args: { accion: 'aprobar', solicitud: pendingNotes.solicitud },
+  });
+  assert.equal(approveViaTool.body?.isError, true);
+  await first.denied('acceso', { accion: 'aprobar', solicitud: pendingNotes.solicitud }, 'INVALID_ARGUMENTS');
+  for (const client of [first, second]) {
+    const state = await client.call('estado');
+    assert.equal(state.solicitudes_pendientes.length, 2);
+  }
+  await assert.rejects(fs.stat(consentPath), { code: 'ENOENT' });
+  const baseFiles = await fs.readdir(base);
+  assert.equal(baseFiles.some(file => file.startsWith('folder-authorization-') || file.startsWith('folder-access-')), false);
+  const { stdout: mcpHeaders } = await run(
+    process.execPath, ['bin/mind.js', 'despertar', '--headers', '--base', base],
+    { ...options, env: nativeEnv },
+  );
+  assert.equal(mcpHeaders.includes(connector.token), true);
+  assert.equal(mcpHeaders.includes(consoleToken), false);
+
+  await assert.rejects(
+    run(process.execPath, ['bin/mind.js', 'autorizar', '--base', base], { ...options, env: nativeEnv }),
+    error => JSON.parse(error.stderr).error.codigo === 'CONSOLE_REQUIRED',
+  );
+  const rejectedConsole = await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('Elige una opción')) return '0';
+    if (tail.includes('¿Autorizar?')) return 'n';
+    assert.fail('Pregunta inesperada al rechazar: ' + tail);
+  });
+  assert.match(rejectedConsole, /Rechazada\./);
+  await assert.rejects(fs.stat(consentPath), { code: 'ENOENT' });
+  for (const client of [first, second]) {
+    const state = await client.call('estado');
+    assert.deepEqual(state.solicitudes_pendientes, []);
+    assert.deepEqual(state.carpetas, []);
+    assert.deepEqual(state.continuidad.permisos, []);
+  }
   const deniedPath = path.join(notes, 'Falta confirmar.md');
   await first.denied('guardar', { titulo: 'Sin autorización', importante: 'Sigue faltando el permiso.', destino: deniedPath },
     'ACCESS_NOT_GRANTED');
+  await first.denied('leer', { carpeta: notes, ruta: 'Apunte.txt' }, 'FOLDER_NOT_AUTHORIZED');
   await assert.rejects(fs.stat(deniedPath), { code: 'ENOENT' });
-  const allowed = await second.call('acceso', request);
-  assert.equal(allowed.estado, 'autorizado');
-  assert.deepEqual(allowed.continuidad, ['leer', 'registrar']);
-  assert.deepEqual(decisions, []);
+
+  // Aprobación desde consola con Rust como único escritor.
+  assert.equal((await first.call('acceso', continuityReq)).estado, 'pendiente');
+  assert.equal((await first.call('acceso', notesReq)).estado, 'pendiente');
+  const extraReq = { accion: 'solicitar', ruta: extra, acceso: 'leer', motivo: 'Leer notas extra.' };
+  assert.equal((await first.call('acceso', extraReq)).estado, 'pendiente');
+  await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('Elige una opción')) {
+      if (tail.includes(notes)) return '3';
+      if (tail.includes(extra)) return '2';
+      assert.fail('Carpeta desconocida: ' + tail);
+    }
+    if (tail.includes('Subcarpetas a excluir')) return '';
+    if (tail.includes('¿Autorizar?')) return 's';
+    if (tail.includes('¿Permitir:')) return 's';
+    assert.fail('Pregunta inesperada al aprobar: ' + tail);
+  });
+
+  let notesId, extraId;
+  for (const client of [first, second]) {
+    const state = await client.call('estado');
+    assert.deepEqual(state.solicitudes_pendientes, []);
+    assert.deepEqual(state.continuidad.permisos, ['leer', 'registrar']);
+    const notesEntry = state.carpetas.find(item => sameExecutable(item.ruta, notes));
+    const extraEntry = state.carpetas.find(item => sameExecutable(item.ruta, extra));
+    assert.deepEqual(notesEntry?.permisos, ['encontrar', 'leer', 'escribir', 'organizar']);
+    assert.deepEqual(extraEntry?.permisos, ['encontrar', 'leer']);
+    notesId = notesEntry.id;
+    extraId = extraEntry.id;
+  }
   const consent = JSON.parse(await fs.readFile(consentPath, 'utf8'));
-  assert.equal(consent.channel, 'formulario-del-cliente');
+  assert.equal(consent.channel, 'consola');
+  assert.equal(consent.leer, true);
   assert.equal(consent.registrar, true);
+
+  // Operaciones en las carpetas autorizadas y continuidad entre ambas sesiones.
+  const seed = (await first.call('guardar', {
+    en: 'continuidad', tipo: 'contexto', contenido: 'Registro previo guardado con Rust',
+  })).registro;
+  const markdownPath = path.join(notes, 'Retoma.md');
+  const saved = (await first.call('guardar', {
+    titulo: 'Arranque habitual en Rust', importante: 'Esta conversación debe recuperarse en r3.',
+    destino: markdownPath, referencias: [{ registro: seed.id, relacion: 'continúa' }],
+  })).conversacion;
+  const written = await first.call('crear', { carpeta: notesId, ruta: 'Nota.txt', contenido: 'Escrita en Rust.\n' });
+  assert.equal(written.estado, 'creado');
+  assert.deepEqual(fields((await second.call('retomar', { id: saved.id })).conversacion), fields(saved));
+  assert.equal((await second.call('leer', { carpeta: notesId, ruta: 'Nota.txt' })).contenido, 'Escrita en Rust.\n');
+  assert.equal((await second.call('leer', { carpeta: extraId, ruta: 'Extra.txt' })).contenido, 'Contenido en carpeta extra.\n');
   const outside = path.join(root, 'Fuera de permiso.md');
   await first.denied('guardar', { titulo: 'Sin permiso', importante: 'No sale de la carpeta autorizada.', destino: outside },
     'FOLDER_NOT_AUTHORIZED');
   await assert.rejects(fs.stat(outside), { code: 'ENOENT' });
+
+  // Formulario del cliente (elicitación), cancelación y ámbitos dinámicos.
+  const decisions = [
+    async ({ eventId }) => {
+      assert.equal(await first.reply(eventId, { action: 'accept', content: { acceso: 'leer', excluir: '' } }), 202);
+      return { action: 'decline' };
+    },
+    async ({ requestId }) => {
+      await formClient.notify('notifications/cancelled', { requestId });
+    },
+    () => ({ action: 'accept', content: { acceso: 'leer', excluir: '' } }),
+  ];
+  const formClient = await openMcp(url, connector.token, 'cliente con formularios', {
+    onElicit(params, identifiers) {
+      assert.equal(params.mode, 'form');
+      assert.ok(decisions.length > 0, 'No se abre un formulario adicional');
+      return decisions.shift()(identifiers);
+    },
+  });
+  try {
+    const elicitReq = { accion: 'solicitar', ruta: elicitFolder, acceso: 'leer', motivo: 'Probar formulario.' };
+    assert.equal((await formClient.call('acceso', elicitReq)).estado, 'rechazado');
+    await formClient.denied('acceso', elicitReq, 'REQUEST_CANCELLED');
+    const elicitGranted = await formClient.call('acceso', elicitReq);
+    assert.equal(elicitGranted.estado, 'autorizado');
+    assert.deepEqual(decisions, []);
+    const retiredFormFolder = await formClient.call('acceso', { accion: 'retirar', carpeta: elicitFolder, todo: true });
+    assert.equal(retiredFormFolder.estado, 'retirada');
+  } finally {
+    await formClient.close();
+  }
+
   let roots = [notes];
   let listed = 0;
   const dynamic = await openMcp(url, connector.token, 'cliente con carpetas abiertas dinámicas', {
@@ -397,36 +561,102 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     await dynamic.close();
   }
 
-  const markdownPath = path.join(notes, 'Retoma.md');
-  const saved = (await first.call('guardar', {
-    titulo: 'Arranque habitual en Rust', importante: 'Esta conversación debe recuperarse en r3.',
-    destino: markdownPath, referencias: [{ registro: before.id, relacion: 'continúa' }],
-  })).conversacion;
-  assert.deepEqual(fields((await second.call('retomar', { id: saved.id })).conversacion), fields(saved));
+  // Listado y retirada de permisos desde consola con Rust activo.
+  for (const environment of [env, nativeEnv]) {
+    const { stdout: listing } = await run(process.execPath, ['bin/mind.js', 'permisos', '--base', base],
+      { ...options, env: environment });
+    assert.ok(listing.includes(notes));
+    assert.ok(listing.includes(extra));
+    assert.match(listing, /Continuidad: leer, registrar/);
+  }
+  await assert.rejects(
+    run(process.execPath, ['bin/mind.js', 'permisos', 'retirar', extraId, '--base', base], { ...options, env: nativeEnv }),
+    error => JSON.parse(error.stderr).error.codigo === 'CONSOLE_REQUIRED',
+  );
+  // Cancelar la confirmación conserva la carpeta intacta.
+  await runInteractiveCli(['permisos', 'retirar', extraId, '--base', base], tail => {
+    assert.match(tail, /¿Retirar /);
+    return 'n';
+  }, { native: false });
+  assert.equal((await second.call('leer', { carpeta: extraId, ruta: 'Extra.txt' })).contenido, 'Contenido en carpeta extra.\n');
+
+  // Retirar por completo la carpeta extra y comprobar en ambas sesiones.
+  const revokedOut = await runInteractiveCli(['permisos', 'retirar', extraId, '--base', base], tail => {
+    assert.match(tail, /¿Retirar /);
+    return 's';
+  }, { native: false });
+  assert.match(revokedOut, /Retirada\./);
+  for (const client of [first, second]) {
+    const state = await client.call('estado');
+    assert.equal(state.carpetas.some(item => item.id === extraId), false);
+    await client.denied('leer', { carpeta: extraId, ruta: 'Extra.txt' }, 'FOLDER_NOT_AUTHORIZED');
+  }
+
+  // Retirar solo escritura y organización en notes y comprobar en ambas sesiones.
+  const reducedOut = await runInteractiveCli(
+    ['permisos', 'retirar', notesId, 'escribir', 'organizar', '--base', base],
+    tail => {
+      assert.match(tail, /¿Retirar escribir, organizar/);
+      return 's';
+    },
+  );
+  assert.match(reducedOut, /Permisos en .*?: encontrar, leer\./);
+  for (const client of [first, second]) {
+    const state = await client.call('estado');
+    const entry = state.carpetas.find(item => item.id === notesId);
+    assert.deepEqual(entry?.permisos, ['encontrar', 'leer']);
+    assert.equal((await client.call('leer', { carpeta: notesId, ruta: 'Nota.txt' })).contenido, 'Escrita en Rust.\n');
+    assert.deepEqual(fields((await client.call('retomar', { id: saved.id })).conversacion), fields(saved));
+  }
+  await first.denied('crear', { carpeta: notesId, ruta: 'Denegado.txt', contenido: 'x' }, 'ACCESS_NOT_GRANTED');
+  const currentNote = await second.call('leer', { carpeta: notesId, ruta: 'Nota.txt' });
+  await second.denied('modificar', {
+    carpeta: notesId, ruta: 'Nota.txt', version: currentNote.version, contenido: 'No permitido',
+  }, 'ACCESS_NOT_GRANTED');
+
+  // Dejar una solicitud pendiente nueva para comprobar que r3 la conserva tras el corte.
+  const pendingForR3 = await first.call('acceso', {
+    accion: 'solicitar', ruta: extra, acceso: 'leer', motivo: 'Conservar pendiente tras corte.',
+  });
+  assert.equal(pendingForR3.estado, 'pendiente');
+  const pendingPath = path.join(base, 'consent-request-' + pendingForR3.solicitud + '.json');
+  const pendingRecord = JSON.parse(await fs.readFile(pendingPath, 'utf8'));
+
+  await assert.rejects(fs.stat(path.join(base, 'sesiones')), { code: 'ENOENT' });
   const recordPath = path.join(base, 'continuity-' + saved.id + '.json');
   const [record, markdown] = await Promise.all([fs.readFile(recordPath), fs.readFile(markdownPath)]);
   assert.deepEqual(await auxiliaryProcesses(owner.pid), []);
+  await fs.stat(path.join(base, 'conector-consola.json'));
 
   await interrupt(owner);
   nativeOwner = undefined;
   const { startCentralMotor } = await import(JSON.parse(old('motor-central.js')));
-  rollback = await startCentralMotor({ layout, motorVersion: '1.0.4', observe: false, discoverUpdates: null, preferredPort: 0 });
+  const { resolveLayout } = await import(JSON.parse(old('layout.js')));
+  const r3Layout = await resolveLayout({ base, env });
+  rollback = await startCentralMotor({
+    layout: r3Layout, motorVersion: '1.0.4', observe: false, discoverUpdates: null, preferredPort: 0,
+  });
   assert.equal(rollback.alreadyRunning, false);
   const r3 = await openMcp(rollback.url, rollback.token, 'retoma tras volver a r3');
   try {
     assert.deepEqual(fields((await r3.call('conversacion_leer', { id: saved.id })).conversacion), fields(saved));
-    assert.deepEqual(await rollback.session.policy.get(folder.id), access);
+    assert.equal(await rollback.session.policy.get(extraId), null);
+    const notesPolicy = await rollback.session.policy.get(notesId);
+    assert.deepEqual(notesPolicy?.access, { encontrar: true, leer: true, escribir: false, organizar: false });
+    assert.equal(notesPolicy?.channel, 'consola');
+    assert.equal((await r3.call('leer', { carpeta: notesId, ruta: 'Nota.txt' })).contenido, 'Escrita en Rust.\n');
+    await r3.denied('crear', { carpeta: notesId, ruta: 'Denegado-r3.txt', contenido: 'x' }, 'ACCESS_NOT_GRANTED');
     assert.deepEqual(await rollback.session.policy.getContinuity(), {
-      leer: true, registrar: true, channel: 'formulario-del-cliente', grantedAt: consent.grantedAt,
+      leer: true, registrar: true, channel: 'consola', grantedAt: consent.grantedAt,
     });
     const { createConsentRequests } = await import(JSON.parse(old('consent.js')));
     const oldPending = await createConsentRequests(base).list();
-    assert.deepEqual(oldPending.find(item => item.id === pending.solicitud), requestRecord);
+    assert.deepEqual(oldPending.find(item => item.id === pendingForR3.solicitud), pendingRecord);
   } finally {
     await r3.close();
   }
   assert.deepEqual(await fs.readFile(markerPath), marker);
   assert.deepEqual(await fs.readFile(recordPath), record);
   assert.deepEqual(await fs.readFile(markdownPath), markdown);
-  t.diagnostic('El lanzador salió | dos sesiones en PID Rust ' + owner.pid + ' | r3 ' + r3Commit.slice(0, 7) + ' retomó ' + saved.id);
+  t.diagnostic('El lanzador salió | consola 403 MCP con PID Rust ' + owner.pid + ' | r3 ' + r3Commit.slice(0, 7) + ' retomó ' + saved.id);
 });

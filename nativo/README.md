@@ -281,18 +281,21 @@ node --test nativo/test/motor-nativo-vuelta-r3.test.mjs
 ## Arranque habitual con Rust
 
 En desarrollo, usa el iniciador habitual con `MIND_MOTOR_NATIVO=1` y
-`MIND_MOTOR_NATIVO_EXE` como ruta absoluta al ejecutable compilado. Usa una
-Base de prueba ya preparada en el formato 3. Rust publica el conector
-habitual. El lanzador lo verifica y sale.
+`MIND_MOTOR_NATIVO_EXE` como ruta absoluta al ejecutable compilado. Rust crea la
+Base en formato 3 si aún no existe, publica el conector habitual y el lanzador
+sale tras comprobarlo.
 Dos conexiones HTTP comparten el mismo proceso y el bloqueo de la Base.
 Un cliente configurado para stdio sigue usando su puente.
 
 El Motor aplica los permisos persistidos y el ámbito abierto que comunica el
 iniciador o el cliente. El acceso nuevo requiere el formulario del cliente o
-queda pendiente para la consola habitual. Para revisar esos pendientes por
-consola, cierra el Motor Rust y usa `mind autorizar` en la misma Base. El modo
-Rust sigue siendo optativo mientras se portan las herramientas y confirmaciones
-restantes.
+queda pendiente para la consola habitual. Con el Motor Rust activo,
+`mind autorizar` y `mind permisos` operan a través de ese único proceso
+escritor (incluida la retirada parcial de permisos o completa de carpetas)
+usando `conector-consola.json`, una credencial nueva en cada arranque que
+Rust escribe y borra al cerrar; el token MCP no puede aprobar ni retirar desde
+`/rpc` consola. El modo Rust sigue siendo optativo mientras se portan las
+herramientas y confirmaciones restantes.
 
 Para volver a r3, cierra el Motor Rust, quita la selección nativa del iniciador
 y abre la misma Base con r3. Ambos usan el mismo bloqueo y formato de Base. El

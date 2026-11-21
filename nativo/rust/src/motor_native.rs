@@ -22,7 +22,7 @@ use crate::{
     motor_consent::{self as consent, AccessRequest, Prepared},
     motor_mcp::Mcp,
     motor_owner::{timestamp, Owner},
-    motor_workspace::{with_workspace, Workspace},
+    motor_workspace::{physical_directory, relative_parts, with_workspace, Workspace},
     motor_files, motor_permissions as access, motor_records, organize, scan, text_write,
 };
 
@@ -120,17 +120,66 @@ pub(crate) struct Motor {
 }
 
 impl Motor {
-    fn open(base: String, layout: Layout) -> Result<Self, Fault> {
-        let marker = access::read_json(&base, "mind-base.json")?.ok_or_else(|| {
-            Fault::new("BASE_NOT_FOUND", "Indica una Base preparada por Mind.")
-        })?;
-        if marker["format"] != "mind-base" || marker["version"] != 3 {
+    fn validate_marker(marker: &Value) -> Result<String, Fault> {
+        let corrupt = || Fault::new("BASE_MARKER_CORRUPT", "La marca de formato de la Base no es válida; no se modifica la Base.");
+        if marker["format"] != "mind-base"
+            || marker["version"].as_u64().is_none()
+            || !marker["createdAt"].as_str().is_some_and(|text| !text.is_empty())
+        {
+            return Err(corrupt());
+        }
+        let base_id = marker["baseId"].as_str().filter(|text| is_id(text)).ok_or_else(corrupt)?.to_owned();
+        if marker["version"] != 3 {
             return Err(Fault::new("BASE_FORMAT_UNSUPPORTED", "El Motor nativo requiere el formato 3 de la Base."));
         }
-        let base_id = id(&marker["baseId"])?.to_owned();
+        Ok(base_id)
+    }
+
+    fn read_marker(base: &str) -> Result<Option<String>, Fault> {
+        let marker = match access::read_json(base, "mind-base.json") {
+            Ok(value) => value,
+            Err(error) if error.code == "RECORD_CORRUPT" => {
+                return Err(Fault::new("BASE_MARKER_CORRUPT", "La marca de formato de la Base no es válida; no se modifica la Base."));
+            }
+            Err(error) => return Err(error),
+        };
+        marker.as_ref().map(Self::validate_marker).transpose()
+    }
+
+    fn open(base: String, layout: Layout, create: bool) -> Result<Self, Fault> {
+        if let Some(motor_dir) = layout.motor.as_deref().and_then(physical_directory) {
+            let base_path = Path::new(&base);
+            let motor_path = Path::new(&motor_dir);
+            if relative_parts(motor_path, base_path).is_some() || relative_parts(base_path, motor_path).is_some() {
+                return Err(Fault::new("BASE_OVERLAPS_MOTOR", "La Base no puede estar dentro del Motor."));
+            }
+        }
+        if Self::read_marker(&base)?.is_none() && !create {
+            return Err(Fault::new("BASE_NOT_FOUND", "Indica una Base preparada por Mind."));
+        }
         let owner = Owner::acquire(&base).map_err(|error| {
             Fault::new("BASE_OWNERSHIP", error)
         })?;
+        let base_id = match Self::read_marker(&base)? {
+            Some(base_id) => base_id,
+            None if create => {
+                let base_id = Uuid::new_v4().to_string();
+                let created_at = timestamp().ok_or_else(|| Fault::new("CLOCK_UNAVAILABLE", "No se pudo leer la hora del sistema."))?;
+                let created_by = std::env::var("MIND_MOTOR_NATIVO_VERSION").unwrap_or_else(|_| "1.0.5".into());
+                let marker = json!({
+                    "format": "mind-base",
+                    "version": 3,
+                    "baseId": base_id,
+                    "createdAt": created_at,
+                    "createdBy": created_by,
+                });
+                let bytes = marker.to_string() + "\n";
+                text_write::write_bytes(&base, "mind-base.json", bytes.as_bytes(), MAX_RECORD, None, || owner.check())
+                    .map_err(filesystem)?;
+                base_id
+            }
+            None => return Err(Fault::new("BASE_NOT_FOUND", "Indica una Base preparada por Mind.")),
+        };
         Ok(Self { base, base_id, owner, work: Mutex::new(()), layout })
     }
 
@@ -617,6 +666,9 @@ impl Server {
     }
 
     async fn rpc(&self, req: Request<Incoming>) -> Response<Body> {
+        let console_ok = req.headers().get("x-mind-consola").and_then(|value| value.to_str().ok())
+            .is_some_and(|value| self.connector.console.as_deref()
+                .is_some_and(|token| host::same(value.as_bytes(), token.as_bytes())));
         let parsed = match Limited::new(req.into_body(), crate::MAX_MESSAGE).collect().await {
             Ok(body) => serde_json::from_slice::<Value>(&body.to_bytes()).ok(),
             Err(_) => None,
@@ -625,6 +677,15 @@ impl Server {
             return host::full(StatusCode::BAD_REQUEST, rpc_error(invalid("Petición no válida.")));
         };
         let action = payload["accion"].as_str().unwrap_or_default();
+        if action == "consola" && !console_ok {
+            return host::full(StatusCode::FORBIDDEN, json!({
+                "ok": false,
+                "error": {
+                    "codigo": "CONSOLE_CREDENTIAL_REQUIRED",
+                    "mensaje": "La credencial de un cliente MCP solo permite solicitar permisos. Apruébalos o retíralos desde la consola de Mind."
+                }
+            }));
+        }
         if action == "apagar" {
             if (payload["soloSiInactivo"] == true || payload["soloSiQuieto"] == true) && self.mcp.count().await > 0 {
                 return host::full(StatusCode::OK, json!({"ok":true,"busy":true}));
@@ -651,6 +712,16 @@ fn rpc_error(error: Fault) -> Value {
 
 impl Motor {
     fn rpc_call(&self, payload: &Value) -> Result<Value, Fault> {
+        if payload["accion"].as_str() == Some("consola") {
+            let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+            self.owner.check().map_err(filesystem)?;
+            return consent::console(consent::Paths {
+                base: &self.base,
+                motor: self.layout.motor.as_deref(),
+                installation: self.layout.installation.as_deref(),
+                user_data: self.layout.user_data.as_deref(),
+            }, payload, || self.owner.check());
+        }
         let paths = payload["paths"].as_array().into_iter().flatten().take(64)
             .filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
         let workspace = if !paths.is_empty() {
@@ -682,6 +753,16 @@ impl Motor {
             "conversacion_guardar" if args.get("id").is_some() => self.call("actualizar", args),
             "conversacion_guardar" => self.call("guardar", args),
             "solicitar_acceso" => self.call("acceso", args),
+            "retirar_acceso" => {
+                let Some(mut fields) = args.as_object().cloned() else {
+                    return Err(invalid("Indica argumentos en un objeto."));
+                };
+                if fields.contains_key("accion") {
+                    return Err(invalid("La retirada incluye argumentos no admitidos."));
+                }
+                fields.insert("accion".into(), json!("retirar"));
+                self.call("acceso", Value::Object(fields))
+            }
             _ => self.call(name, args),
         };
         let (value, is_error) = match value {
@@ -689,6 +770,24 @@ impl Motor {
             Err(error) => (json!({"error":{"codigo":error.code,"mensaje":error.message}}), true),
         };
         Ok(json!({"ok":true,"text":value.to_string(),"value":value,"isError":is_error}))
+    }
+}
+
+fn write_startup_error(fault: &Fault) {
+    let Some(raw) = std::env::var_os("MIND_MOTOR_ERROR_FILE") else { return };
+    let candidate = PathBuf::from(&raw);
+    if !candidate.is_absolute() { return; }
+    let Some(name) = candidate.file_name().and_then(|value| value.to_str()) else { return };
+    let Some(id_part) = name.strip_prefix("mind-motor-error-").and_then(|value| value.strip_suffix(".json")) else { return };
+    if !is_id(id_part) { return; }
+    let Some(parent) = candidate.parent() else { return };
+    let Ok(parent_real) = fs::canonicalize(parent) else { return };
+    let Ok(temp_real) = fs::canonicalize(std::env::temp_dir()) else { return };
+    if parent_real != temp_real { return; }
+    let Some(at) = timestamp() else { return };
+    let payload = json!({ "code": fault.code, "message": fault.message, "at": at }).to_string() + "\n";
+    if let Ok(mut file) = fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+        let _ = file.write_all(payload.as_bytes());
     }
 }
 
@@ -719,11 +818,17 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         return Err("El arranque autónomo requiere escritura segura en Windows o Linux.".into());
     }
     let (root, publish, layout) = boot_args(args)?;
+    if publish && !root.exists() {
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    }
     let canonical = root.canonicalize().map_err(|error| error.to_string())?;
     let base = canonical.to_str().ok_or("La ruta no es Unicode válido.")?;
     #[cfg(windows)]
     let base = base.strip_prefix("\\\\?\\").unwrap_or(base);
-    let motor = Arc::new(Motor::open(base.to_owned(), layout).map_err(|error| error.to_string())?);
+    let motor = Arc::new(Motor::open(base.to_owned(), layout, publish).map_err(|error| {
+        write_startup_error(&error);
+        error.to_string()
+    })?);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let connector = Connector::open(base, port, &motor.owner, publish)?;

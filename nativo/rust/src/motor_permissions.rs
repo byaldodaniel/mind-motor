@@ -29,11 +29,11 @@ pub(crate) struct Scope {
     generation: Option<String>,
 }
 
-struct Folder {
-    id: String,
-    root: String,
-    generation: Option<String>,
-    exclusions: Vec<String>,
+pub(crate) struct Folder {
+    pub(crate) id: String,
+    pub(crate) root: String,
+    pub(crate) generation: Option<String>,
+    pub(crate) exclusions: Vec<String>,
 }
 
 fn fault(code: &'static str, message: &str) -> Fault {
@@ -70,12 +70,9 @@ fn valid_channel(record: &Value) -> bool {
     record["channel"].as_str().is_some_and(|channel| CHANNELS.contains(&channel))
 }
 
-pub(crate) fn continuity_access(base: &str) -> Result<Vec<&'static str>, Fault> {
-    if current_workspace().is_some_and(|workspace| workspace.has_roots()) {
-        return Ok(vec!["leer", "registrar"]);
-    }
+pub(crate) fn persisted_continuity_policy(base: &str) -> Result<Value, Fault> {
     let Some(policy) = read_json(base, "agent-continuity-access.json")? else {
-        return Ok(Vec::new());
+        return Ok(json!({"leer": false, "registrar": false, "grantedAt": null, "channel": null}));
     };
     if policy["format"] != "mind-continuity-access"
         || policy["version"] != 1
@@ -84,6 +81,19 @@ pub(crate) fn continuity_access(base: &str) -> Result<Vec<&'static str>, Fault> 
     {
         return Err(fault("ACCESS_POLICY_CORRUPT", "La decisión de acceso a la continuidad es incompatible."));
     }
+    Ok(json!({
+        "leer": policy["leer"],
+        "registrar": policy["registrar"],
+        "grantedAt": policy.get("grantedAt").cloned().unwrap_or(Value::Null),
+        "channel": policy["channel"],
+    }))
+}
+
+pub(crate) fn continuity_access(base: &str) -> Result<Vec<&'static str>, Fault> {
+    if current_workspace().is_some_and(|workspace| workspace.has_roots()) {
+        return Ok(vec!["leer", "registrar"]);
+    }
+    let policy = persisted_continuity_policy(base)?;
     Ok(["leer", "registrar"].into_iter().filter(|level| policy[*level] == true).collect())
 }
 
@@ -95,7 +105,7 @@ pub(crate) fn check_continuity(base: &str, write: bool) -> Result<(), Fault> {
     Ok(())
 }
 
-fn lower_hex(value: &str) -> bool {
+pub(crate) fn lower_hex(value: &str) -> bool {
     value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
@@ -166,7 +176,7 @@ pub(crate) fn is_workspace_folder(id: &str) -> bool {
     })
 }
 
-fn registered_folders(base: &str) -> Result<Vec<Folder>, Fault> {
+pub(crate) fn registered_folders(base: &str) -> Result<Vec<Folder>, Fault> {
     // Solo enumeramos nombres técnicos bajo la Base. La apertura de cada registro
     // usa el lector por descriptores.
     scan::open_directory(base, "").map_err(|code| fault(code, "No se pudo abrir la Base de forma segura."))?;
@@ -222,9 +232,9 @@ fn folder_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, Fault
     registered_access(base, folder)
 }
 
-fn registered_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, Fault> {
+pub(crate) fn persisted_folder_policy(base: &str, folder: &Folder) -> Result<Option<Value>, Fault> {
     let Some(record) = read_json(base, &format!("folder-access-{}.json", folder.id))? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let access = &record["access"];
     if record["format"] != "mind-folder-access"
@@ -237,8 +247,16 @@ fn registered_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, F
         return Err(fault("ACCESS_POLICY_CORRUPT", "La decisión de acceso a la carpeta es incompatible."));
     }
     if generation(&record["generation"]) != folder.generation.as_deref() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
+    Ok(Some(record))
+}
+
+pub(crate) fn registered_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, Fault> {
+    let Some(record) = persisted_folder_policy(base, folder)? else {
+        return Ok(Vec::new());
+    };
+    let access = &record["access"];
     Ok(FOLDER_LEVELS.into_iter().filter(|level| access[*level] == true).collect())
 }
 

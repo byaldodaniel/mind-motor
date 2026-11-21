@@ -6,12 +6,14 @@ use uuid::Uuid;
 use crate::{bridge, motor_owner::{timestamp, Owner}, motor_permissions, text_write};
 
 const SECRET: &str = "conector-secreto.json";
+const CONSOLE: &str = "conector-consola.json";
 const STATE: &str = "conector.json";
 
 pub(crate) struct Connector {
     base: String,
     pub(crate) base_id: String,
     pub(crate) token: String,
+    pub(crate) console: Option<String>,
     port: u16,
     started: String,
     version: String,
@@ -47,9 +49,17 @@ impl Connector {
         } else {
             new_token()
         };
+        let console = if publish {
+            let token = new_token();
+            let previous = motor_permissions::read_file(base, CONSOLE, 64 * 1024).map_err(|e| e.to_string())?;
+            write(base, CONSOLE, &json!({"version":1,"token":token,"createdAt":started}), previous, owner)?;
+            Some(token)
+        } else {
+            None
+        };
 
         let mut connector = Self {
-            base: base.into(), base_id, token, port, started, version, revision, launch, published: false,
+            base: base.into(), base_id, token, console, port, started, version, revision, launch, published: false,
         };
         if publish {
             let previous = motor_permissions::read_file(base, STATE, 64 * 1024).map_err(|e| e.to_string())?;
@@ -89,12 +99,19 @@ impl Connector {
 
 impl Drop for Connector {
     fn drop(&mut self) {
-        if !self.published { return; }
-        let current = motor_permissions::read_json(&self.base, STATE).ok().flatten();
-        if current.is_some_and(|entry| entry["pid"] == std::process::id()
-            && entry["baseId"] == self.base_id && entry["startedAt"] == self.started)
-        {
-            let _ = fs::remove_file(Path::new(&self.base).join(STATE));
+        if let Some(token) = self.console.as_deref() {
+            let current = motor_permissions::read_json(&self.base, CONSOLE).ok().flatten();
+            if current.is_some_and(|entry| entry["token"] == token) {
+                let _ = fs::remove_file(Path::new(&self.base).join(CONSOLE));
+            }
+        }
+        if self.published {
+            let current = motor_permissions::read_json(&self.base, STATE).ok().flatten();
+            if current.is_some_and(|entry| entry["pid"] == std::process::id()
+                && entry["baseId"] == self.base_id && entry["startedAt"] == self.started)
+            {
+                let _ = fs::remove_file(Path::new(&self.base).join(STATE));
+            }
         }
     }
 }
