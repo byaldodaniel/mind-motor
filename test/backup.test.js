@@ -11,6 +11,8 @@ import {
 } from '../src/backup.js';
 import { configure, run, restore } from '../src/commands/respaldo.js';
 import { createBackupTools } from '../src/tools/respaldo.js';
+import { connectorPaths, ensureCentralMotor, restoreLockPath } from '../src/connector.js';
+import { acquireOwnerFileLock } from '../src/process-identity.js';
 
 const development = fileURLToPath(new URL('../..', import.meta.url));
 const testKdf = { [TEST_ONLY_KDF]: { N: 1024 } };
@@ -140,6 +142,55 @@ test('restauración del usuario conserva la Base anterior y respeta rechazar el 
   assert.equal(accepted.status, 'restaurada');
   assert.equal(await fs.readFile(path.join(accepted.previous, 'conservar.txt'), 'utf8'), 'dato ficticio anterior');
   assert.equal(await fs.readFile(path.join(existing, 'continuidad', 'nota.json'), 'utf8'), '{"texto":"información ficticia ñ"}\n');
+});
+
+test('respaldo crear respeta al propietario aunque el conector no responda', async (t) => {
+  const { base, destination } = await fixture(t);
+  const files = await fs.readdir(destination);
+  const release = await acquireOwnerFileLock(connectorPaths(base).lockFile);
+  try {
+    await assert.rejects(run({
+      parameters: ['crear', destination], async layout() { return { baseDirectory: base }; }, print() {},
+    }), { code: 'BASE_IN_USE' });
+    assert.deepEqual(await fs.readdir(destination), files);
+  } finally {
+    await release();
+  }
+});
+
+test('la restauración bloquea nuevos arranques durante el cambio y revierte un fallo', async (t) => {
+  const { root, base, created } = await fixture(t);
+  const existing = path.join(root, 'Base durante reemplazo');
+  await fs.mkdir(existing);
+  await fs.writeFile(path.join(existing, 'anterior.txt'), 'Base ficticia anterior');
+  const verifySwap = async ({ previous }) => {
+    await fs.stat(restoreLockPath(existing));
+    await assert.rejects(fs.stat(existing), { code: 'ENOENT' });
+    assert.equal(await fs.readFile(path.join(previous, 'anterior.txt'), 'utf8'), 'Base ficticia anterior');
+    await assert.rejects(ensureCentralMotor({
+      baseDirectory: existing,
+      launch() { assert.fail('No debe arrancar un Motor durante el reemplazo'); },
+    }), { code: 'BASE_RESTORING' });
+  };
+  const args = {
+    prompt: { write() {}, async yes() { return true; } },
+    baseDirectory: existing, file: created.file, recovery: { baseDirectory: base },
+  };
+  await assert.rejects(restore({
+    ...args,
+    async onSwap(context) {
+      await verifySwap(context);
+      throw new Error('Fallo ficticio durante el reemplazo');
+    },
+  }), /Fallo ficticio durante el reemplazo/);
+  assert.equal(await fs.readFile(path.join(existing, 'anterior.txt'), 'utf8'), 'Base ficticia anterior');
+  await assert.rejects(fs.stat(restoreLockPath(existing)), { code: 'ENOENT' });
+
+  const restored = await restore({ ...args, onSwap: verifySwap });
+  assert.equal(restored.status, 'restaurada');
+  assert.equal(await fs.readFile(path.join(restored.previous, 'anterior.txt'), 'utf8'), 'Base ficticia anterior');
+  assert.match(await fs.readFile(path.join(existing, 'continuidad', 'nota.json'), 'utf8'), /información ficticia/);
+  await assert.rejects(fs.stat(restoreLockPath(existing)), { code: 'ENOENT' });
 });
 
 test('herramienta del agente crea solo en el destino configurado, audita y limita frecuencia', async (t) => {

@@ -15,6 +15,7 @@ pub(crate) struct Connector {
     pub(crate) token: String,
     pub(crate) console: Option<String>,
     port: u16,
+    view_port: u16,
     started: String,
     version: String,
     revision: u64,
@@ -23,7 +24,7 @@ pub(crate) struct Connector {
 }
 
 impl Connector {
-    pub(crate) fn open(base: &str, port: u16, owner: &Owner, publish: bool) -> Result<Self, String> {
+    pub(crate) fn open(base: &str, port: u16, view_port: u16, owner: &Owner, publish: bool) -> Result<Self, String> {
         let base_id = bridge::base_id(Path::new(base)).ok_or("No se pudo identificar la Base del conector.")?;
         let started = timestamp().ok_or("No se pudo leer la hora del sistema.")?;
         let version = std::env::var("MIND_MOTOR_NATIVO_VERSION").unwrap_or_else(|_| "1.0.5".into());
@@ -59,14 +60,14 @@ impl Connector {
         };
 
         let mut connector = Self {
-            base: base.into(), base_id, token, console, port, started, version, revision, launch, published: false,
+            base: base.into(), base_id, token, console, port, view_port, started, version, revision, launch, published: false,
         };
         if publish {
             let previous = motor_permissions::read_file(base, STATE, 64 * 1024).map_err(|e| e.to_string())?;
             write(base, STATE, &json!({
-                "version": 1, "baseId": connector.base_id, "port": port, "pid": std::process::id(),
-                "motorVersion": connector.version, "startedAt": connector.started,
-                "url": connector.url(), "backend": "rust",
+                "version": 1, "baseId": connector.base_id, "port": port, "puertoVistas": view_port,
+                "pid": std::process::id(), "motorVersion": connector.version,
+                "startedAt": connector.started, "url": connector.url(), "backend": "rust",
             }), previous, owner)?;
             connector.published = true;
         }
@@ -77,12 +78,12 @@ impl Connector {
         format!("http://127.0.0.1:{}/mcp", self.port)
     }
 
-    pub(crate) fn health(&self, query: Option<&str>, sessions: usize) -> Value {
+    pub(crate) fn health(&self, query: Option<&str>, sessions: usize, views: Value) -> Value {
         let mut health = json!({
-            "ok": true, "baseId": self.base_id, "port": self.port, "pid": std::process::id(),
-            "motorVersion": self.version, "packageRevision": self.revision, "backend": "rust",
-            "state": "active", "startedAt": self.started, "sessions": sessions,
-            "backgroundBusy": false, "launch": self.launch,
+            "ok": true, "baseId": self.base_id, "port": self.port, "puertoVistas": self.view_port,
+            "pid": std::process::id(), "motorVersion": self.version, "packageRevision": self.revision,
+            "backend": "rust", "state": "active", "startedAt": self.started, "sessions": sessions,
+            "vistas": views, "backgroundBusy": false, "launch": self.launch,
             "independence": if matches!(self.launch.as_str(), "wmi" | "setsid") { "plena" } else { "heredada" },
         });
         let nonce = query.and_then(|query| query.split('&').find_map(|part| part.strip_prefix("nonce=")));

@@ -20,7 +20,7 @@ use crate::{
     host::{full, Body},
     motor_consent::Prepared,
     motor_files::{OrganizeDecision, OrganizePrepared},
-    motor_native::{Fault, Motor},
+    motor_native::{unwrap_catalog_call, Fault, Motor},
     motor_workspace::{with_workspace, Workspace},
     MAX_MESSAGE,
 };
@@ -33,8 +33,16 @@ const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-
 const TOOLS: &[&str] = &[
     "estado", "retomar", "buscar", "leer", "crear", "modificar", "organizar",
     "guardar", "actualizar", "acceso",
+    "vista", "mind", "mind_cambiar",
     "crear_carpeta", "editar", "mover", "renombrar", "borrar", "papelera",
     "restaurar", "vaciar_papelera", "explorar", "eliminados",
+    "conversacion_leer", "conversacion_guardar", "conversaciones_buscar",
+    "continuidad_registrar", "continuidad_actualizar",
+    "solicitar_acceso", "retirar_acceso",
+    "vista_abrir", "vista_consultar", "vista_cerrar",
+    "crear_respaldo",
+    "funciones", "crear_funcion", "modificar_funcion", "retirar_funcion",
+    "ejecutar_funcion", "activar_funcion", "desactivar_funcion", "historial_funcion",
 ];
 
 struct Session {
@@ -326,15 +334,40 @@ fn is_call(message: &Value) -> bool {
     message["jsonrpc"] == "2.0" && message["method"] == "tools/call"
 }
 
-fn is_organize_confirm(message: &Value) -> bool {
-    match message.pointer("/params/name").and_then(Value::as_str) {
-        Some("borrar" | "vaciar_papelera") => true,
-        Some("organizar") => matches!(
-            message.pointer("/params/arguments/accion").and_then(Value::as_str),
-            Some("borrar" | "vaciar_papelera")
-        ),
-        _ => false,
+enum InteractiveKind {
+    None,
+    Access { needs_form: bool },
+    Organize,
+    Automation,
+}
+
+fn resolve_interactive(message: &Value) -> Option<(InteractiveKind, Value)> {
+    let name = message.pointer("/params/name").and_then(Value::as_str)?;
+    if !TOOLS.contains(&name) {
+        return None;
     }
+    let args = message.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+    if !args.is_object() {
+        return None;
+    }
+    let (eff_name, eff_args) = unwrap_catalog_call(name, args).ok()?;
+    let kind = match eff_name.as_str() {
+        "acceso" => InteractiveKind::Access {
+            needs_form: eff_args.get("accion").and_then(Value::as_str) != Some("retirar"),
+        },
+        "borrar" | "vaciar_papelera" => InteractiveKind::Organize,
+        "organizar" if matches!(eff_args.get("accion").and_then(Value::as_str), Some("borrar" | "vaciar_papelera")) => {
+            InteractiveKind::Organize
+        }
+        "activar_funcion" => InteractiveKind::Automation,
+        _ => return Some((InteractiveKind::None, message.clone())),
+    };
+    let mut normalized = message.clone();
+    if let Some(params) = normalized.get_mut("params").and_then(Value::as_object_mut) {
+        params.insert("name".into(), json!(eff_name));
+        params.insert("arguments".into(), eff_args);
+    }
+    Some((kind, normalized))
 }
 
 async fn dispatch(
@@ -342,19 +375,26 @@ async fn dispatch(
 ) -> Response<Body> {
     let Some(messages) = message.as_array() else {
         if let Some(id) = request_id(message).filter(|_| is_call(message)) {
-            let is_access = message.pointer("/params/name").is_some_and(|name| name == "acceso");
-            let is_org_confirm = is_organize_confirm(message);
+            let resolved = resolve_interactive(message);
             let roots = !session.scope.lock().unwrap().resolved;
-            let needs_form = (is_access && message.pointer("/params/arguments/accion").and_then(Value::as_str) != Some("retirar"))
-                || is_org_confirm;
+            let needs_form = matches!(
+                resolved.as_ref().map(|(kind, _)| kind),
+                Some(InteractiveKind::Access { needs_form: true } | InteractiveKind::Organize | InteractiveKind::Automation)
+            );
             if sse && (roots || (needs_form && session.form)) {
                 return stream_call(message.clone(), id, Arc::clone(motor), Arc::clone(session));
             }
-            if is_access {
-                return full(StatusCode::OK, access(message, id, motor, session, None).await);
-            }
-            if is_org_confirm {
-                return full(StatusCode::OK, organize_interactive(message, id, motor, session, None).await);
+            match resolved {
+                Some((InteractiveKind::Access { .. }, ref msg)) => {
+                    return full(StatusCode::OK, access(msg, id, motor, session, None).await);
+                }
+                Some((InteractiveKind::Organize, ref msg)) => {
+                    return full(StatusCode::OK, organize_interactive(msg, id, motor, session, None).await);
+                }
+                Some((InteractiveKind::Automation, ref msg)) => {
+                    return full(StatusCode::OK, automation_interactive(msg, id, motor, session, None).await);
+                }
+                _ => {}
             }
         }
         return match dispatch_one(message, motor, session).await {
@@ -402,7 +442,11 @@ async fn dispatch_one(message: &Value, motor: &Arc<Motor>, session: &Arc<Session
             let Some(name) = params.get("name").and_then(Value::as_str).filter(|name| TOOLS.contains(name)) else {
                 return Some(rpc_error(id, -32602, "Herramienta desconocida."));
             };
-            if name == "acceso" || is_organize_confirm(message) {
+            let is_interactive = matches!(
+                resolve_interactive(message).map(|(kind, _)| kind),
+                Some(InteractiveKind::Access { .. } | InteractiveKind::Organize | InteractiveKind::Automation)
+            );
+            if name == "acceso" || is_interactive {
                 return Some(rpc_error(id, -32602, "Envía la solicitud que requiere confirmación en una petición individual."));
             }
             let args = params.get("arguments").unwrap_or(&empty);
@@ -468,14 +512,18 @@ fn stream_call(message: Value, id: Value, motor: Arc<Motor>, session: Arc<Sessio
             }
             result = async {
                 refresh_roots(&motor, &session, &events).await;
-                let is_access = message.pointer("/params/name").is_some_and(|name| name == "acceso");
-                if is_access {
-                    access(&message, id.clone(), &motor, &session, Some(&events)).await
-                } else if is_organize_confirm(&message) {
-                    organize_interactive(&message, id.clone(), &motor, &session, Some(&events)).await
-                } else {
-                    dispatch_one(&message, &motor, &session).await
-                        .unwrap_or_else(|| rpc_error(id.clone(), -32600, "Mensaje JSON-RPC no válido."))
+                match resolve_interactive(&message) {
+                    Some((InteractiveKind::Access { .. }, ref msg)) => {
+                        access(msg, id.clone(), &motor, &session, Some(&events)).await
+                    }
+                    Some((InteractiveKind::Organize, ref msg)) => {
+                        organize_interactive(msg, id.clone(), &motor, &session, Some(&events)).await
+                    }
+                    Some((InteractiveKind::Automation, ref msg)) => {
+                        automation_interactive(msg, id.clone(), &motor, &session, Some(&events)).await
+                    }
+                    _ => dispatch_one(&message, &motor, &session).await
+                        .unwrap_or_else(|| rpc_error(id.clone(), -32600, "Mensaje JSON-RPC no válido.")),
                 }
             } => result,
         };
@@ -636,6 +684,45 @@ async fn run_organize(
             None => OrganizeDecision::Pending { cancelled: false },
         };
         with_workspace(&workspace, || motor.finish_organize(confirmation, decision, active))
+    }).await.map_err(|_| internal())?
+}
+
+async fn automation_interactive(
+    message: &Value, id: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Value {
+    let args = message.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+    if !args.is_object() {
+        return rpc_error(id, -32602, "arguments debe ser un objeto.");
+    }
+    let result = run_automation(args, motor, session, events).await;
+    rpc_result(id, tool_reply(result))
+}
+
+async fn run_automation(
+    args: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Result<Value, Fault> {
+    let (workspace, generation) = {
+        let scope = session.scope.lock().unwrap();
+        (scope.workspace.clone(), scope.generation)
+    };
+    let call = events.map(|events| Arc::clone(&events.call));
+    let prepare = tokio::task::spawn_blocking({
+        let (motor, session, workspace, call) = (Arc::clone(motor), Arc::clone(session), workspace.clone(), call.clone());
+        move || {
+            session.ensure_active(call.as_deref(), generation)?;
+            with_workspace(&workspace, || motor.prepare_activation(args, session.client.as_ref()))
+        }
+    });
+    let request = prepare.await.map_err(|_| internal())??;
+    let answer = match events.filter(|_| session.form) {
+        Some(events) => Some(events.request("elicitation/create", request.form(session.protocol), CLIENT_TIMEOUT).await?),
+        None => None,
+    };
+    let (motor, session) = (Arc::clone(motor), Arc::clone(session));
+    tokio::task::spawn_blocking(move || {
+        session.ensure_active(call.as_deref(), generation)?;
+        let active = || session.ensure_active(call.as_deref(), generation).is_ok();
+        with_workspace(&workspace, || motor.finish_activation(request, answer.as_ref(), session.client.as_ref(), active))
     }).await.map_err(|_| internal())?
 }
 
@@ -877,6 +964,41 @@ fn definitions() -> Value {
                 "contenido": {"description": "Datos JSON del registro de continuidad."},
                 "referencias": references,
             }, "required": ["id", "revision"], "additionalProperties": true},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "vista",
+            "title": "Vista compartida local",
+            "description": "Publica, consulta o cierra una vista web local de una carpeta con permiso de lectura (por ejemplo un sitio o construcción web con index.html). Sigue accesible en el navegador aunque el agente cierre sesión.",
+            "inputSchema": {"type": "object", "properties": {
+                "accion": {"type": "string", "enum": ["abrir", "consultar", "cerrar"]},
+                "carpeta": {"type": "string", "description": "ID o ruta absoluta de la carpeta registrada."},
+                "ruta": {"type": "string", "description": "Subcarpeta relativa dentro de la carpeta."},
+                "proyecto": {"type": "string", "description": "Nombre del proyecto."},
+                "id": {"type": "string", "description": "Identificador UUID de la vista."},
+                "version": {"type": "integer", "minimum": 1, "description": "Versión leída al actualizar una vista."}
+            }, "required": ["accion"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false},
+        },
+        {
+            "name": "mind",
+            "title": "Consultas de Mind",
+            "description": "Ejecuta por su nombre cualquier operación de Mind que solo consulta (ayuda, funciones, historial_funcion, vista_consultar…). operacion \"ayuda\" lista las disponibles en mind y mind_cambiar.",
+            "inputSchema": {"type": "object", "properties": {
+                "operacion": {"type": "string", "description": "\"ayuda\" o el nombre de una operación de consulta."},
+                "detalle": {"type": "string", "description": "Con ayuda: operación a describir."},
+                "argumentos": {"type": "object", "description": "Parámetros de la operación."}
+            }, "required": ["operacion"], "additionalProperties": true},
+            "annotations": {"readOnlyHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "mind_cambiar",
+            "title": "Cambios en Mind",
+            "description": "Ejecuta por su nombre una operación de Mind que cambia algo (funciones, activar_funcion, desactivar_funcion, crear_respaldo, vista_abrir, vista_cerrar…). Las que borran o activan automatizaciones siguen pidiendo confirmación al usuario.",
+            "inputSchema": {"type": "object", "properties": {
+                "operacion": {"type": "string", "description": "Nombre de la operación."},
+                "argumentos": {"type": "object", "description": "Parámetros de la operación."}
+            }, "required": ["operacion"], "additionalProperties": true},
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
         }
     ])

@@ -538,10 +538,12 @@ export async function prepareBackupSetup(options = {}) {
     keyId,
     recoveryCode,
     recoveryFile,
-    async commit(baseDirectory) {
+    async commit(baseDirectory, customWriter = null) {
       if (committed) throw new MotorError('BACKUP_ALREADY_CONFIGURED', 'Esta configuración ya se guardó.');
       const base = await physicalBase(baseDirectory);
-      await writeKeyFile(base, keyRecordOut({ keyId, key, codeWrap, createdAt }));
+      const record = keyRecordOut({ keyId, key, codeWrap, createdAt });
+      if (customWriter) await customWriter(record);
+      else await writeKeyFile(base, record);
       committed = true;
       key.fill(0);
       return { keyId };
@@ -719,7 +721,8 @@ async function recordLastBackup(base, created) {
 export function isExcludedFromBackup(name, { topLevel }) {
   if (TEMPORARY.test(name) || name.endsWith('.lock') || name.includes('.lock.abandonado-')) return true;
   return topLevel && (name === KEY_FILE || name === 'sesiones' || name === 'conector.json'
-    || name === 'conector-secreto.json' || name === 'motor-central.log' || name === 'motor-central.log.1'
+    || name === 'conector-secreto.json' || name === 'conector-consola.json' || name === 'anfitrion.json'
+    || name === 'conector.lock.recovery' || name === 'motor-central.log' || name === 'motor-central.log.1'
     || name.startsWith('consent-request-')
     || /^conversation-index\.sqlite(?:-journal|-wal|-shm)?$/.test(name));
 }

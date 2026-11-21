@@ -214,6 +214,12 @@ async function withNativeConsole(layout, task) {
     removals: {
       record: async () => 0,
     },
+    automations: {
+      prepareActivation: async (id) => (await rpc('preparar_automatizacion', { id })).preparacion,
+      authorize: async (id, { generation, fingerprint, client }) => (await rpc('autorizar_automatizacion', {
+        id, generation, fingerprint, canal: 'consola', cliente: client ?? null,
+      })).estado,
+    },
     reindex: async (id) => (await rpc('indexar_carpeta', { id })).indice,
     ensureIndex: async (id) => (await rpc('indexar_carpeta', { id })).indice,
     audit: async () => {},

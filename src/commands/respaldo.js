@@ -1,8 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { MotorError } from '../errors.js';
 import { requireInteractive, createPrompter } from '../console.js';
 import { liveSessions } from '../session.js';
+import {
+  assertNotRestoring, canonicalBaseDirectory, checkHealthyConnector, connectorPaths, postRpc, readConsoleToken,
+  restoreLockPath, stopCentralMotor,
+} from '../connector.js';
+import { acquireOwnerFileLock } from '../process-identity.js';
 import { BASE_MARKER, BASE_FORMAT_VERSION } from '../base-format.js';
 import { readJson } from '../storage.js';
 import {
@@ -76,8 +82,45 @@ function parse(parameters) {
   return { flags, values, positional };
 }
 
+async function withBackupWriter(baseDirectory, { rust, legacy }) {
+  const base = await canonicalBaseDirectory(baseDirectory);
+  await assertNotRestoring(base);
+  const conn = await checkHealthyConnector(base);
+  if (conn?.health?.backend === 'rust') return await rust(conn);
+  // La consola de r3 conserva su flujo habitual. Si no hay conector sano,
+  // la propiedad se decide por el candado, también durante un arranque.
+  if (conn) return await legacy();
+  let release;
+  try {
+    release = await acquireOwnerFileLock(connectorPaths(base).lockFile, { timeoutMs: 0 });
+  } catch (error) {
+    if (error.code !== 'LOCK_BUSY') throw error;
+    throw fail('BASE_IN_USE', 'El propietario de la Base todavía está activo.');
+  }
+  try {
+    await assertNotRestoring(base);
+    return await legacy();
+  } finally {
+    await release();
+  }
+}
+
+async function consoleRpc(conn, payload) {
+  const consoleToken = await readConsoleToken(conn.baseDirectory);
+  if (!consoleToken) {
+    throw new MotorError('CONSOLE_CREDENTIAL_UNAVAILABLE', 'El Motor activo no ofrece credencial de consola.');
+  }
+  return await postRpc({
+    port: conn.state.port,
+    token: conn.token,
+    headers: { 'X-Mind-Consola': consoleToken },
+    payload,
+  });
+}
+
 /** Configuración: frase, archivo de recuperación guardado, clave en la Base y código mostrado una vez. */
 export async function configure({ prompt, baseDirectory, destination }) {
+  await assertNotRestoring(baseDirectory);
   await fs.mkdir(baseDirectory, { recursive: true });
   // Rechazar destinos inválidos antes de pedir secretos o guardar la clave:
   // una configuración parcial impediría repetir esta orden con otro destino.
@@ -102,8 +145,20 @@ export async function configure({ prompt, baseDirectory, destination }) {
   const prepared = await prepareBackupSetup({ passphrase });
   // Primero el archivo de recuperación; solo después la clave en la Base.
   const saved = await saveRecoveryFile({ recoveryFile: prepared.recoveryFile, directory: recoveryDirectory, baseDirectory, destinationDirectory: destination });
-  await prepared.commit(baseDirectory);
-  await configureBackupDestination({ baseDirectory, destinationDirectory: destination });
+  await withBackupWriter(baseDirectory, {
+    rust: async (conn) => prepared.commit(baseDirectory, async (keyRecord) => {
+      await consoleRpc(conn, {
+        accion: 'consola',
+        operacion: 'respaldo_configurar',
+        clave: keyRecord,
+        destino: destination,
+      });
+    }),
+    legacy: async () => {
+      await prepared.commit(baseDirectory);
+      await configureBackupDestination({ baseDirectory, destinationDirectory: destination });
+    },
+  });
   prompt.write('');
   prompt.write('CÓDIGO DE RECUPERACIÓN (se muestra solo esta vez; no se guarda en ningún sitio):');
   prompt.write('');
@@ -117,43 +172,104 @@ export async function configure({ prompt, baseDirectory, destination }) {
   return { keyId: prepared.keyId, recoveryFile: saved, destination };
 }
 
+async function ensureBaseIdleForRestore(baseDirectory) {
+  if ((await liveSessions(baseDirectory)).live.length > 0) return false;
+  const conn = await checkHealthyConnector(baseDirectory);
+  if ((conn?.health?.sessions ?? 0) > 0 || (conn?.health?.activeRequests ?? 0) > 0) return false;
+  return true;
+}
+
 /** Restaurar: nunca sobre una Base en uso ni reemplazando datos; la anterior se conserva. */
-export async function restore({ prompt, baseDirectory, file, recovery }) {
+export async function restore({ prompt, baseDirectory, file, recovery, onSwap = null }) {
   const header = await inspectBackup(file);
   prompt.write(`Respaldo ${header.backupId} del ${header.createdAt} (Mind ${header.motorVersion}).`);
-  const occupied = await fs.readdir(baseDirectory).then((names) => names.length > 0, () => false);
-  if (occupied && (await liveSessions(baseDirectory)).live.length > 0) {
-    throw fail('BASE_IN_USE', 'Hay agentes usando Mind: ciérralos antes de restaurar la Base.');
+  const canonicalBase = await canonicalBaseDirectory(baseDirectory);
+  const parentReady = await fs.stat(path.dirname(canonicalBase)).then((info) => info.isDirectory(), () => false);
+  let releaseRestoreLock = null;
+  if (parentReady) {
+    try {
+      releaseRestoreLock = await acquireOwnerFileLock(restoreLockPath(canonicalBase), { timeoutMs: 0 });
+    } catch (error) {
+      if (error?.code === 'LOCK_BUSY') {
+        throw fail('BASE_IN_USE', 'Ya hay una restauración en curso sobre esta Base.');
+      }
+      throw error;
+    }
   }
-  const staging = occupied ? `${baseDirectory}.restaurada-${stamp()}` : baseDirectory;
-  const restored = await restoreBackup({ file, targetDirectory: staging, ...recovery });
-  const marker = await readJson(path.join(staging, BASE_MARKER)).catch(() => null);
-  const version = marker?.data?.version;
-  if (Number.isSafeInteger(version) && version > BASE_FORMAT_VERSION) {
-    prompt.write(`El respaldo es de una Base más reciente (formato ${version}) que este Motor (formato ${BASE_FORMAT_VERSION}).`);
-    prompt.write(`Se conserva restaurado en ${staging}, sin usarlo. Actualiza Mind y vuelve a restaurar.`);
-    return { status: 'incompatible', staging, ...restored };
-  }
-  if (!occupied) {
-    prompt.write(`Base restaurada en ${baseDirectory} (${restored.files} archivos).`);
-    return { status: 'restaurada', previous: null, ...restored };
-  }
-  prompt.write(`Restaurado en ${staging} (${restored.files} archivos, comprobado con el ${restored.method === 'codigo' ? 'código' : restored.method === 'archivo' ? 'archivo de recuperación' : 'clave local'}).`);
-  if (!(await prompt.yes('¿Usarlo como Base? La Base actual se conservará aparte, sin borrarla.', false))) {
-    prompt.write(`No se cambió la Base. La copia restaurada queda en ${staging}.`);
-    return { status: 'preparada', staging, ...restored };
-  }
-  if ((await liveSessions(baseDirectory)).live.length > 0) throw fail('BASE_IN_USE', `Se abrió un agente mientras tanto: no se cambió nada. La copia restaurada queda en ${staging}.`);
-  const previous = `${baseDirectory}.anterior-${stamp()}`;
-  await fs.rename(baseDirectory, previous);
   try {
-    await fs.rename(staging, baseDirectory);
-  } catch (error) {
-    await fs.rename(previous, baseDirectory).catch(() => {});
-    throw error;
+    const occupied = await fs.readdir(canonicalBase).then((names) => names.length > 0, () => false);
+    if (occupied && !(await ensureBaseIdleForRestore(canonicalBase))) {
+      throw fail('BASE_IN_USE', 'Hay agentes usando Mind: ciérralos antes de restaurar la Base.');
+    }
+    const suffix = `${stamp()}-${randomUUID().slice(0, 8)}`;
+    const staging = occupied ? `${canonicalBase}.restaurada-${suffix}` : baseDirectory;
+    const restored = await restoreBackup({ file, targetDirectory: staging, ...recovery });
+    const marker = await readJson(path.join(staging, BASE_MARKER)).catch(() => null);
+    const version = marker?.data?.version;
+    if (Number.isSafeInteger(version) && version > BASE_FORMAT_VERSION) {
+      prompt.write(`El respaldo es de una Base más reciente (formato ${version}) que este Motor (formato ${BASE_FORMAT_VERSION}).`);
+      prompt.write(`Se conserva restaurado en ${staging}, sin usarlo. Actualiza Mind y vuelve a restaurar.`);
+      return { status: 'incompatible', staging, ...restored };
+    }
+    if (!occupied) {
+      prompt.write(`Base restaurada en ${baseDirectory} (${restored.files} archivos).`);
+      return { status: 'restaurada', previous: null, ...restored };
+    }
+    prompt.write(`Restaurado en ${staging} (${restored.files} archivos, comprobado con el ${restored.method === 'codigo' ? 'código' : restored.method === 'archivo' ? 'archivo de recuperación' : 'clave local'}).`);
+    if (!(await prompt.yes('¿Usarlo como Base? La Base actual se conservará aparte, sin borrarla.', false))) {
+      prompt.write(`No se cambió la Base. La copia restaurada queda en ${staging}.`);
+      return { status: 'preparada', staging, ...restored };
+    }
+    if (!(await ensureBaseIdleForRestore(canonicalBase))) {
+      throw fail('BASE_IN_USE', `Se abrió un agente mientras tanto: no se cambió nada. La copia restaurada queda en ${staging}.`);
+    }
+    if (await checkHealthyConnector(canonicalBase)) {
+      const stopped = await stopCentralMotor({ baseDirectory: canonicalBase, onlyIfIdle: true, reason: 'restaurar-base' }).catch(() => false);
+      if (!stopped) {
+        throw fail('BASE_IN_USE', `No se pudo detener el Motor activo para sustituir la Base. La copia restaurada queda en ${staging}.`);
+      }
+    }
+    const { lockFile } = connectorPaths(canonicalBase);
+    let releaseBaseLock = null;
+    try {
+      releaseBaseLock = await acquireOwnerFileLock(lockFile, { timeoutMs: 0 });
+    } catch (error) {
+      if (error?.code === 'LOCK_BUSY') {
+        throw fail('BASE_IN_USE', `Otro Motor tomó la Base antes de sustituirla. La copia restaurada queda en ${staging}.`);
+      }
+      throw error;
+    }
+    const previous = `${canonicalBase}.anterior-${suffix}`;
+    let swapped = false;
+    try {
+      await fs.rename(canonicalBase, previous);
+      try {
+        if (onSwap) await onSwap({ baseDirectory: canonicalBase, previous, staging });
+        await fs.rename(staging, canonicalBase);
+        swapped = true;
+      } catch (error) {
+        let reverted = false;
+        try {
+          await fs.rename(previous, canonicalBase);
+          reverted = true;
+        } catch {}
+        if (!reverted) {
+          error.message = `${error.message} La Base anterior quedó intacta en ${previous}.`;
+        }
+        throw error;
+      }
+    } finally {
+      if (swapped) {
+        await fs.rm(path.join(previous, path.basename(lockFile)), { force: true }).catch(() => {});
+      } else {
+        await releaseBaseLock?.().catch(() => {});
+      }
+    }
+    prompt.write(`Base restaurada. La anterior queda en ${previous} (bórrala cuando compruebes que todo está bien).`);
+    return { status: 'restaurada', previous, ...restored };
+  } finally {
+    await releaseRestoreLock?.().catch(() => {});
   }
-  prompt.write(`Base restaurada. La anterior queda en ${previous} (bórrala cuando compruebes que todo está bien).`);
-  return { status: 'restaurada', previous, ...restored };
 }
 
 export async function run({ parameters, layout, print }) {
@@ -176,9 +292,19 @@ export async function run({ parameters, layout, print }) {
     }
     case 'crear': {
       if (positional.length > 1 || flags.size > 0) throw fail('INVALID_ARGUMENTS', USAGE);
-      const created = positional.length === 1
-        ? await createBackup({ baseDirectory, destinationDirectory: absolute(positional[0], 'la carpeta') })
-        : await createConfiguredBackup({ baseDirectory });
+      const created = await withBackupWriter(baseDirectory, {
+        rust: async (conn) => {
+          const { respaldo } = await consoleRpc(conn, {
+            accion: 'consola',
+            operacion: 'respaldo_crear',
+            ...(positional.length === 1 ? { destino: absolute(positional[0], 'la carpeta') } : {}),
+          });
+          return { file: respaldo.ruta, files: respaldo.archivos, createdAt: respaldo.fecha };
+        },
+        legacy: () => positional.length === 1
+          ? createBackup({ baseDirectory, destinationDirectory: absolute(positional[0], 'la carpeta') })
+          : createConfiguredBackup({ baseDirectory }),
+      });
       print({ estado: 'creado', archivo: created.file, archivos: created.files, fecha: created.createdAt });
       return 0;
     }

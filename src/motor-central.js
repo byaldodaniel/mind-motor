@@ -26,6 +26,7 @@ import {
   preferredPort,
   canonicalBaseDirectory,
   connectorPaths,
+  assertNotRestoring,
   readOrCreateSecret,
   writeConnectorState,
   removeConnectorState,
@@ -218,6 +219,7 @@ export async function startCentralMotor({
 } = {}) {
   let canonicalBase = await canonicalBaseDirectory(layout.baseDirectory);
   try {
+    await assertNotRestoring(layout.baseDirectory, { pythonExecutable: layout.pythonExecutable });
     const validated = await ensureBase(layout.baseDirectory, {
       motorVersion,
       protectedFrom: layout.motorDirectory,

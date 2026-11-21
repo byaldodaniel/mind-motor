@@ -10,7 +10,7 @@ import { MotorError } from './errors.js';
 import { contains, FOLD_CASE } from './paths.js';
 import { classifyToolPriority, QUEUE_PRIORITY } from './smart-queue.js';
 import { launchIndependent } from './independent-launch.js';
-import { predatesSystemBoot, systemBootTime } from './process-identity.js';
+import { predatesSystemBoot, systemBootTime, parseOwnerRecord, inspectProcessOwners } from './process-identity.js';
 import { waitForHandoff } from './update-handoff-state.js';
 import { productPaths, productRuntime } from './layout.js';
 import { readManifestFile } from './product-files.js';
@@ -21,6 +21,38 @@ export const CONNECTOR_SECRET_FILE = 'conector-secreto.json';
 export const CONNECTOR_CONSOLE_FILE = 'conector-consola.json';
 export const CONNECTOR_LOCK_FILE = 'conector.lock';
 export const CONNECTOR_ERROR_FILE = 'conector-error.json';
+
+export function restoreLockPath(baseDirectory) {
+  return `${path.resolve(baseDirectory)}.restauracion.lock`;
+}
+
+export async function assertNotRestoring(baseDirectory, { pythonExecutable } = {}) {
+  const canonical = await canonicalBaseDirectory(baseDirectory);
+  const lockPath = restoreLockPath(canonical);
+  let info;
+  try {
+    info = await fs.lstat(lockPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw new MotorError('BASE_RESTORING', 'La Base se está restaurando; espera a que termine.');
+  }
+  if (!info.isFile()) {
+    throw new MotorError('BASE_RESTORING', 'La Base se está restaurando; espera a que termine.');
+  }
+  let parsed = null;
+  try {
+    parsed = parseOwnerRecord(await fs.readFile(lockPath, 'utf8'));
+  } catch {
+    parsed = null;
+  }
+  if (parsed) {
+    try {
+      const [owner] = await inspectProcessOwners([parsed], { pythonExecutable });
+      if (owner?.state === 'stale') return;
+    } catch {}
+  }
+  throw new MotorError('BASE_RESTORING', 'La Base se está restaurando; espera a que termine.');
+}
 
 const HEALTH_TIMEOUT_MS = 800;
 const STARTUP_POLL_MS = 35;
@@ -363,6 +395,7 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
   if (typeof targetBase !== 'string' || !path.isAbsolute(targetBase)) {
     throw new MotorError('INVALID_BASE', 'La ruta de la Base debe ser absoluta.');
   }
+  await assertNotRestoring(targetBase, { pythonExecutable: layout?.pythonExecutable });
   const native = process.env.MIND_MOTOR_NATIVO === '1';
   const check = async () => {
     const ready = await checkHealthyConnector(targetBase);

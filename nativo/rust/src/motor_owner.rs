@@ -1,6 +1,11 @@
-use std::{fs, io, path::Path};
+use std::{
+    ffi::OsString,
+    fs::{self, File},
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
 
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{motor_permissions::read_json, text_write};
@@ -11,6 +16,53 @@ const RECOVERY: &str = "conector.lock.recovery";
 pub(crate) struct Owner {
     base: String,
     token: String,
+}
+
+pub(crate) fn restore_lock_path(base: &Path) -> Option<PathBuf> {
+    let parent = base.parent()?;
+    let name = base.file_name()?;
+    let mut lock_name = OsString::from(name);
+    lock_name.push(".restauracion.lock");
+    Some(parent.join(lock_name))
+}
+
+pub(crate) fn check_restore_lock_path(lock_path: &Path) -> Result<(), &'static str> {
+    let meta = match fs::symlink_metadata(lock_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("BASE_RESTORING"),
+        Ok(meta) => meta,
+    };
+    if !meta.is_file() {
+        return Err("BASE_RESTORING");
+    }
+    let Ok(file) = File::open(lock_path) else {
+        return Err("BASE_RESTORING");
+    };
+    let mut bytes = Vec::new();
+    if file.take(16 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 16 * 1024 {
+        return Err("BASE_RESTORING");
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return Err("BASE_RESTORING");
+    };
+    let Some((pid, host, birth, _token)) = lock_owner_fields(&value) else {
+        return Err("BASE_RESTORING");
+    };
+    let Some((current_host, _)) = identity() else {
+        return Err("BASE_RESTORING");
+    };
+    if host == current_host && is_stale_process(pid, birth) {
+        Ok(())
+    } else {
+        Err("BASE_RESTORING")
+    }
+}
+
+pub(crate) fn check_restore_lock(base: &str) -> Result<(), &'static str> {
+    let Some(lock_path) = restore_lock_path(Path::new(base)) else {
+        return Err("BASE_RESTORING");
+    };
+    check_restore_lock_path(&lock_path)
 }
 
 impl Owner {
@@ -24,18 +76,27 @@ impl Owner {
             "processBirth": birth, "token": token, "instanceToken": token,
             "startedAt": timestamp().ok_or("PROCESS_IDENTITY_UNKNOWN")?,
         });
+        check_restore_lock(base)?;
         reject_barrier(base)?;
+        let guard_write = || {
+            reject_barrier(base)?;
+            check_restore_lock(base)
+        };
         let text = record.to_string();
-        match text_write::write_bytes(base, LOCK, text.as_bytes(), 16 * 1024, None, || reject_barrier(base)) {
+        match text_write::write_bytes(base, LOCK, text.as_bytes(), 16 * 1024, None, guard_write) {
             Ok(_) => {}
             Err("FILE_EXISTS") if recover_abandoned(base, &host) => {
-                text_write::write_bytes(base, LOCK, text.as_bytes(), 16 * 1024, None, || reject_barrier(base))
+                text_write::write_bytes(base, LOCK, text.as_bytes(), 16 * 1024, None, guard_write)
                     .map_err(|error| if error == "FILE_EXISTS" { "BASE_OCUPADA" } else { error })?;
             }
             Err("FILE_EXISTS") => return Err("BASE_OCUPADA".into()),
             Err(error) => return Err(error.into()),
         }
         let owner = Self { base: base.to_owned(), token };
+        if check_restore_lock(base).is_err() {
+            drop(owner);
+            return Err("BASE_RESTORING".into());
+        }
         reject_barrier(base)?;
         owner.check()?;
         Ok(owner)

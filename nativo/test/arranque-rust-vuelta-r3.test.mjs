@@ -9,6 +9,10 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import {
+  setupBackup, saveRecoveryFile, configureBackupDestination, verifyBackup, restoreBackup, listBackups,
+  readBackupConfig,
+} from '../../src/backup.js';
 import { checkHealthyConnector } from '../../src/connector.js';
 import { probeProcesses } from '../../src/process-identity.js';
 import { main as cliMain } from '../../src/product-cli.js';
@@ -18,6 +22,7 @@ import { extractR3, r3Commit } from './r3-fixture.mjs';
 const run = promisify(execFile);
 const repo = fileURLToPath(new URL('../..', import.meta.url));
 const executable = process.env.MIND_NATIVE_EXE;
+const testWindowsScheduler = process.platform === 'win32' && process.env.MIND_TEST_WINDOWS_SCHEDULER === '1';
 const prefix = 'mind-nativo-runs-arranque-';
 const env = { ...process.env, MIND_AGENT_STARTUP: '0' };
 if (!env.MIND_PYTHON && env.MIND_TEST_BUNDLED_PYTHON) env.MIND_PYTHON = env.MIND_TEST_BUNDLED_PYTHON;
@@ -31,6 +36,75 @@ async function waitUntil(check, explanation, milliseconds = 16_000) {
     await delay(75);
   }
   assert.fail(explanation);
+}
+
+async function runWindowsScheduledFixture(root, base, nativeEnv, at) {
+  const taskName = 'Mind-Prueba-Etapa3-' + path.basename(root);
+  const taskScript = path.join(root, 'turno.mjs');
+  const results = path.join(root, 'turnos.jsonl');
+  const node = process.execPath;
+  const shell = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const env = {
+    ...options.env,
+    MIND_TEST_TASK_NAME: taskName, MIND_TEST_TASK_RUNTIME: node, MIND_TEST_TASK_SCRIPT: taskScript,
+    MIND_TEST_TASK_REPO: repo, MIND_TEST_TASK_WHEN: at.toISOString(),
+  };
+  const powershell = command => run(shell, ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference = 'Stop'; " + command], { ...options, env });
+  await fs.writeFile(taskScript, [
+    "import { spawnSync } from 'node:child_process';",
+    "import fs from 'node:fs';",
+    "const result = spawnSync(process.execPath, " + JSON.stringify([path.join(repo, 'bin', 'mind.js'), 'programadas', '--base', base]) + ", {",
+    "  cwd: " + JSON.stringify(repo) + ", encoding: 'utf8', timeout: 30000, windowsHide: true,",
+    "  env: { ...process.env, ..."+JSON.stringify({
+      MIND_MOTOR_NATIVO: '1', MIND_MOTOR_NATIVO_EXE: nativeEnv.MIND_MOTOR_NATIVO_EXE,
+      MIND_AGENT_STARTUP: '0', MIND_PYTHON: nativeEnv.MIND_PYTHON,
+    })+" },",
+    "});",
+    "fs.appendFileSync("+JSON.stringify(results)+", JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr, at: Date.now() }) + '\\n');",
+    "process.exitCode = result.status ?? 1;",
+  ].join('\n'));
+  const readResults = async () => (await fs.readFile(results, 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  })).split('\n').filter(Boolean).map(line => JSON.parse(line));
+
+  let registered = false;
+  try {
+    await powershell([
+      'if (Get-ScheduledTask -TaskName $env:MIND_TEST_TASK_NAME -ErrorAction SilentlyContinue) { throw "La tarea de prueba ya existe." }',
+      '$identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name',
+      "$at = [DateTimeOffset]::Parse($env:MIND_TEST_TASK_WHEN).LocalDateTime",
+      "if ($at -le (Get-Date)) { throw 'La hora del ensayo ya pasó.' }",
+      "$argument = [char]34 + $env:MIND_TEST_TASK_SCRIPT + [char]34",
+      '$action = New-ScheduledTaskAction -Execute $env:MIND_TEST_TASK_RUNTIME -Argument $argument -WorkingDirectory $env:MIND_TEST_TASK_REPO',
+      '$trigger = New-ScheduledTaskTrigger -Once -At $at',
+      '$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited',
+      '$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries',
+      'Register-ScheduledTask -TaskName $env:MIND_TEST_TASK_NAME -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null',
+    ].join('\n'));
+    registered = true;
+    const first = await waitUntil(async () => (await readResults())[0],
+      'Windows debe ejecutar la tarea a la hora programada.', Math.max(5_000, at.getTime() - Date.now() + 45_000));
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(JSON.parse(first.stdout).ejecutadas, 1);
+    assert.ok(first.at >= at.getTime());
+    const { stdout: lastRun } = await powershell(
+      '$info = Get-ScheduledTaskInfo -TaskName $env:MIND_TEST_TASK_NAME; $info.LastRunTime.ToUniversalTime().ToString("o")');
+    assert.ok(Date.parse(lastRun.trim()) >= at.getTime(), 'El Programador acredita el turno por horario');
+    await waitUntil(async () => {
+      const { stdout } = await powershell('(Get-ScheduledTask -TaskName $env:MIND_TEST_TASK_NAME).State');
+      return stdout.trim() !== 'Running';
+    }, 'La tarea programada termina antes de volver a invocarla.');
+    await powershell('Start-ScheduledTask -TaskName $env:MIND_TEST_TASK_NAME');
+    const second = await waitUntil(async () => (await readResults())[1],
+      'Windows debe completar una segunda invocación del mismo turno.', 40_000);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(JSON.parse(second.stdout).ejecutadas, 0);
+    await waitUntil(async () => !(await checkHealthyConnector(base)), 'El Motor temporal sale tras programadas.');
+  } finally {
+    if (registered) await powershell('Unregister-ScheduledTask -TaskName $env:MIND_TEST_TASK_NAME -Confirm:$false');
+  }
 }
 
 async function openMcp(url, token, name, { onElicit, onRoots, cwd } = {}) {
@@ -256,9 +330,82 @@ async function runInteractiveCli(args, respond, { native = true } = {}) {
   }
 }
 
+async function openStdioMcp(args, envVars, clientInfo) {
+  const child = spawn(process.execPath, args, {
+    cwd: repo,
+    env: envVars,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096); });
+  const pending = new Map();
+  const lines = createInterface({ input: child.stdout });
+  lines.on('line', line => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let message;
+    try {
+      message = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    if (message.id !== undefined && pending.has(message.id)) {
+      const resolve = pending.get(message.id);
+      pending.delete(message.id);
+      resolve(message);
+    }
+  });
+  const exited = once(child, 'exit');
+  let nextId = 0;
+  function send(method, params) {
+    const id = method.startsWith('notifications/') ? undefined : ++nextId;
+    const payload = JSON.stringify({ jsonrpc: '2.0', ...(id !== undefined ? { id } : {}), method, ...(params !== undefined ? { params } : {}) });
+    if (id === undefined) {
+      child.stdin.write(payload + '\n');
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Timeout esperando respuesta stdio MCP para ${method}: ${stderr}`));
+      }, 15_000);
+      pending.set(id, message => {
+        clearTimeout(timer);
+        assert.equal(message.error, undefined, JSON.stringify(message.error));
+        resolve(message.result);
+      });
+      child.stdin.write(payload + '\n');
+    });
+  }
+  await send('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo });
+  await send('notifications/initialized');
+  return {
+    listTools: () => send('tools/list', {}),
+    async call(name, argsObj) {
+      const result = await send('tools/call', { name, arguments: argsObj });
+      assert.equal(Boolean(result.isError), false, JSON.stringify(result.structuredContent));
+      return result.structuredContent;
+    },
+    async close() {
+      child.stdin.end();
+      const [code] = await Promise.race([
+        exited,
+        delay(10_000).then(() => {
+          child.kill();
+          return ['timeout'];
+        }),
+      ]);
+      lines.close();
+      assert.equal(code, 0, stderr);
+    },
+  };
+}
+
 test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras un corte', {
   skip: !executable && 'Indica MIND_NATIVE_EXE',
-  timeout: 90_000,
+  timeout: testWindowsScheduler ? 240_000 : 120_000,
 }, async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(RUNS, prefix)));
   const base = path.join(root, 'Base');
@@ -805,6 +952,146 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     await dynamic.close();
   }
 
+  // Etapa 3: automatizaciones con escritor único, permisos y confirmación obligatoria.
+  const helpCatalog = await first.call('mind', { operacion: 'ayuda' });
+  assert.ok(helpCatalog.mind.some(item => item.nombre === 'funciones'));
+  assert.ok(helpCatalog.mind_cambiar.some(item => item.nombre === 'crear_respaldo'));
+  await first.denied('mind', { operacion: 'crear_funcion' }, 'USE_MIND_CAMBIAR');
+  await first.denied('mind_cambiar', { operacion: 'funciones' }, 'USE_MIND');
+
+  const templateDef = (ruta, siExiste = 'error') => ({
+    nombre: 'Resumen etapa 3',
+    ejecutor: 'plantilla-texto',
+    parametros: { destino: { carpeta: notesId, ruta }, si_existe: siExiste, plantilla: 'Generado por {funcion}' },
+    activacion: { tipo: 'horario', frecuencia: 'intervalo', minutos: 15 },
+  });
+  const indexAutoDef = {
+    nombre: 'Índice etapa 3',
+    ejecutor: 'indexar',
+    parametros: { carpetas: [notesId] },
+    activacion: { tipo: 'horario', frecuencia: 'intervalo', minutos: 30 },
+  };
+  const fnCreated = await first.call('mind_cambiar', {
+    operacion: 'crear_funcion',
+    argumentos: { id: 'resumen-etapa3', definicion: templateDef('Resumen-etapa3.md') },
+  });
+  assert.equal(fnCreated.estado, 'creada');
+  assert.equal(fnCreated.automatica, 'sin-autorizar');
+  assert.equal((await second.call('mind_cambiar', {
+    operacion: 'crear_funcion',
+    argumentos: { id: 'indice-etapa3', definicion: indexAutoDef },
+  })).estado, 'creada');
+
+  const listedInSecond = await second.call('mind', { operacion: 'funciones' });
+  assert.equal(listedInSecond.funciones.find(item => item.id === 'resumen-etapa3')?.estado, 'sin-autorizar');
+
+  // Sin formulario MCP, activar queda pendiente para consola (rechazo y luego aprobación).
+  const autoPending = await first.call('mind_cambiar', {
+    operacion: 'activar_funcion',
+    argumentos: { id: 'resumen-etapa3', motivo: 'Resumen automático.' },
+  });
+  assert.equal(autoPending.estado, 'pendiente');
+  assert.ok((await second.call('estado')).solicitudes_pendientes.some(item => item.id === autoPending.solicitud && item.tipo === 'automatizacion'));
+  const rejectedAutoConsole = await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('¿Activar esta automatización?')) return 'n';
+    assert.fail('Pregunta inesperada al rechazar automatización: ' + tail);
+  });
+  assert.match(rejectedAutoConsole, /Rechazada\./);
+  assert.equal((await second.call('mind', { operacion: 'funciones' })).funciones.find(item => item.id === 'resumen-etapa3')?.estado, 'sin-autorizar');
+
+  await first.call('mind_cambiar', { operacion: 'activar_funcion', argumentos: { id: 'resumen-etapa3' } });
+  await first.call('mind_cambiar', { operacion: 'activar_funcion', argumentos: { id: 'indice-etapa3' } });
+  const approvedAutoConsole = await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('¿Activar esta automatización?')) return 's';
+    assert.fail('Pregunta inesperada al aprobar automatización: ' + tail);
+  });
+  assert.match(approvedAutoConsole, /Automatización activada\./);
+  for (const client of [first, second]) {
+    const fns = (await client.call('mind', { operacion: 'funciones' })).funciones;
+    const summaryFn = fns.find(item => item.id === 'resumen-etapa3');
+    const indexFn = fns.find(item => item.id === 'indice-etapa3');
+    assert.equal(summaryFn?.estado, 'activa');
+    assert.equal(summaryFn?.consent?.channel, 'consola');
+    assert.equal(indexFn?.estado, 'activa');
+    assert.equal(indexFn?.consent?.channel, 'consola');
+  }
+
+  // Confirmación interactiva MCP (elicitation) por mind_cambiar -> activar_funcion.
+  const autoDecisions = [
+    () => ({ action: 'decline' }),
+    () => ({ action: 'accept', content: { activar: true } }),
+  ];
+  const autoForm = await openMcp(url, connector.token, 'cliente formularios automatización', {
+    onElicit(params) {
+      assert.equal(params.mode, 'form');
+      assert.ok(autoDecisions.length > 0);
+      return autoDecisions.shift()();
+    },
+  });
+  try {
+    assert.equal((await autoForm.call('mind_cambiar', {
+      operacion: 'desactivar_funcion', argumentos: { id: 'resumen-etapa3' },
+    })).estado, 'desactivada');
+    assert.equal((await autoForm.call('mind_cambiar', {
+      operacion: 'activar_funcion', argumentos: { id: 'resumen-etapa3', motivo: 'Rechazo en formulario' },
+    })).estado, 'rechazado');
+    const formActivated = await autoForm.call('mind_cambiar', {
+      operacion: 'activar_funcion', argumentos: { id: 'resumen-etapa3', motivo: 'Aprobación en formulario' },
+    });
+    assert.equal(formActivated.estado, 'activada');
+    assert.equal(formActivated.autorizada_por, 'formulario-del-cliente');
+    assert.deepEqual(autoDecisions, []);
+  } finally {
+    await autoForm.close();
+  }
+
+  // Ejecución manual controlada de plantilla-texto y reflejo en índice e historial.
+  const executedTemplate = await first.call('mind_cambiar', {
+    operacion: 'ejecutar_funcion', argumentos: { id: 'resumen-etapa3' },
+  });
+  assert.equal(executedTemplate.estado, 'completada');
+  assert.equal(await fs.readFile(path.join(notes, 'Resumen-etapa3.md'), 'utf8'), 'Generado por resumen-etapa3');
+  assert.equal((await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Resumen-etapa3.md' })).total, 1);
+  const autoHistory = await second.call('mind', { operacion: 'historial_funcion', argumentos: { id: 'resumen-etapa3' } });
+  assert.equal(autoHistory.ejecuciones.length, 1);
+  assert.equal(autoHistory.ejecuciones[0].estado, 'completada');
+  assert.equal(JSON.stringify(autoHistory).includes('Generado por'), false);
+
+  // Una edición externa activa el trabajo, incluso si Mind escribió ese mismo archivo antes.
+  const eventId = 'evento-etapa3';
+  const eventOutput = path.join(notes, 'Salida-etapa3.evt');
+  const eventHistoryFile = path.join(base, 'function-history-' + eventId + '.json');
+  const eventHistory = async () => (await fs.readFile(eventHistoryFile, 'utf8').then(JSON.parse, error => {
+    if (error.code === 'ENOENT') return { entries: [] };
+    throw error;
+  })).entries;
+  await first.call('mind_cambiar', {
+    operacion: 'crear_funcion',
+    argumentos: { id: eventId, definicion: {
+      ...templateDef('Salida-etapa3.evt', 'reemplazar'),
+      activacion: { tipo: 'evento', carpeta: notesId, extensiones: ['.evt'], espera_segundos: 5 },
+    } },
+  });
+  assert.equal((await first.call('mind_cambiar', {
+    operacion: 'activar_funcion', argumentos: { id: eventId },
+  })).estado, 'pendiente');
+  await runInteractiveCli(['autorizar', '--base', base], tail => {
+    assert.match(tail, /¿Activar esta automatización\?/);
+    return 's';
+  });
+  await fs.writeFile(path.join(notes, 'Entrada-etapa3.evt'), 'Cambio fuera de Mind');
+  await waitUntil(async () => (await eventHistory()).length === 1, 'La edición externa activa la función.');
+  assert.equal(await fs.readFile(eventOutput, 'utf8'), 'Generado por evento-etapa3');
+  await delay(6500);
+  assert.equal((await eventHistory()).length, 1, 'La escritura propia no dispara otra ejecución');
+  await fs.writeFile(eventOutput, 'Edición manual posterior en el mismo archivo');
+  await waitUntil(async () => (await eventHistory()).length === 2, 'La edición posterior del mismo archivo vuelve a activar la función.');
+  assert.equal(await fs.readFile(eventOutput, 'utf8'), 'Generado por evento-etapa3');
+  await delay(6500);
+  assert.equal((await eventHistory()).length, 2, 'Cada edición se ejecutó una sola vez');
+  assert.ok((await eventHistory()).every(entry => entry.estado === 'completada' && entry.origen === 'evento'));
+  await first.call('mind_cambiar', { operacion: 'desactivar_funcion', argumentos: { id: eventId } });
+
   // Listado y retirada de permisos desde consola con Rust activo.
   for (const environment of [env, nativeEnv]) {
     const { stdout: listing } = await run(process.execPath, ['bin/mind.js', 'permisos', '--base', base],
@@ -859,6 +1146,124 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     carpeta: notesId, ruta: 'Archivo/Nota-v2.txt', version: currentNote.version, contenido: 'No permitido',
   }, 'ACCESS_NOT_GRANTED');
 
+  // Al retirar escritura en notes, las funciones de escritura fallan por falta de permiso y la de lectura sigue activa.
+  const deniedAutoExec = await first.call('mind_cambiar', {
+    operacion: 'ejecutar_funcion', argumentos: { id: 'resumen-etapa3' },
+  });
+  assert.equal(deniedAutoExec.estado, 'fallida');
+  assert.equal(deniedAutoExec.codigo, 'ACCESS_NOT_GRANTED');
+  await first.denied('mind_cambiar', {
+    operacion: 'activar_funcion', argumentos: { id: 'resumen-etapa3' },
+  }, 'ACCESS_NOT_GRANTED');
+  assert.equal((await second.call('mind', { operacion: 'funciones' })).funciones.find(item => item.id === 'indice-etapa3')?.estado, 'activa');
+
+  // Sitio ficticio abierto con Mind desde una sesión de prueba de Claude; tras cerrarla sigue recargable en navegador.
+  const siteDir = path.join(root, 'Sitio ficticio');
+  const siteHtml = '<!doctype html><title>Sitio ficticio</title><link rel="stylesheet" href="estilos.css"><main>Vista etapa 3</main>';
+  const siteCss = 'main { color: #123456; }';
+  await fs.mkdir(siteDir);
+  await fs.writeFile(path.join(siteDir, 'index.html'), siteHtml);
+  await fs.writeFile(path.join(siteDir, 'estilos.css'), siteCss);
+  const claude = await openStdioMcp(
+    ['bin/mind.js', 'mcp', '--base', base, '--carpeta', siteDir],
+    nativeEnv,
+    { name: 'claude-code', title: 'Claude Code', version: '1.0' },
+  );
+  let openedView;
+  try {
+    const listed = await claude.listTools();
+    const names = listed.tools.map(tool => tool.name);
+    assert.ok(names.includes('vista'));
+    assert.ok(names.includes('mind'));
+    assert.ok(names.includes('mind_cambiar'));
+    openedView = await claude.call('vista', { accion: 'abrir', carpeta: siteDir, proyecto: 'Sitio ficticio' });
+    assert.equal(openedView.proyecto, 'Sitio ficticio');
+    const viewUrl = new URL(openedView.url);
+    assert.equal(viewUrl.port, String(connector.health.puertoVistas));
+    assert.equal(connector.state.puertoVistas, connector.health.puertoVistas);
+    const page = await fetch(viewUrl, { signal: AbortSignal.timeout(5_000) });
+    assert.equal(page.status, 200);
+    assert.equal(await page.text(), siteHtml);
+    const style = await fetch(new URL('estilos.css', viewUrl), { signal: AbortSignal.timeout(5_000) });
+    assert.equal(style.status, 200);
+    assert.equal(await style.text(), siteCss);
+    const crossMcp = await fetch(new URL('/mcp', viewUrl), { signal: AbortSignal.timeout(5_000) });
+    assert.equal(crossMcp.status, 404);
+    await crossMcp.text();
+  } finally {
+    await claude.close();
+  }
+  assert.equal((await checkHealthyConnector(base)).health.pid, owner.pid);
+  const reloadedPage = await fetch(openedView.url, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(reloadedPage.status, 200);
+  assert.equal(await reloadedPage.text(), siteHtml);
+  const reloadedCss = await fetch(new URL('estilos.css', openedView.url), { signal: AbortSignal.timeout(5_000) });
+  assert.equal(reloadedCss.status, 200);
+  assert.equal(await reloadedCss.text(), siteCss);
+  assert.deepEqual(
+    await second.call('mind', { operacion: 'vista_consultar', argumentos: { id: openedView.id } }),
+    openedView,
+  );
+
+  // Respaldo cifrado (MINDBAK1) creado por el Motor Rust, verificado y restaurado sin fugas.
+  const backupsDir = path.join(root, 'Respaldos ficticios');
+  const recoveryDir = path.join(root, 'Recuperacion ficticia');
+  const restoredBase = path.join(root, 'Base restaurada');
+  await fs.mkdir(backupsDir);
+  await fs.mkdir(recoveryDir);
+  await first.denied('mind_cambiar', { operacion: 'crear_respaldo', argumentos: {} }, 'BACKUP_NOT_CONFIGURED');
+  const backupSetup = await setupBackup({ baseDirectory: base, passphrase: 'Frase ficticia segura etapa 3' });
+  await saveRecoveryFile({
+    recoveryFile: backupSetup.recoveryFile,
+    directory: recoveryDir,
+    baseDirectory: base,
+    destinationDirectory: backupsDir,
+  });
+  await configureBackupDestination({ baseDirectory: base, destinationDirectory: backupsDir });
+  const createdBackup = await first.call('mind_cambiar', { operacion: 'crear_respaldo', argumentos: {} });
+  assert.equal(createdBackup.estado, 'creado');
+  const backupFilePath = path.join(createdBackup.destino, createdBackup.archivo);
+  const rawBackup = await fs.readFile(backupFilePath);
+  assert.equal(rawBackup.subarray(0, 8).toString('ascii'), 'MINDBAK1');
+  assert.equal(rawBackup.includes(Buffer.from(saved.titulo)), false);
+  await first.denied('crear_respaldo', {}, 'BACKUP_TOO_FREQUENT');
+  const verifiedBackup = await verifyBackup({ file: backupFilePath, recoveryCode: backupSetup.recoveryCode });
+  assert.equal(verifiedBackup.valid, true);
+  assert.equal(verifiedBackup.method, 'codigo');
+  const restoredBackup = await restoreBackup({
+    file: backupFilePath,
+    targetDirectory: restoredBase,
+    recoveryCode: backupSetup.recoveryCode,
+  });
+  assert.equal(restoredBackup.keyRestored, true);
+  await fs.stat(path.join(restoredBase, 'mind-base.json'));
+  await fs.stat(path.join(restoredBase, 'continuity-' + saved.id + '.json'));
+  await fs.stat(path.join(restoredBase, 'function-definition-resumen-etapa3.json'));
+  await fs.stat(path.join(restoredBase, 'function-definition-indice-etapa3.json'));
+  await fs.stat(path.join(restoredBase, 'automation-consent-indice-etapa3.json'));
+
+  let scheduledAt;
+  const scheduledId = 'horario-windows-etapa3';
+  if (testWindowsScheduler) {
+    scheduledAt = new Date(Math.ceil((Date.now() + 24_000) / 60_000) * 60_000);
+    const hora = [scheduledAt.getHours(), scheduledAt.getMinutes()].map(value => String(value).padStart(2, '0')).join(':');
+    await first.call('mind_cambiar', {
+      operacion: 'crear_funcion',
+      argumentos: { id: scheduledId, definicion: {
+        ...indexAutoDef,
+        nombre: 'Programador Windows etapa 3',
+        activacion: { tipo: 'horario', frecuencia: 'diaria', hora },
+      } },
+    });
+    assert.equal((await first.call('mind_cambiar', {
+      operacion: 'activar_funcion', argumentos: { id: scheduledId },
+    })).estado, 'pendiente');
+    await runInteractiveCli(['autorizar', '--base', base], tail => {
+      assert.match(tail, /¿Activar esta automatización\?/);
+      return 's';
+    });
+  }
+
   // Dejar una solicitud pendiente nueva para comprobar que r3 la conserva tras el corte.
   const pendingForR3 = await first.call('acceso', {
     accion: 'solicitar', ruta: extra, acceso: 'leer', motivo: 'Conservar pendiente tras corte.',
@@ -889,6 +1294,16 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
 
   await interrupt(owner);
   nativeOwner = undefined;
+  if (scheduledAt) {
+    assert.equal(await checkHealthyConnector(base), null);
+    await runWindowsScheduledFixture(root, base, nativeEnv, scheduledAt);
+    const { entries } = JSON.parse(await fs.readFile(path.join(base, 'function-history-' + scheduledId + '.json'), 'utf8'));
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].estado, 'completada');
+    assert.equal(entries[0].origen, 'programada');
+    assert.equal(Date.parse(entries[0].programada), scheduledAt.getTime());
+    t.diagnostic('Programador de Windows: un turno con los chats cerrados y una segunda llamada sin duplicados.');
+  }
   const { startCentralMotor } = await import(JSON.parse(old('motor-central.js')));
   const { resolveLayout } = await import(JSON.parse(old('layout.js')));
   const r3Layout = await resolveLayout({ base, env });
@@ -933,6 +1348,26 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     const { createConsentRequests } = await import(JSON.parse(old('consent.js')));
     const oldPending = await createConsentRequests(base).list();
     assert.deepEqual(oldPending.find(item => item.id === pendingForR3.solicitud), pendingRecord);
+
+    // r3 reconoce funciones, autorizaciones e historial y el respaldo creado por Rust.
+    const r3Functions = (await r3.call('funciones', {})).funciones;
+    const r3IndexFn = r3Functions.find(item => item.id === 'indice-etapa3');
+    assert.equal(r3IndexFn?.estado, 'activa');
+    assert.equal(r3IndexFn?.consent?.channel, 'consola');
+    assert.equal((await r3.call('ejecutar_funcion', { id: 'indice-etapa3' })).estado, 'completada');
+    const r3History = await r3.call('historial_funcion', { id: 'resumen-etapa3' });
+    assert.equal(r3History.ejecuciones.some(item => item.estado === 'completada'), true);
+    const oldEvents = await r3.call('historial_funcion', { id: eventId });
+    assert.equal(oldEvents.ejecuciones.length, 2);
+    if (scheduledAt) {
+      const oldSchedule = await r3.call('historial_funcion', { id: scheduledId });
+      assert.equal(oldSchedule.ejecuciones.length, 1);
+      assert.equal(Date.parse(oldSchedule.ejecuciones[0].programada), scheduledAt.getTime());
+    }
+    const r3Config = await readBackupConfig(base);
+    assert.equal(r3Config?.lastBackup?.file, createdBackup.archivo);
+    const listedBackups = await listBackups(backupsDir);
+    assert.equal(listedBackups.some(item => item.name === createdBackup.archivo), true);
   } finally {
     await r3.close();
   }

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -41,6 +42,51 @@ struct RecentScan {
 }
 
 static RECENT_SCANS: Mutex<Vec<RecentScan>> = Mutex::new(Vec::new());
+
+const MAX_PENDING_DIFFS: usize = 256;
+
+#[derive(Clone)]
+pub(crate) struct IndexDiff {
+    pub(crate) folder_id: String,
+    pub(crate) seq: u64,
+    pub(crate) added: Vec<String>,
+    pub(crate) modified: Vec<String>,
+    pub(crate) removed: Vec<String>,
+}
+
+static NEXT_DIFF_SEQ: AtomicU64 = AtomicU64::new(1);
+static PENDING_DIFFS: Mutex<Vec<(String, IndexDiff)>> = Mutex::new(Vec::new());
+
+pub(crate) fn current_diff_seq() -> u64 {
+    NEXT_DIFF_SEQ.load(Ordering::Acquire).saturating_sub(1)
+}
+
+fn push_diff(base: &str, diff: IndexDiff) {
+    if let Ok(mut queue) = PENDING_DIFFS.lock() {
+        if queue.len() >= MAX_PENDING_DIFFS {
+            let overflow = queue.len() + 1 - MAX_PENDING_DIFFS;
+            queue.drain(0..overflow);
+        }
+        queue.push((base.to_owned(), diff));
+    }
+}
+
+pub(crate) fn drain_index_diffs(base: &str) -> Vec<IndexDiff> {
+    let Ok(mut queue) = PENDING_DIFFS.lock() else {
+        return Vec::new();
+    };
+    let mut drained = Vec::new();
+    let mut kept = Vec::new();
+    for (entry_base, diff) in queue.drain(..) {
+        if entry_base == base {
+            drained.push(diff);
+        } else {
+            kept.push((entry_base, diff));
+        }
+    }
+    *queue = kept;
+    drained
+}
 
 fn forget_scan(base: &str, folder: &Folder) {
     if let Ok(mut scans) = RECENT_SCANS.lock() {
@@ -546,10 +592,10 @@ fn missing_index_entries(
     (carried, disappeared)
 }
 
-fn reconcile_folder_index_inner(
+fn reconcile_index_detailed(
     base: &str, folder: &Folder, track_external: bool,
     confirm_owner: impl Fn() -> Result<(), &'static str>,
-) -> Result<Value, Fault> {
+) -> Result<(Value, Value), Fault> {
     forget_scan(base, folder);
     let now = now_iso()?;
     let is_registered = access::registered_folders(base)?.iter().any(|f| f.id == folder.id);
@@ -563,7 +609,7 @@ fn reconcile_folder_index_inner(
         .filter(|(data, _)| valid_persisted_index(data, folder))
         .map(|(data, _)| data);
     let (mut entries, issues) = scan_folder_tree(folder)?;
-    if let Some(prev_data) = same_gen_prev {
+    let (stats, pending_diff) = if let Some(prev_data) = same_gen_prev {
         let (carried, disappeared) = missing_index_entries(folder, prev_data, &entries, &issues);
         if !carried.is_empty() {
             if entries.len() + carried.len() > MAX_INDEX_ENTRIES {
@@ -576,14 +622,69 @@ fn reconcile_folder_index_inner(
                 a.encode_utf16().cmp(b.encode_utf16())
             });
         }
+        let mut prev_map: BTreeMap<&str, &Value> = BTreeMap::new();
+        for item in prev_data["entries"].as_array().into_iter().flatten() {
+            if let Some(p) = item["path"].as_str() {
+                prev_map.insert(p, item);
+            }
+        }
+        let mut added_paths = Vec::new();
+        let mut modified_paths = Vec::new();
+        for entry in &entries {
+            let Some(p) = entry["path"].as_str() else { continue };
+            match prev_map.get(p) {
+                None => added_paths.push(p.to_owned()),
+                Some(prev) if *prev != entry => modified_paths.push(p.to_owned()),
+                Some(_) => {}
+            }
+        }
+        let removed_paths: Vec<String> = disappeared
+            .iter()
+            .filter_map(|item| item["path"].as_str().map(str::to_owned))
+            .collect();
+        let added = added_paths.len();
+        let modified = modified_paths.len();
+        let removed = disappeared.len();
         if track_external && !disappeared.is_empty() {
             record_removed_entries(base, folder, &disappeared, "externo", &confirm_owner)?;
         }
+        let stats = json!({
+            "modo": "reconciliacion",
+            "entradas": entries.len(),
+            "agregados": added,
+            "modificados": modified,
+            "eliminados": removed,
+        });
         if prev_data["entries"] == json!(entries) && prev_data["issues"] == json!(issues) {
             remember_scan(base, folder, None);
-            return Ok(prev_data.clone());
+            return Ok((prev_data.clone(), stats));
         }
-    }
+        let diff = if is_registered
+            && (!added_paths.is_empty() || !modified_paths.is_empty() || !removed_paths.is_empty())
+        {
+            Some(IndexDiff {
+                folder_id: folder.id.clone(),
+                seq: NEXT_DIFF_SEQ.fetch_add(1, Ordering::AcqRel),
+                added: added_paths,
+                modified: modified_paths,
+                removed: removed_paths,
+            })
+        } else {
+            None
+        };
+        (stats, diff)
+    } else {
+        (
+            json!({
+                "modo": "inicial",
+                "entradas": entries.len(),
+                "agregados": Value::Null,
+                "modificados": Value::Null,
+                "eliminados": Value::Null,
+            }),
+            None,
+        )
+    };
     let generation = same_gen_prev
         .and_then(|d| d["generation"].as_u64())
         .unwrap_or(0)
@@ -613,8 +714,18 @@ fn reconcile_folder_index_inner(
             &confirm_owner,
         )?;
     }
+    if let Some(diff) = pending_diff {
+        push_diff(base, diff);
+    }
     remember_scan(base, folder, (!is_registered).then_some(&record));
-    Ok(record)
+    Ok((record, stats))
+}
+
+fn reconcile_folder_index_inner(
+    base: &str, folder: &Folder, track_external: bool,
+    confirm_owner: impl Fn() -> Result<(), &'static str>,
+) -> Result<Value, Fault> {
+    reconcile_index_detailed(base, folder, track_external, confirm_owner).map(|(record, _)| record)
 }
 
 pub(crate) fn reconcile_folder_index(
@@ -622,6 +733,22 @@ pub(crate) fn reconcile_folder_index(
     confirm_owner: impl Fn() -> Result<(), &'static str>,
 ) -> Result<Value, Fault> {
     reconcile_folder_index_inner(base, folder, true, confirm_owner)
+}
+
+pub(crate) fn index_folder_with_stats(
+    base: &str, folder: &Folder,
+    confirm_owner: impl Fn() -> Result<(), &'static str>,
+) -> Result<Value, Fault> {
+    let (_record, stats) = reconcile_index_detailed(base, folder, true, confirm_owner)?;
+    Ok(json!({
+        "carpeta": folder.id,
+        "estado": "reconciliada",
+        "modo": stats["modo"],
+        "entradas": stats["entradas"],
+        "agregados": stats["agregados"],
+        "modificados": stats["modificados"],
+        "eliminados": stats["eliminados"],
+    }))
 }
 
 pub(crate) fn reconcile_index_by_id(
@@ -1101,6 +1228,72 @@ fn write(
         result["version_anterior"] = args["version"].clone();
     }
     Ok(result)
+}
+
+pub(crate) fn write_output_text(
+    base: &str, folder_id: &str, relative_path: &str, content: &str, mode: &str,
+    confirm_owner: impl Fn() -> Result<(), &'static str>,
+) -> Result<Value, Fault> {
+    let required: &[&str] = if mode == "reemplazar" { &["leer", "escribir"] } else { &["escribir"] };
+    let scope = access::resolve_file(base, Some(folder_id), relative_path, required)?;
+    let confirm = || {
+        verify(base, &scope, required).map_err(|error| error.code)?;
+        confirm_owner()
+    };
+    let bytes = content.as_bytes();
+    match text_write::write_bytes(&scope.root, &scope.relative, bytes, MAX_TEXT, None, confirm) {
+        Ok(_) => {
+            let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
+                Ok(_) => "updated",
+                Err(_) => "needs-reconciliation",
+            };
+            return Ok(json!({
+                "carpeta": scope.id,
+                "ruta": scope.relative,
+                "bytes": bytes.len(),
+                "accion": "creado",
+                "indice": index_state,
+            }));
+        }
+        Err("FILE_EXISTS") if mode == "reemplazar" => {}
+        Err(code) => {
+            return Err(Fault::new(code, "No se pudo escribir el archivo generado."));
+        }
+    }
+    let current = access::read_file(&scope.root, &scope.relative, MAX_TEXT)?
+        .ok_or_else(|| Fault::new("FILE_NOT_FOUND", "No se encontró el archivo existente."))?;
+    let current_text = std::str::from_utf8(&current)
+        .ok()
+        .filter(|text| !text.contains('\0'))
+        .ok_or_else(|| Fault::new("TEXT_UNREADABLE", "El archivo existente no contiene texto UTF-8 válido."))?;
+    verify(base, &scope, required)?;
+    if current_text == content {
+        return Ok(json!({
+            "carpeta": scope.id,
+            "ruta": scope.relative,
+            "bytes": bytes.len(),
+            "accion": "sin-cambios",
+            "indice": "current",
+        }));
+    }
+    let expected = format!("{:x}", Sha256::digest(&current));
+    let confirm_mod = || {
+        verify(base, &scope, required).map_err(|error| error.code)?;
+        confirm_owner()
+    };
+    text_write::write_bytes(&scope.root, &scope.relative, bytes, MAX_TEXT, Some(&expected), confirm_mod)
+        .map_err(|code| Fault::new(code, "No se pudo actualizar el archivo generado."))?;
+    let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
+        Ok(_) => "updated",
+        Err(_) => "needs-reconciliation",
+    };
+    Ok(json!({
+        "carpeta": scope.id,
+        "ruta": scope.relative,
+        "bytes": bytes.len(),
+        "accion": "reemplazado",
+        "indice": index_state,
+    }))
 }
 
 pub(crate) fn valid_trash_id(id: &str) -> bool {
@@ -2568,6 +2761,53 @@ pub(crate) fn explore_folder(
     }))
 }
 
+pub(crate) fn list_removed_for_folder(
+    base: &str, folder: &Folder, since_ms: Option<i64>, now_ms: i64, existing: &BTreeSet<&str>,
+) -> Vec<Value> {
+    let Some((data, _)) = read_base_stored(base, &removed_file(&folder.id)).ok().flatten() else {
+        return Vec::new();
+    };
+    if data["format"] != "mind-folder-removed"
+        || data["version"] != 1
+        || data["generation"].as_str() != folder.generation.as_deref()
+    {
+        return Vec::new();
+    }
+    let mut results = Vec::new();
+    for entry in data["entries"].as_array().into_iter().flatten().rev() {
+        let Some(path) = entry["path"].as_str() else { continue };
+        if existing.contains(path) {
+            continue;
+        }
+        let parts: Vec<&str> = path.split('/').collect();
+        if access::excluded(folder, &parts) {
+            continue;
+        }
+        let Some(removed_ms) = entry["removedAt"].as_str().and_then(iso_to_millis) else {
+            continue;
+        };
+        if now_ms - removed_ms > RETENTION_MS {
+            continue;
+        }
+        if since_ms.is_some_and(|since| removed_ms < since) {
+            continue;
+        }
+        let name = path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path);
+        results.push(json!({
+            "carpeta": folder.id,
+            "ruta": path,
+            "nombre": name,
+            "tipo": type_out(entry["type"].as_str().unwrap_or("file")),
+            "bytes": entry["size"],
+            "modificado": entry["modifiedAt"],
+            "eliminado": entry["removedAt"],
+            "por": entry["by"],
+            "ruta_absoluta": absolute_path(&folder.root, path),
+        }));
+    }
+    results
+}
+
 pub(crate) fn list_removed(
     base: &str, args: &Map<String, Value>,
     confirm_owner: impl Fn() -> Result<(), &'static str>,
@@ -2600,46 +2840,7 @@ pub(crate) fn list_removed(
             .flatten()
             .filter_map(|e| e["path"].as_str())
             .collect();
-        let Some((data, _)) = read_base_stored(base, &removed_file(&folder.id)).ok().flatten() else {
-            continue;
-        };
-        if data["format"] != "mind-folder-removed"
-            || data["version"] != 1
-            || data["generation"].as_str() != folder.generation.as_deref()
-        {
-            continue;
-        }
-        for entry in data["entries"].as_array().into_iter().flatten().rev() {
-            let Some(path) = entry["path"].as_str() else { continue };
-            if existing.contains(path) {
-                continue;
-            }
-            let parts: Vec<&str> = path.split('/').collect();
-            if access::excluded(folder, &parts) {
-                continue;
-            }
-            let Some(removed_ms) = entry["removedAt"].as_str().and_then(iso_to_millis) else {
-                continue;
-            };
-            if now_ms - removed_ms > RETENTION_MS {
-                continue;
-            }
-            if since_ms.is_some_and(|since| removed_ms < since) {
-                continue;
-            }
-            let name = path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path);
-            results.push(json!({
-                "carpeta": folder.id,
-                "ruta": path,
-                "nombre": name,
-                "tipo": type_out(entry["type"].as_str().unwrap_or("file")),
-                "bytes": entry["size"],
-                "modificado": entry["modifiedAt"],
-                "eliminado": entry["removedAt"],
-                "por": entry["by"],
-                "ruta_absoluta": absolute_path(&folder.root, path),
-            }));
-        }
+        results.extend(list_removed_for_folder(base, folder, since_ms, now_ms, &existing));
     }
     results.sort_by(|a, b| b["eliminado"].as_str().cmp(&a["eliminado"].as_str()));
     let total = results.len();

@@ -4,6 +4,8 @@ mod continuity_read;
 mod continuity_trial;
 mod host;
 mod meaning;
+mod motor_automations;
+mod motor_backup;
 mod motor_connector;
 mod motor_consent;
 mod motor_files;

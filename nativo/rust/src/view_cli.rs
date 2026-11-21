@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     bridge::{base_id, regular_json},
     build_recipe::{BuildError, Recipe},
-    views::{MAX_VIEW_BYTES, MAX_VIEW_FILES},
+    views::{AssetInput, Git as ViewGit, Publication as ViewPublication, MAX_VIEW_BYTES, MAX_VIEW_FILES},
 };
 
 const USAGE: &str = "vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS [--id UUID --version N]\nvista consultar|cerrar --base ABS --id UUID\nvista receta --proyecto NOMBRE --copia ABS --receta ABS\nvista construir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]";
@@ -35,10 +35,22 @@ pub(crate) struct Git {
     cambios: bool,
 }
 
+impl From<Git> for ViewGit {
+    fn from(value: Git) -> Self {
+        Self { rama: value.rama, revision: value.revision, cambios: value.cambios }
+    }
+}
+
 #[derive(Serialize)]
-struct Asset {
-    ruta: String,
-    base64: String,
+pub(crate) struct Asset {
+    pub(crate) ruta: String,
+    pub(crate) base64: String,
+}
+
+impl From<Asset> for AssetInput {
+    fn from(value: Asset) -> Self {
+        Self { ruta: value.ruta, base64: value.base64 }
+    }
 }
 
 #[derive(Serialize)]
@@ -67,18 +79,25 @@ impl Host {
 
     pub(crate) async fn connect(base: &Path) -> Result<Self, String> {
         let identity = base_id(base).ok_or("La Base indicada no está disponible.")?;
-        let record = regular_json(&base.join("anfitrion.json"))
-            .ok_or("Primero inicia el anfitrión con vistas habilitadas.")?;
-        let port = port_in(&record, "port").ok_or("Registro de anfitrión inválido.")?;
+        let (record, is_host) = match regular_json(&base.join("anfitrion.json")) {
+            Some(record) => (record, true),
+            None => (
+                regular_json(&base.join("conector.json"))
+                    .filter(|record| record["backend"].as_str() == Some("rust"))
+                    .ok_or("Primero inicia el Motor o anfitrión con vistas habilitadas.")?,
+                false,
+            ),
+        };
+        let port = port_in(&record, "port").ok_or("Registro de conector inválido.")?;
         let view_port = port_in(&record, "puertoVistas")
             .filter(|candidate| *candidate != port)
-            .ok_or("El anfitrión no tiene las vistas habilitadas.")?;
+            .ok_or("El Motor o anfitrión no tiene las vistas habilitadas.")?;
         let pid = record["pid"]
             .as_u64()
             .filter(|pid| *pid > 0)
-            .ok_or("Registro de anfitrión inválido.")?;
+            .ok_or("Registro de conector inválido.")?;
         if record["version"].as_u64() != Some(1) || record["baseId"].as_str() != Some(identity.as_str()) {
-            return Err("El registro del anfitrión no corresponde a esta Base.".into());
+            return Err("El registro local no corresponde a esta Base.".into());
         }
         let secret = regular_json(&base.join("conector-secreto.json"))
             .filter(|secret| secret["version"].as_u64() == Some(1))
@@ -98,22 +117,30 @@ impl Host {
         let nonce = Uuid::new_v4().simple().to_string();
         let response = host.client.get(host.url(&format!("/health?nonce={nonce}")))
             .timeout(Duration::from_secs(3))
-            .send().await.map_err(|_| "El anfitrión local no responde.")?;
+            .send().await.map_err(|_| "El Motor o anfitrión local no responde.")?;
         let status = response.status();
         let health = small_json(response).await?;
+        let kind_ok = if is_host {
+            health["anfitrion"].as_bool() == Some(true)
+        } else {
+            health["ok"].as_bool() == Some(true) && health["backend"].as_str() == Some("rust")
+        };
+        let domain = if is_host { "mind-host-health-v1" } else { "mind-health-v1" };
         if status != StatusCode::OK
-            || health["anfitrion"].as_bool() != Some(true)
+            || !kind_ok
             || health["baseId"].as_str() != Some(identity.as_str())
             || health["pid"].as_u64() != Some(pid)
             || port_in(&health, "port") != Some(port)
-            || !verified_proof(&host.token, &nonce, &identity, port, &health)
+            || !verified_proof(&host.token, domain, &nonce, &identity, port, &health)
         {
-            return Err("No se pudo verificar la identidad del anfitrión.".into());
+            return Err("No se pudo verificar la identidad del servidor local.".into());
         }
         if let Some(port) = port_in(&health, "puertoVistas") {
             if port != view_port {
                 return Err("El puerto de las vistas cambió. Vuelve a intentarlo.".into());
             }
+        } else if !is_host {
+            return Err("El Motor no informó el puerto de vistas.".into());
         }
         Ok(host)
     }
@@ -163,7 +190,7 @@ fn port_in(value: &Value, field: &str) -> Option<u16> {
     (port != 0).then_some(port)
 }
 
-fn verified_proof(token: &str, nonce: &str, base: &str, port: u16, health: &Value) -> bool {
+fn verified_proof(token: &str, domain: &str, nonce: &str, base: &str, port: u16, health: &Value) -> bool {
     let Some(hex) = health["proof"].as_str() else { return false };
     if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return false;
@@ -173,7 +200,7 @@ fn verified_proof(token: &str, nonce: &str, base: &str, port: u16, health: &Valu
         .filter_map(|offset| u8::from_str_radix(&hex[offset..offset + 2], 16).ok())
         .collect();
     let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC accepts every key size");
-    mac.update(format!("mind-host-health-v1\n{nonce}\n{base}\n{port}").as_bytes());
+    mac.update(format!("{domain}\n{nonce}\n{base}\n{port}").as_bytes());
     mac.verify_slice(&bytes).is_ok()
 }
 
@@ -229,6 +256,10 @@ fn route_name(name: &str) -> bool {
 }
 
 fn snapshot(root: &Path) -> Result<Vec<Asset>, String> {
+    snapshot_filtered(root, None)
+}
+
+pub(crate) fn snapshot_filtered(root: &Path, skip: Option<&dyn Fn(&str) -> bool>) -> Result<Vec<Asset>, String> {
     let mut directories = vec![String::new()];
     let mut found_directories = 1;
     let mut assets = Vec::new();
@@ -238,10 +269,14 @@ fn snapshot(root: &Path) -> Result<Vec<Asset>, String> {
         for entry in fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))? {
             let entry = entry.map_err(|error| format!("No se pudo enumerar el contenido: {error}"))?;
             let filename = entry.file_name().into_string().map_err(|_| "El contenido debe tener nombres Unicode.")?;
+            let child_relative = if relative.is_empty() { filename.clone() } else { format!("{relative}/{filename}") };
+            if skip.is_some_and(|pred| pred(&child_relative)) {
+                continue;
+            }
             if !route_name(&filename) {
                 return Err(format!("Nombre de archivo o carpeta no admitido: {filename:?}"));
             }
-            let relative = if relative.is_empty() { filename } else { format!("{relative}/{filename}") };
+            let relative = child_relative;
             if relative.len() > MAX_PATH {
                 return Err("Una ruta de la vista es demasiado larga.".into());
             }
@@ -289,6 +324,17 @@ fn snapshot(root: &Path) -> Result<Vec<Asset>, String> {
     }
     assets.sort_unstable_by(|left, right| left.ruta.cmp(&right.ruta));
     Ok(assets)
+}
+
+pub(crate) fn build_publication(
+    project: String, copy_id: String, git: Option<Git>, assets: Vec<Asset>,
+) -> ViewPublication {
+    ViewPublication {
+        proyecto: project,
+        copia: copy_id,
+        git: git.map(Into::into),
+        archivos: assets.into_iter().map(Into::into).collect(),
+    }
 }
 
 #[cfg(windows)]

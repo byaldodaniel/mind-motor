@@ -21,26 +21,26 @@ const VIEW_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'
 
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct Git {
-    rama: Option<String>,
-    revision: Option<String>,
-    cambios: bool,
+pub(crate) struct Git {
+    pub(crate) rama: Option<String>,
+    pub(crate) revision: Option<String>,
+    pub(crate) cambios: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Publication {
-    proyecto: String,
-    copia: String,
-    git: Option<Git>,
-    archivos: Vec<AssetInput>,
+pub(crate) struct Publication {
+    pub(crate) proyecto: String,
+    pub(crate) copia: String,
+    pub(crate) git: Option<Git>,
+    pub(crate) archivos: Vec<AssetInput>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AssetInput {
-    ruta: String,
-    base64: String,
+pub(crate) struct AssetInput {
+    pub(crate) ruta: String,
+    pub(crate) base64: String,
 }
 
 struct Snapshot {
@@ -192,8 +192,8 @@ impl Views {
         json!({"activas": records.len(), "bytes": bytes})
     }
 
-    fn metadata(&self, status: StatusCode, id: Uuid, view: &View) -> Response<Body> {
-        let mut response = full(status, json!({
+    fn metadata_value(&self, id: Uuid, view: &View) -> serde_json::Value {
+        json!({
             "id": id.to_string(),
             "url": format!("{}/vista/{id}/", self.origin),
             "proyecto": view.snapshot.project,
@@ -201,13 +201,74 @@ impl Views {
             "git": view.snapshot.git,
             "huella": view.snapshot.fingerprint,
             "version": view.version,
-        }));
+        })
+    }
+
+    fn metadata(&self, status: StatusCode, _id: Uuid, version: u64, payload: serde_json::Value) -> Response<Body> {
+        let mut response = full(status, payload);
         response.headers_mut().insert(
             header::ETAG,
-            header::HeaderValue::from_str(&format!("\"{}\"", view.version)).unwrap(),
+            header::HeaderValue::from_str(&format!("\"{version}\"")).unwrap(),
         );
         response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
         response
+    }
+
+    pub(crate) async fn get_info(&self, id: Uuid) -> Result<serde_json::Value, PublicationError> {
+        let records = self.records.lock().await;
+        match records.get(&id) {
+            Some(view) => Ok(self.metadata_value(id, view)),
+            None => Err((StatusCode::NOT_FOUND, "VIEW_NOT_FOUND")),
+        }
+    }
+
+    pub(crate) async fn remove_view(&self, id: Uuid) -> bool {
+        self.records.lock().await.remove(&id).is_some()
+    }
+
+    pub(crate) async fn publish_input(
+        &self, input: Publication, previous: Option<(Uuid, u64)>,
+    ) -> Result<(StatusCode, Uuid, u64, serde_json::Value), PublicationError> {
+        let Ok(_slot) = self.publishing.try_acquire() else {
+            return Err((StatusCode::TOO_MANY_REQUESTS, "VIEW_PUBLISH_BUSY"));
+        };
+        let snapshot = Snapshot::parse(input)?;
+        let mut records = self.records.lock().await;
+        let (status, id, base_version, old_size) = match previous {
+            Some((id, expected)) => {
+                let Some(current) = records.get(&id) else {
+                    return Err((StatusCode::NOT_FOUND, "VIEW_NOT_FOUND"));
+                };
+                if current.version != expected {
+                    return Err((StatusCode::PRECONDITION_FAILED, "VIEW_VERSION_CHANGED"));
+                }
+                if current.snapshot.project != snapshot.project || current.snapshot.copy != snapshot.copy {
+                    return Err((StatusCode::CONFLICT, "VIEW_COPY_CHANGED"));
+                }
+                (StatusCode::OK, id, current.version, current.snapshot.size)
+            }
+            None => {
+                if records.len() == MAX_VIEWS {
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, "VIEW_CAPACITY_REACHED"));
+                }
+                let mut id = Uuid::new_v4();
+                while records.contains_key(&id) {
+                    id = Uuid::new_v4();
+                }
+                (StatusCode::CREATED, id, 0, 0)
+            }
+        };
+        let total: usize = records.values().map(|view| view.snapshot.size).sum();
+        if total - old_size + snapshot.size > MAX_TOTAL_BYTES {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "VIEW_CAPACITY_REACHED"));
+        }
+        let Some(version) = base_version.checked_add(1) else {
+            return Err((StatusCode::CONFLICT, "VIEW_VERSION_EXHAUSTED"));
+        };
+        let view = View { snapshot, version };
+        let payload = self.metadata_value(id, &view);
+        records.insert(id, view);
+        Ok((status, id, version, payload))
     }
 
     // The private listener authenticates every request before passing it here.
@@ -225,7 +286,7 @@ impl Views {
         };
         match *req.method() {
             Method::GET => match self.records.lock().await.get(&id) {
-                Some(view) => self.metadata(StatusCode::OK, id, view),
+                Some(view) => self.metadata(StatusCode::OK, id, view.version, self.metadata_value(id, view)),
                 None => error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND"),
             },
             Method::PUT => {
@@ -243,7 +304,7 @@ impl Views {
                 self.publish(req, Some((id, version))).await
             }
             Method::DELETE => {
-                if self.records.lock().await.remove(&id).is_some() {
+                if self.remove_view(id).await {
                     Response::builder().status(StatusCode::NO_CONTENT).body(body(Bytes::new())).unwrap()
                 } else {
                     error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND")
@@ -254,55 +315,16 @@ impl Views {
     }
 
     async fn publish(&self, req: Request<Incoming>, previous: Option<(Uuid, u64)>) -> Response<Body> {
-        let Ok(_slot) = self.publishing.try_acquire() else {
-            return error(StatusCode::TOO_MANY_REQUESTS, "VIEW_PUBLISH_BUSY");
-        };
         let Ok(body) = Limited::new(req.into_body(), MAX_MESSAGE).collect().await else {
             return error(StatusCode::PAYLOAD_TOO_LARGE, "VIEW_TOO_LARGE");
         };
         let Ok(input) = serde_json::from_slice(&body.to_bytes()) else {
             return error(StatusCode::BAD_REQUEST, "INVALID_VIEW");
         };
-        let snapshot = match Snapshot::parse(input) {
-            Ok(snapshot) => snapshot,
-            Err((status, code)) => return error(status, code),
-        };
-        let mut records = self.records.lock().await;
-        let (status, id, base_version, old_size) = match previous {
-            Some((id, expected)) => {
-                let Some(current) = records.get(&id) else {
-                    return error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND");
-                };
-                if current.version != expected {
-                    return error(StatusCode::PRECONDITION_FAILED, "VIEW_VERSION_CHANGED");
-                }
-                if current.snapshot.project != snapshot.project || current.snapshot.copy != snapshot.copy {
-                    return error(StatusCode::CONFLICT, "VIEW_COPY_CHANGED");
-                }
-                (StatusCode::OK, id, current.version, current.snapshot.size)
-            }
-            None => {
-                if records.len() == MAX_VIEWS {
-                    return error(StatusCode::SERVICE_UNAVAILABLE, "VIEW_CAPACITY_REACHED");
-                }
-                let mut id = Uuid::new_v4();
-                while records.contains_key(&id) {
-                    id = Uuid::new_v4();
-                }
-                (StatusCode::CREATED, id, 0, 0)
-            }
-        };
-        let total: usize = records.values().map(|view| view.snapshot.size).sum();
-        if total - old_size + snapshot.size > MAX_TOTAL_BYTES {
-            return error(StatusCode::SERVICE_UNAVAILABLE, "VIEW_CAPACITY_REACHED");
+        match self.publish_input(input, previous).await {
+            Ok((status, id, version, payload)) => self.metadata(status, id, version, payload),
+            Err((status, code)) => error(status, code),
         }
-        let Some(version) = base_version.checked_add(1) else {
-            return error(StatusCode::CONFLICT, "VIEW_VERSION_EXHAUSTED");
-        };
-        let view = View { snapshot, version };
-        let response = self.metadata(status, id, &view);
-        records.insert(id, view);
-        response
     }
 
     pub(crate) async fn serve(&self, req: Request<Incoming>) -> Response<Body> {

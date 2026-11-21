@@ -4,7 +4,11 @@ use std::{
     io::{self, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use http_body_util::{BodyExt, Limited};
@@ -12,18 +16,22 @@ use hyper::{body::Incoming, header, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, sync::Notify, task::JoinSet};
+use tokio::{net::TcpListener, runtime::Handle, sync::Notify, task::JoinSet, time::MissedTickBehavior};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use uuid::Uuid;
 
 use crate::{
+    bridge,
     host::{self, Body},
+    motor_automations, motor_backup,
     motor_connector::Connector,
     motor_consent::{self as consent, AccessRequest, Prepared},
     motor_mcp::Mcp,
-    motor_owner::{timestamp, Owner},
+    motor_owner::{self, timestamp, Owner},
     motor_workspace::{physical_directory, relative_parts, with_workspace, Workspace},
     motor_files, motor_permissions as access, motor_records, organize, scan, text_write,
+    view_cli,
+    views::Views,
 };
 
 const MAX_RECORD: usize = 2 * 1024 * 1024;
@@ -117,6 +125,9 @@ pub(crate) struct Motor {
     owner: Owner,
     work: Mutex<()>,
     layout: Layout,
+    views: Arc<Views>,
+    backup_limiter: motor_backup::BackupLimiter,
+    automations: Mutex<motor_automations::AutomationRuntime>,
 }
 
 impl Motor {
@@ -146,7 +157,7 @@ impl Motor {
         marker.as_ref().map(Self::validate_marker).transpose()
     }
 
-    fn open(base: String, layout: Layout, create: bool) -> Result<Self, Fault> {
+    fn open(base: String, layout: Layout, create: bool, views: Arc<Views>) -> Result<Self, Fault> {
         if let Some(motor_dir) = layout.motor.as_deref().and_then(physical_directory) {
             let base_path = Path::new(&base);
             let motor_path = Path::new(&motor_dir);
@@ -180,7 +191,16 @@ impl Motor {
             }
             None => return Err(Fault::new("BASE_NOT_FOUND", "Indica una Base preparada por Mind.")),
         };
-        Ok(Self { base, base_id, owner, work: Mutex::new(()), layout })
+        Ok(Self {
+            base,
+            base_id,
+            owner,
+            work: Mutex::new(()),
+            layout,
+            views,
+            backup_limiter: motor_backup::BackupLimiter::default(),
+            automations: Mutex::new(motor_automations::AutomationRuntime::new()),
+        })
     }
 
     pub(crate) fn workspace(&self, paths: &[String], active: bool) -> Result<Workspace, Fault> {
@@ -242,7 +262,47 @@ impl Motor {
         motor_files::finish_organize(&self.base, confirmation, decision, confirm)
     }
 
+    pub(crate) fn prepare_activation(
+        &self, args: Value, client: Option<&Value>,
+    ) -> Result<motor_automations::AutomationPrepared, Fault> {
+        let args = args.as_object().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        self.owner.check().map_err(filesystem)?;
+        motor_automations::prepare_activation(&self.base, args, client)
+    }
+
+    pub(crate) fn finish_activation(
+        &self, prepared: motor_automations::AutomationPrepared, answer: Option<&Value>,
+        client: Option<&Value>, active: impl Fn() -> bool,
+    ) -> Result<Value, Fault> {
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        let confirm = || {
+            if !active() { return Err("SESSION_CLOSED"); }
+            self.owner.check()
+        };
+        confirm().map_err(filesystem)?;
+        motor_automations::finish_activation(&self.base, prepared, answer, client, confirm)
+    }
+
+    pub(crate) fn poll_automations(&self) -> Result<(), Fault> {
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        self.owner.check().map_err(filesystem)?;
+        let mut runtime = self.automations.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        runtime.poll(&self.base, self.layout.motor.as_deref(), || self.owner.check())
+    }
+
+    pub(crate) fn clear_automation_bursts(&self) {
+        if let Ok(mut runtime) = self.automations.lock() {
+            runtime.clear_bursts(&self.base);
+        }
+    }
+
     pub(crate) fn call(&self, name: &str, args: Value) -> Result<Value, Fault> {
+        let (name, args) = unwrap_catalog_call(name, args)?;
+        if name == "mind_ayuda" {
+            let fields = args.as_object().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
+            return catalog_help(fields);
+        }
         if name == "acceso" {
             if args["accion"] == "retirar" {
                 let mut args = args.as_object().cloned().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
@@ -259,21 +319,188 @@ impl Motor {
         let args = args.as_object().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
         let _work = self.work.lock().map_err(|_| Fault::new("MOTOR_UNAVAILABLE", "El Motor no pudo coordinar la petición."))?;
         self.owner.check().map_err(filesystem)?;
-        match name {
+        match name.as_str() {
             "estado" if args.is_empty() => self.state(),
             "retomar" => self.resume(args),
+            "conversacion_leer" => self.resume(args).map(|value| json!({"conversacion": value["conversacion"]})),
             "buscar" => self.search(args),
+            "conversaciones_buscar" => {
+                if args.contains_key("en") {
+                    return Err(invalid("La llamada incluye argumentos no admitidos."));
+                }
+                let mut fields = args.clone();
+                fields.insert("en".into(), json!("conversaciones"));
+                self.search(&fields)
+            }
             "guardar" | "actualizar" if args.get("en").and_then(Value::as_str) == Some("continuidad") => {
                 access::check_continuity(&self.base, true)?;
                 motor_files::recover_move(&self.base, || self.owner.check())?;
-                motor_records::call(&self.base, name, args, || self.owner.check())
+                motor_records::call(&self.base, name.as_str(), args, || self.owner.check())
+            }
+            "continuidad_registrar" | "continuidad_actualizar" => {
+                if args.contains_key("en") {
+                    return Err(invalid("La llamada incluye argumentos no admitidos."));
+                }
+                let mut fields = args.clone();
+                fields.insert("en".into(), json!("continuidad"));
+                access::check_continuity(&self.base, true)?;
+                motor_files::recover_move(&self.base, || self.owner.check())?;
+                let inner = if name == "continuidad_registrar" { "guardar" } else { "actualizar" };
+                motor_records::call(&self.base, inner, &fields, || self.owner.check())
             }
             "guardar" => self.save(args, false),
             "actualizar" => self.save(args, true),
+            "conversacion_guardar" if args.get("id").is_some() => self.save(args, true),
+            "conversacion_guardar" => self.save(args, false),
             "leer" | "crear" | "crear_carpeta" | "modificar" | "editar" | "organizar"
             | "mover" | "renombrar" | "papelera" | "restaurar" | "borrar" | "vaciar_papelera"
-            | "explorar" | "eliminados" => motor_files::call(&self.base, name, args, || self.owner.check()),
+            | "explorar" | "eliminados" => motor_files::call(&self.base, name.as_str(), args, || self.owner.check()),
+            "vista" => self.call_vista(args),
+            "crear_respaldo" => {
+                only(args, &[])?;
+                motor_backup::create_for_agent(&self.base, self.layout.motor.as_deref(), &self.backup_limiter, || self.owner.check())
+            }
+            "funciones" | "crear_funcion" | "modificar_funcion" | "retirar_funcion"
+            | "ejecutar_funcion" | "desactivar_funcion" | "historial_funcion" => {
+                motor_automations::call_tool(&self.base, self.layout.motor.as_deref(), name.as_str(), args, || self.owner.check())
+            }
+            "activar_funcion" => {
+                let prepared = motor_automations::prepare_activation(&self.base, args, None)?;
+                motor_automations::finish_activation(&self.base, prepared, None, None, || self.owner.check())
+            }
             _ => Err(Fault::new("UNKNOWN_TOOL", "Herramienta no disponible en el Motor nativo.")),
+        }
+    }
+
+    fn call_vista(&self, args: &Map<String, Value>) -> Result<Value, Fault> {
+        let action = args.get("accion").and_then(Value::as_str)
+            .ok_or_else(|| invalid("Indica accion abrir, consultar o cerrar para la vista."))?;
+        match action {
+            "consultar" => {
+                only(args, &["accion", "id"])?;
+                let id = parse_view_uuid(args.get("id"))?.ok_or_else(|| invalid("Indica el ID de la vista."))?;
+                Handle::current()
+                    .block_on(self.views.get_info(id))
+                    .map_err(|(_, code)| view_fault(code))
+            }
+            "cerrar" => {
+                only(args, &["accion", "id"])?;
+                let id = parse_view_uuid(args.get("id"))?.ok_or_else(|| invalid("Indica el ID de la vista."))?;
+                if Handle::current().block_on(self.views.remove_view(id)) {
+                    Ok(json!({ "id": id.to_string(), "cerrada": true }))
+                } else {
+                    Err(view_fault("VIEW_NOT_FOUND"))
+                }
+            }
+            "abrir" => {
+                only(args, &["accion", "carpeta", "ruta", "proyecto", "id", "version"])?;
+                let id = parse_view_uuid(args.get("id"))?;
+                let version = match args.get("version") {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_u64()
+                            .filter(|n| *n > 0)
+                            .ok_or_else(|| Fault::new("INVALID_VIEW_VERSION", "Indica una versión numérica válida de vista."))?,
+                    ),
+                };
+                if id.is_some() != version.is_some() {
+                    return Err(invalid("Para actualizar una vista indica tanto id como version."));
+                }
+                let previous = id.zip(version);
+                let carpeta = args.get("carpeta")
+                    .map(|v| v.as_str().ok_or_else(|| invalid("carpeta debe ser texto.")))
+                    .transpose()?;
+                let ruta_arg = match args.get("ruta") {
+                    None => None,
+                    Some(v) => {
+                        let s = v.as_str().ok_or_else(|| invalid("ruta debe ser texto."))?;
+                        let trimmed = s.trim_matches('/');
+                        if trimmed.is_empty() || trimmed == "." { None } else { Some(trimmed.to_owned()) }
+                    }
+                };
+                let (folder, ruta_eff) = match access::resolve_folder(&self.base, carpeta, &["leer"]) {
+                    Ok(folder) => (folder, ruta_arg),
+                    Err(err) if ruta_arg.is_none() => {
+                        if let Some(reference) = carpeta.filter(|c| Path::new(c).is_absolute()) {
+                            let candidates = access::folders(&self.base)?;
+                            if let Some((parent, names)) = candidates
+                                .iter()
+                                .filter_map(|folder| {
+                                    let names = relative_parts(Path::new(&folder.root), Path::new(reference))?;
+                                    (!names.is_empty()).then_some((folder.clone(), names))
+                                })
+                                .max_by_key(|(folder, _)| folder.root.len())
+                            {
+                                let _ = access::resolve_folder(&self.base, Some(&parent.id), &["leer"])?;
+                                (parent, Some(names.join("/")))
+                            } else {
+                                return Err(err);
+                            }
+                        } else {
+                            return Err(err);
+                        }
+                    }
+                    Err(err) => return Err(err),
+                };
+                let folder_dir = view_cli::directory(Path::new(&folder.root))
+                    .map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
+                let (output_dir, rel_prefix): (PathBuf, Vec<String>) = if let Some(rel) = ruta_eff.as_deref() {
+                    let scope = access::resolve_file(&self.base, Some(&folder.id), rel, &["leer"])?;
+                    let sub = view_cli::directory(&folder_dir.join(scope.relative.replace('/', std::path::MAIN_SEPARATOR_STR)))
+                        .map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
+                    (sub, scope.relative.split('/').map(str::to_owned).collect())
+                } else {
+                    (folder_dir.clone(), Vec::new())
+                };
+                let project = match args.get("proyecto") {
+                    None => output_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty() && n.len() <= 512 && !n.chars().any(char::is_control))
+                        .unwrap_or("Vista Mind")
+                        .to_owned(),
+                    Some(v) => v
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty() && n.len() <= 512 && !n.chars().any(char::is_control))
+                        .ok_or_else(|| invalid("Indica un nombre de proyecto válido."))?
+                        .to_owned(),
+                };
+                let copy_id = bridge::base_id(&folder_dir)
+                    .ok_or_else(|| Fault::new("INVALID_VIEW", "No se pudo identificar la carpeta de la vista."))?;
+                let has_git = fs::symlink_metadata(folder_dir.join(".git")).is_ok();
+                let git_before = if has_git {
+                    Handle::current()
+                        .block_on(view_cli::git_info(&folder_dir))
+                        .map_err(|msg| Fault::new("INVALID_VIEW", msg))?
+                } else {
+                    None
+                };
+                let skip = |child_rel: &str| {
+                    let mut parts: Vec<&str> = rel_prefix.iter().map(String::as_str).collect();
+                    parts.extend(child_rel.split('/'));
+                    access::excluded(&folder, &parts)
+                };
+                let assets = view_cli::snapshot_filtered(&output_dir, Some(&skip))
+                    .map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
+                if has_git {
+                    let git_after = Handle::current()
+                        .block_on(view_cli::git_info(&folder_dir))
+                        .map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
+                    if git_after != git_before {
+                        return Err(Fault::new("INVALID_VIEW", "La copia de Git cambió al preparar la vista. Vuelve a intentarlo."));
+                    }
+                }
+                let _ = access::resolve_folder(&self.base, Some(&folder.id), &["leer"])?;
+                self.owner.check().map_err(filesystem)?;
+                let publication = view_cli::build_publication(project, copy_id, git_before, assets);
+                Handle::current()
+                    .block_on(self.views.publish_input(publication, previous))
+                    .map(|(_, _, _, payload)| payload)
+                    .map_err(|(_, code)| view_fault(code))
+            }
+            _ => Err(invalid("Indica accion abrir, consultar o cerrar para la vista.")),
         }
     }
 
@@ -669,6 +896,192 @@ fn conversation(record: &Value) -> Value {
     })
 }
 
+fn parse_view_uuid(value: Option<&Value>) -> Result<Option<Uuid>, Fault> {
+    let Some(value) = value else { return Ok(None) };
+    let raw = value
+        .as_str()
+        .ok_or_else(|| Fault::new("INVALID_ARGUMENTS", "Indica un ID válido de vista."))?;
+    let id = Uuid::parse_str(raw)
+        .ok()
+        .filter(|id| id.hyphenated().to_string() == raw)
+        .ok_or_else(|| Fault::new("INVALID_ARGUMENTS", "Indica un ID válido de vista."))?;
+    Ok(Some(id))
+}
+
+fn view_fault(code: &'static str) -> Fault {
+    let msg = match code {
+        "VIEW_NOT_FOUND" => "No existe ninguna vista con ese identificador.",
+        "INVALID_VIEW" => "Contenido no válido para abrir una vista (requiere index.html y rutas seguras).",
+        "VIEW_TOO_LARGE" => "Los archivos superan el tamaño admitido para una vista.",
+        "VIEW_CAPACITY_REACHED" => "Se alcanzó el límite de vistas abiertas en esta Base.",
+        "VIEW_VERSION_REQUIRED" => "Indica la versión leída para actualizar la vista.",
+        "INVALID_VIEW_VERSION" => "La versión indicada para la vista no es válida.",
+        "VIEW_VERSION_CHANGED" => "La vista cambió mientras preparabas la actualización.",
+        "VIEW_COPY_CHANGED" => "La vista pertenece a otro proyecto o carpeta.",
+        "VIEW_PUBLISH_BUSY" => "Ya se están publicando vistas en paralelo; inténtalo de nuevo.",
+        "VIEW_VERSION_EXHAUSTED" => "La vista superó el máximo de versiones.",
+        _ => "No se pudo completar la operación sobre la vista.",
+    };
+    Fault::new(code, msg)
+}
+
+const CATALOG_OPS: &[(&str, &str, bool)] = &[
+    ("estado", "Estado de Mind", true),
+    ("retomar", "Retomar una conversación", true),
+    ("buscar", "Buscar archivos o conversaciones", true),
+    ("leer", "Leer un archivo o documento", true),
+    ("explorar", "Explorar una carpeta", true),
+    ("eliminados", "Listar eliminados recientes", true),
+    ("papelera", "Listar papelera de Mind", true),
+    ("conversacion_leer", "Leer una conversación", true),
+    ("conversaciones_buscar", "Buscar conversaciones", true),
+    ("funciones", "Listar automatizaciones y ejecutores", true),
+    ("historial_funcion", "Consultar historial de una función", true),
+    ("vista_consultar", "Consultar una vista compartida", true),
+    ("crear", "Crear un archivo o carpeta", false),
+    ("crear_carpeta", "Crear una carpeta", false),
+    ("modificar", "Modificar un archivo", false),
+    ("editar", "Editar un archivo", false),
+    ("organizar", "Organizar archivos y papelera", false),
+    ("mover", "Mover un archivo o carpeta", false),
+    ("renombrar", "Renombrar un archivo o carpeta", false),
+    ("borrar", "Enviar a la papelera de Mind", false),
+    ("restaurar", "Restaurar desde la papelera", false),
+    ("vaciar_papelera", "Vaciar la papelera de Mind", false),
+    ("guardar", "Guardar conversación o continuidad", false),
+    ("actualizar", "Actualizar conversación o continuidad", false),
+    ("conversacion_guardar", "Guardar o actualizar conversación", false),
+    ("continuidad_registrar", "Registrar en continuidad", false),
+    ("continuidad_actualizar", "Actualizar registro de continuidad", false),
+    ("acceso", "Solicitar o retirar acceso", false),
+    ("solicitar_acceso", "Solicitar acceso", false),
+    ("retirar_acceso", "Retirar permisos", false),
+    ("vista", "Abrir, consultar o cerrar una vista", false),
+    ("vista_abrir", "Abrir o actualizar una vista", false),
+    ("vista_cerrar", "Cerrar una vista", false),
+    ("crear_respaldo", "Crear respaldo cifrado de la Base", false),
+    ("crear_funcion", "Definir una función o automatización", false),
+    ("modificar_funcion", "Modificar una función", false),
+    ("retirar_funcion", "Retirar una función", false),
+    ("ejecutar_funcion", "Ejecutar una función ahora", false),
+    ("activar_funcion", "Activar una automatización", false),
+    ("desactivar_funcion", "Desactivar una automatización", false),
+];
+
+fn normalize_alias(name: &str, args: Value) -> Result<(String, Value), Fault> {
+    let fixed_action = match name {
+        "solicitar_acceso" => Some(("acceso", "solicitar")),
+        "retirar_acceso" => Some(("acceso", "retirar")),
+        "vista_abrir" => Some(("vista", "abrir")),
+        "vista_consultar" => Some(("vista", "consultar")),
+        "vista_cerrar" => Some(("vista", "cerrar")),
+        _ => None,
+    };
+    let Some((target, action)) = fixed_action else {
+        return Ok((name.to_owned(), args));
+    };
+    let mut fields = args
+        .as_object()
+        .cloned()
+        .ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
+    if fields.contains_key("accion") {
+        return Err(invalid("La llamada incluye argumentos no admitidos."));
+    }
+    fields.insert("accion".into(), json!(action));
+    Ok((target.to_owned(), Value::Object(fields)))
+}
+
+fn operation_read_only(op: &str, inner_args: &Value) -> Option<bool> {
+    if op == "vista" {
+        let action = inner_args.get("accion").and_then(Value::as_str);
+        return Some(action == Some("consultar"));
+    }
+    CATALOG_OPS
+        .iter()
+        .find(|(name, _, _)| *name == op)
+        .map(|(_, _, read_only)| *read_only)
+}
+
+pub(crate) fn unwrap_catalog_call(name: &str, args: Value) -> Result<(String, Value), Fault> {
+    if !matches!(name, "mind" | "mind_cambiar") {
+        return normalize_alias(name, args);
+    }
+    let fields = args
+        .as_object()
+        .ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
+    if name == "mind" {
+        only(fields, &["operacion", "detalle", "argumentos"])?;
+    } else {
+        only(fields, &["operacion", "argumentos"])?;
+    }
+    let op = fields
+        .get("operacion")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| invalid("Indica operacion en texto."))?;
+    if name == "mind" && op == "ayuda" {
+        if let Some(detalle) = fields.get("detalle") {
+            if !detalle.is_string() {
+                return Err(invalid("detalle debe ser texto."));
+            }
+        }
+        return Ok(("mind_ayuda".into(), args));
+    }
+    if fields.contains_key("detalle") {
+        return Err(invalid("La llamada incluye argumentos no admitidos."));
+    }
+    let inner = match fields.get("argumentos") {
+        None => json!({}),
+        Some(v) => {
+            if !v.is_object() {
+                return Err(invalid("argumentos debe ser un objeto JSON."));
+            }
+            v.clone()
+        }
+    };
+    let Some(read_only) = operation_read_only(op, &inner) else {
+        return Err(Fault::new("UNKNOWN_TOOL", "Herramienta no disponible en el Motor nativo."));
+    };
+    if name == "mind" && !read_only {
+        return Err(Fault::new(
+            "USE_MIND_CAMBIAR",
+            format!("{op} cambia datos: usa mind_cambiar."),
+        ));
+    }
+    if name == "mind_cambiar" && read_only {
+        return Err(Fault::new(
+            "USE_MIND",
+            format!("{op} solo consulta: usa mind."),
+        ));
+    }
+    normalize_alias(op, inner)
+}
+
+fn catalog_help(fields: &Map<String, Value>) -> Result<Value, Fault> {
+    if let Some(detail) = fields.get("detalle").and_then(Value::as_str) {
+        let Some((op, title, read_only)) = CATALOG_OPS.iter().find(|(n, _, _)| *n == detail).copied() else {
+            return Err(Fault::new("UNKNOWN_TOOL", "Operación desconocida."));
+        };
+        return Ok(json!({
+            "operacion": op,
+            "herramienta": if read_only { "mind" } else { "mind_cambiar" },
+            "titulo": title,
+        }));
+    }
+    let list = |wanted: bool| -> Vec<Value> {
+        CATALOG_OPS
+            .iter()
+            .filter(|(_, _, ro)| *ro == wanted)
+            .map(|(op, title, _)| json!({"nombre": op, "titulo": title}))
+            .collect()
+    };
+    Ok(json!({
+        "mind": list(true),
+        "mind_cambiar": list(false),
+        "nota": "mind {operacion:\"ayuda\", detalle:\"<nombre>\"} describe la herramienta adecuada.",
+    }))
+}
+
 #[derive(Default)]
 struct Layout {
     motor: Option<PathBuf>,
@@ -680,6 +1093,7 @@ struct Server {
     port: u16,
     connector: Connector,
     motor: Arc<Motor>,
+    views: Arc<Views>,
     mcp: Mcp,
     shutdown: Notify,
 }
@@ -689,7 +1103,7 @@ impl Server {
         let reply = if req.headers().contains_key(header::ORIGIN) || !host::allowed_origin(&req, self.port) {
             host::full(StatusCode::FORBIDDEN, json!({"error": "ORIGIN_NOT_ALLOWED"}))
         } else if req.uri().path() == "/health" && req.method() == Method::GET {
-            host::full(StatusCode::OK, self.connector.health(req.uri().query(), self.mcp.count().await))
+            host::full(StatusCode::OK, self.connector.health(req.uri().query(), self.mcp.count().await, self.views.usage().await))
         } else if !req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .is_some_and(|value| host::same(value.as_bytes(), self.connector.token.as_bytes()))
@@ -699,6 +1113,8 @@ impl Server {
             self.mcp.handle(req, self.motor.clone()).await
         } else if req.uri().path() == "/rpc" && req.method() == Method::POST {
             self.rpc(req).await
+        } else if req.uri().path() == "/vistas" || req.uri().path().starts_with("/vistas/") {
+            self.views.control(req).await
         } else {
             host::full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"}))
         };
@@ -791,44 +1207,7 @@ impl Motor {
             "herramienta" => (payload["tool"].as_str().unwrap_or_default(), payload.get("args").cloned().unwrap_or_else(|| json!({}))),
             _ => return Err(invalid("Operación RPC no disponible en el Motor Rust.")),
         };
-        let value = match name {
-            "conversacion_leer" => self.call("retomar", args).map(|value| json!({"conversacion":value["conversacion"]})),
-            "conversacion_guardar" if args.get("id").is_some() => self.call("actualizar", args),
-            "conversacion_guardar" => self.call("guardar", args),
-            "conversaciones_buscar" => {
-                let Some(mut fields) = args.as_object().cloned() else {
-                    return Err(invalid("Indica argumentos en un objeto."));
-                };
-                fields.insert("en".into(), json!("conversaciones"));
-                self.call("buscar", Value::Object(fields))
-            }
-            "continuidad_registrar" => {
-                let Some(mut fields) = args.as_object().cloned() else {
-                    return Err(invalid("Indica argumentos en un objeto."));
-                };
-                fields.insert("en".into(), json!("continuidad"));
-                self.call("guardar", Value::Object(fields))
-            }
-            "continuidad_actualizar" => {
-                let Some(mut fields) = args.as_object().cloned() else {
-                    return Err(invalid("Indica argumentos en un objeto."));
-                };
-                fields.insert("en".into(), json!("continuidad"));
-                self.call("actualizar", Value::Object(fields))
-            }
-            "solicitar_acceso" => self.call("acceso", args),
-            "retirar_acceso" => {
-                let Some(mut fields) = args.as_object().cloned() else {
-                    return Err(invalid("Indica argumentos en un objeto."));
-                };
-                if fields.contains_key("accion") {
-                    return Err(invalid("La retirada incluye argumentos no admitidos."));
-                }
-                fields.insert("accion".into(), json!("retirar"));
-                self.call("acceso", Value::Object(fields))
-            }
-            _ => self.call(name, args),
-        };
+        let value = self.call(name, args);
         let (value, is_error) = match value {
             Ok(value) => (value, false),
             Err(error) => (json!({"error":{"codigo":error.code,"mensaje":error.message}}), true),
@@ -882,6 +1261,17 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         return Err("El arranque autónomo requiere escritura segura en Windows o Linux.".into());
     }
     let (root, publish, layout) = boot_args(args)?;
+    if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
+        if let Ok(parent_real) = parent.canonicalize() {
+            if let Some(lock_path) = motor_owner::restore_lock_path(&parent_real.join(name)) {
+                if let Err(code) = motor_owner::check_restore_lock_path(&lock_path) {
+                    let fault = Fault::new(code, "La Base se está restaurando; espera a que termine.");
+                    write_startup_error(&fault);
+                    return Err(fault.to_string());
+                }
+            }
+        }
+    }
     if publish && !root.exists() {
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     }
@@ -889,30 +1279,51 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     let base = canonical.to_str().ok_or("La ruta no es Unicode válido.")?;
     #[cfg(windows)]
     let base = base.strip_prefix("\\\\?\\").unwrap_or(base);
-    let motor = Arc::new(Motor::open(base.to_owned(), layout, publish).map_err(|error| {
+    let view_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
+    let view_port = view_listener.local_addr().map_err(|error| error.to_string())?.port();
+    let views = Arc::new(Views::new(view_port));
+    let motor = Arc::new(Motor::open(base.to_owned(), layout, publish, Arc::clone(&views)).map_err(|error| {
         write_startup_error(&error);
         error.to_string()
     })?);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|error| error.to_string())?.port();
-    let connector = Connector::open(base, port, &motor.owner, publish)?;
+    let connector = Connector::open(base, port, view_port, &motor.owner, publish)?;
     if !publish {
         println!("{}", json!({
-            "pid": std::process::id(), "port": port, "url": connector.url(), "token": connector.token,
+            "pid": std::process::id(), "port": port, "puertoVistas": view_port,
+            "url": connector.url(), "token": connector.token,
         }));
         io::stdout().flush().map_err(|error| error.to_string())?;
     }
-    let server = Arc::new(Server { port, connector, motor, mcp: Mcp::new(), shutdown: Notify::new() });
+    let server = Arc::new(Server { port, connector, motor, views, mcp: Mcp::new(), shutdown: Notify::new() });
 
     let shutdown = host::shutdown_signal();
     tokio::pin!(shutdown);
     let mut clients = JoinSet::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let poll_busy = Arc::new(AtomicBool::new(false));
     loop {
         tokio::select! {
             _ = server.shutdown.notified() => break,
             signal = &mut shutdown => {
                 signal.map_err(|error| error.to_string())?;
                 break;
+            }
+            _ = ticker.tick() => {
+                if server.mcp.count().await > 0 {
+                    if poll_busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                        let motor = Arc::clone(&server.motor);
+                        let busy = Arc::clone(&poll_busy);
+                        clients.spawn(async move {
+                            let _ = tokio::task::spawn_blocking(move || motor.poll_automations()).await;
+                            busy.store(false, Ordering::Release);
+                        });
+                    }
+                } else if !poll_busy.load(Ordering::Acquire) {
+                    server.motor.clear_automation_bursts();
+                }
             }
             Some(_) = clients.join_next(), if !clients.is_empty() => {}
             accepted = listener.accept() => {
@@ -922,6 +1333,18 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
                     let service = hyper::service::service_fn(move |req| {
                         let server = server.clone();
                         async move { server.respond(req).await }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service).await;
+                });
+            }
+            accepted = view_listener.accept() => {
+                let (stream, _) = accepted.map_err(|error| error.to_string())?;
+                let views = server.views.clone();
+                clients.spawn(async move {
+                    let service = hyper::service::service_fn(move |req| {
+                        let views = views.clone();
+                        async move { Ok::<_, Infallible>(views.serve(req).await) }
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service).await;

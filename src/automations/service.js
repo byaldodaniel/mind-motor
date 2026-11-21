@@ -579,7 +579,7 @@ export function createFunctionService(session, { now = Date.now, factories } = {
  * @returns {Promise<{ approved: boolean, keep: boolean }>} keep: conservar la solicitud.
  */
 export async function reviewAutomationRequest({ session, prompt, request }) {
-  const service = functionServiceFor(session);
+  const service = session.automations ?? functionServiceFor(session);
   const { functionId, generation, fingerprint } = request.automation;
   let prepared;
   try {

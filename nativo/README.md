@@ -318,6 +318,21 @@ ensayo extrae el tag local de r3 y prueba esa vuelta tras interrumpir Rust.
 node --test nativo/test/arranque-rust-vuelta-r3.test.mjs
 ```
 
+## Ensayo de etapa 3 con el Motor Rust
+
+El Motor de prueba comparte vistas locales entre clientes, ejecuta funciones
+autorizadas y crea respaldos cifrados compatibles con r3. El ensayo de arranque
+comprueba también que una edición externa activa una función una vez y que sus
+escrituras propias no causan otra ejecución.
+
+Para probar el turno con el Programador de tareas de Windows, ejecuta el
+ensayo con `MIND_TEST_WINDOWS_SCHEDULER=1` desde una sesión local de Windows.
+Se registra una tarea con nombre único para una Base ficticia y se retira al
+salir. El Motor de esa Base y sus chats están cerrados al llegar la hora. Un
+segundo lanzamiento comprueba que el historial conserva un solo turno. Si
+hay otra prueba con una vista activa, compila con
+`-Target x86_64-pc-windows-gnu` y usa ese ejecutable en `MIND_NATIVE_EXE`.
+
 ## Compilación reproducible
 
 `build.ps1` quita del ejecutable las rutas locales (`--remap-path-prefix`) y,

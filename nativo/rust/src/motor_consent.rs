@@ -356,6 +356,60 @@ pub(crate) fn save_operation_pending(
     Ok(out)
 }
 
+pub(crate) fn save_automation_pending(
+    base: &str, function_id: &str, generation: &str, fingerprint: &str, client: &str, reason: &str,
+    cancelled: bool, confirm_owner: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<Value, Fault> {
+    let id = Uuid::new_v4().to_string();
+    let created = now()?;
+    let expiry = tomorrow(&created).ok_or_else(|| fail("CLOCK_UNAVAILABLE", "No se pudo calcular la caducidad."))?;
+    let record = json!({
+        "format": "mind-consent-request",
+        "version": 1,
+        "id": id,
+        "kind": "automatizacion",
+        "path": Value::Null,
+        "requested": ["activar"],
+        "reason": clean(reason, 300),
+        "client": clean(client, 120),
+        "createdAt": created,
+        "expiresAt": expiry,
+        "automation": {
+            "functionId": function_id,
+            "generation": generation,
+            "fingerprint": fingerprint,
+        },
+    });
+    save(base, &format!("consent-request-{id}.json"), &record, None, confirm_owner)?;
+    let mut out = json!({
+        "estado": "pendiente",
+        "solicitud": id,
+        "que_hacer": "El usuario debe aprobar la activación con \"mind autorizar\" en la carpeta de Mind. Hasta entonces no se ejecuta sola.",
+    });
+    if cancelled {
+        out["nota"] = json!("El formulario se cerró sin responder.");
+    }
+    Ok(out)
+}
+
+pub(crate) fn remove_pending_automation_requests(
+    base: &str, function_id: &str, confirm_owner: impl Fn() -> Result<(), &'static str>,
+) -> Result<(), Fault> {
+    let entries = fs::read_dir(base).map_err(|_| fail("READ_FAILED", "No se pudieron listar las solicitudes."))?;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let filename = entry.file_name();
+        let Some(name) = filename.to_str() else { continue };
+        let Some(id) = name.strip_prefix("consent-request-").and_then(|value| value.strip_suffix(".json")) else { continue };
+        if !Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id) { continue; }
+        let Some(record) = read_json(base, name).ok().flatten() else { continue };
+        if record["kind"] == "automatizacion" && record["automation"]["functionId"].as_str() == Some(function_id) {
+            let _ = remove_base_file(base, name, &confirm_owner);
+        }
+    }
+    Ok(())
+}
+
 fn normalize_exclusions(raw: impl IntoIterator<Item = String>) -> Result<Vec<String>, Fault> {
     let invalid = || fail("INVALID_EXCLUSIONS", "Indica hasta 64 rutas relativas dentro de la carpeta.");
     let raw = raw.into_iter().collect::<Vec<_>>();
@@ -481,6 +535,23 @@ fn valid_pending_operation(kind: Option<&str>, operation: &Value) -> bool {
     }
 }
 
+fn valid_pending_automation(kind: Option<&str>, automation: &Value) -> bool {
+    if kind != Some("automatizacion") {
+        return true;
+    }
+    let fn_id_ok = automation["functionId"].as_str().is_some_and(|id| {
+        let b = id.as_bytes();
+        (1..=64).contains(&b.len())
+            && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+            && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' || *c == b'_')
+    });
+    let gen_ok = automation["generation"].as_str().is_some_and(|g| {
+        g.len() == 36 && Uuid::parse_str(g).is_ok_and(|uuid| uuid.to_string() == g)
+    });
+    let fp_ok = automation["fingerprint"].as_str().is_some_and(|fp| fp.len() == 64 && lower_hex(fp));
+    fn_id_ok && gen_ok && fp_ok
+}
+
 fn is_valid_pending(record: &Value, id: &str, now: &str) -> bool {
     let kind = record["kind"].as_str();
     record["format"] == "mind-consent-request"
@@ -493,6 +564,7 @@ fn is_valid_pending(record: &Value, id: &str, now: &str) -> bool {
         && (kind != Some("carpeta")
             || record["path"].as_str().is_some_and(|value| !value.contains('\0') && Path::new(value).is_absolute()))
         && valid_pending_operation(kind, &record["operation"])
+        && valid_pending_automation(kind, &record["automation"])
 }
 
 pub(crate) fn list_pending(base: &str) -> Result<Vec<Value>, Fault> {
@@ -883,6 +955,11 @@ pub(crate) fn console(
         }
         "borrar_elemento" => crate::motor_files::console_delete_entry(base, payload, &confirm_owner),
         "vaciar_elemento" => crate::motor_files::console_purge_entry(base, payload, &confirm_owner),
+        "preparar_automatizacion" => crate::motor_automations::console_prepare(base, payload),
+        "autorizar_automatizacion" => crate::motor_automations::console_authorize(base, payload, &confirm_owner),
+        "ejecutar_programadas" => crate::motor_automations::console_run_due(base, paths.motor, &confirm_owner),
+        "respaldo_configurar" => crate::motor_backup::console_configure(base, paths.motor, payload, &confirm_owner),
+        "respaldo_crear" => crate::motor_backup::console_create(base, paths.motor, payload, &confirm_owner),
         _ => Err(fail("INVALID_ARGUMENTS", "Operación de consola no admitida.")),
     }
 }

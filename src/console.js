@@ -154,10 +154,6 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
       const outcome = await reviewOperationRequest({ session, prompt, request });
       if (outcome.done) changes += 1;
     } else if (request.kind === 'automatizacion') {
-      if (session.nativeConsole) {
-        prompt.write('Esta solicitud requiere el Motor completo y se conserva pendiente.');
-        continue;
-      }
       // Activación automática de una función: se revisa la versión exacta solicitada.
       const outcome = await reviewAutomationRequest({ session, prompt, request });
       if (outcome.approved) changes += 1;
