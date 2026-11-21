@@ -182,6 +182,23 @@ async function withNativeConsole(layout, task) {
       listAuthorizedFolders: async () => (await rpc('listar_carpetas')).carpetas,
       setFolderExclusions: async (id, excluidas) => rpc('exclusiones_carpeta', { id, excluidas }),
       revokeFolder: async (id) => (await rpc('retirar_carpeta', { id })).retirada,
+      readFolderIndex: async (id) => (await rpc('leer_indice', { id })).indice,
+      getTrashEntry: async (id, trashId) => (await rpc('obtener_papelera', { id, papelera: trashId })).entrada,
+      grantDelete: async (params) => params,
+      deleteEntry: async ({ authorization }) => (await rpc('borrar_elemento', {
+        id: authorization.folderId,
+        ruta: authorization.relativePath,
+        esperado: authorization.expected,
+        por: authorization.by,
+        motivo: authorization.reason,
+      })).borrado,
+      grantPurge: async (params) => params,
+      purgeEntry: async ({ authorization }) => (await rpc('vaciar_elemento', {
+        id: authorization.folderId,
+        papelera: authorization.trashId,
+      })).vaciado,
+      takeProperties: async () => [],
+      putProperties: async () => ({ restored: 0 }),
     },
     policy: {
       get: async (id) => (await rpc('obtener_acceso', { id })).acceso,
@@ -194,7 +211,11 @@ async function withNativeConsole(layout, task) {
       list: async () => (await rpc('listar_solicitudes')).solicitudes,
       remove: async (id) => (await rpc('retirar_solicitud', { id })).retirada,
     },
-    ensureIndex: async () => ({ status: 'sin-indice' }),
+    removals: {
+      record: async () => 0,
+    },
+    reindex: async (id) => (await rpc('indexar_carpeta', { id })).indice,
+    ensureIndex: async (id) => (await rpc('indexar_carpeta', { id })).indice,
     audit: async () => {},
   };
   try {

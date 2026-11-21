@@ -49,6 +49,26 @@ pub(crate) fn run(args: &[String]) -> std::result::Result<(), String> {
     read_document(args).map_err(str::to_owned)
 }
 
+pub(crate) fn extract_document(
+    root: &str, relative_path: &str, format: &str,
+    confirm: impl FnOnce() -> Result<()>,
+) -> Result<(String, bool, usize)> {
+    let file = crate::scan::open_reader(root, relative_path)?;
+    confirm()?;
+    if file.metadata().map_err(|_| READ_FAILED)?.len() > FILE_LIMIT as u64 {
+        return Err("FILE_TOO_LARGE");
+    }
+    let mut data = Vec::new();
+    file.take(FILE_LIMIT as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(|_| READ_FAILED)?;
+    if data.len() > FILE_LIMIT {
+        return Err("FILE_TOO_LARGE");
+    }
+    let output = extract(&data, format)?;
+    Ok((output.text, output.truncated, output.bytes))
+}
+
 fn read_document(args: &[String]) -> Result<()> {
     let _guard = crate::native_parent::ParentGuard::from_args(args)?;
     let mut input = io::stdin().lock();
@@ -61,28 +81,20 @@ fn read_document(args: &[String]) -> Result<()> {
         return Err(READ_FAILED);
     }
     let request: Request = serde_json::from_slice(&line).map_err(|_| READ_FAILED)?;
-    let file = crate::scan::open_reader(&request.root, &request.relative_path)?;
-    {
-        let mut diagnostic = io::stderr().lock();
-        diagnostic.write_all(b"READY\n").map_err(|_| READ_FAILED)?;
-        diagnostic.flush().map_err(|_| READ_FAILED)?;
-    }
-    let mut allow = [0];
-    input.read_exact(&mut allow).map_err(|_| READ_FAILED)?;
-    if allow != *b"R" {
-        return Err(READ_FAILED);
-    }
-    if file.metadata().map_err(|_| READ_FAILED)?.len() > FILE_LIMIT as u64 {
-        return Err("FILE_TOO_LARGE");
-    }
-    let mut data = Vec::new();
-    file.take(FILE_LIMIT as u64 + 1)
-        .read_to_end(&mut data)
-        .map_err(|_| READ_FAILED)?;
-    if data.len() > FILE_LIMIT {
-        return Err("FILE_TOO_LARGE");
-    }
-    let output = extract(&data, &request.format)?;
+    let (text, truncated, bytes) = extract_document(&request.root, &request.relative_path, &request.format, || {
+        {
+            let mut diagnostic = io::stderr().lock();
+            diagnostic.write_all(b"READY\n").map_err(|_| READ_FAILED)?;
+            diagnostic.flush().map_err(|_| READ_FAILED)?;
+        }
+        let mut allow = [0];
+        input.read_exact(&mut allow).map_err(|_| READ_FAILED)?;
+        if allow != *b"R" {
+            return Err(READ_FAILED);
+        }
+        Ok(())
+    })?;
+    let output = Extracted { format: &request.format, text, truncated, bytes };
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, &output).map_err(|_| READ_FAILED)?;
     stdout.flush().map_err(|_| READ_FAILED)

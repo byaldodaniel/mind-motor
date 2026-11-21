@@ -26,9 +26,10 @@ pub(crate) struct Scope {
     pub(crate) root: String,
     pub(crate) relative: String,
     pub(crate) id: String,
-    generation: Option<String>,
+    pub(crate) generation: Option<String>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Folder {
     pub(crate) id: String,
     pub(crate) root: String,
@@ -198,7 +199,7 @@ pub(crate) fn registered_folders(base: &str) -> Result<Vec<Folder>, Fault> {
     Ok(records)
 }
 
-fn folders(base: &str) -> Result<Vec<Folder>, Fault> {
+pub(crate) fn folders(base: &str) -> Result<Vec<Folder>, Fault> {
     let mut registered = registered_folders(base)?;
     let Some(workspace) = current_workspace() else { return Ok(registered) };
     if workspace.active {
@@ -225,7 +226,7 @@ fn folders(base: &str) -> Result<Vec<Folder>, Fault> {
     Ok(registered)
 }
 
-fn folder_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, Fault> {
+pub(crate) fn folder_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, Fault> {
     if current_workspace().is_some_and(|workspace| workspace.grants(&folder.root)) {
         return Ok(FOLDER_LEVELS.to_vec());
     }
@@ -263,11 +264,18 @@ pub(crate) fn registered_access(base: &str, folder: &Folder) -> Result<Vec<&'sta
 pub(crate) fn folder_status(base: &str) -> Result<Vec<Value>, Fault> {
     folders(base)?.into_iter().map(|folder| {
         let access = folder_access(base, &folder)?;
-        Ok(json!({"id": folder.id, "ruta": folder.root, "permisos": access, "excluidas": folder.exclusions}))
+        let indice = crate::motor_files::index_summary(base, &folder);
+        Ok(json!({
+            "id": folder.id,
+            "ruta": folder.root,
+            "permisos": access,
+            "excluidas": folder.exclusions,
+            "indice": indice,
+        }))
     }).collect()
 }
 
-fn excluded(folder: &Folder, names: &[&str]) -> bool {
+pub(crate) fn excluded(folder: &Folder, names: &[&str]) -> bool {
     const HIDDEN: [&str; 6] = [".papelera-mind", ".codex", ".claude", ".gemini", ".git", "node_modules"];
     let fold = |value: &str| if cfg!(any(windows, target_os = "macos")) { value.to_lowercase() } else { value.to_owned() };
     if names.iter().any(|name| HIDDEN.contains(&fold(name).as_str())) {
@@ -278,6 +286,12 @@ fn excluded(folder: &Folder, names: &[&str]) -> bool {
         let entry = fold(entry);
         relative == entry || relative.strip_prefix(&entry).is_some_and(|remaining| remaining.starts_with('/'))
     })
+}
+
+pub(crate) fn contains_excluded(folder: &Folder, names: &[&str]) -> bool {
+    let fold = |value: &str| if cfg!(any(windows, target_os = "macos")) { value.to_lowercase() } else { value.to_owned() };
+    let prefix = format!("{}/", fold(&names.join("/")));
+    folder.exclusions.iter().any(|entry| fold(entry).starts_with(&prefix))
 }
 
 pub(crate) fn resolve_markdown(base: &str, destination: &Path) -> Result<Scope, Fault> {
@@ -425,8 +439,7 @@ pub(crate) fn markdown_destination(
     Err(fault("CONVERSATION_DESTINATION_REQUIRED", "Indica un destino o configura una carpeta de memoria autorizada."))
 }
 
-pub(crate) fn resolve_file(base: &str, carpeta: Option<&str>, relative: &str, required: &[&str]) -> Result<Scope, Fault> {
-    let names: Vec<_> = relative.split('/').collect();
+pub(crate) fn resolve_folder(base: &str, carpeta: Option<&str>, required: &[&str]) -> Result<Folder, Fault> {
     let registered = folders(base)?;
     let folder = if let Some(reference) = carpeta {
         let matches_path = |folder: &Folder| {
@@ -440,7 +453,17 @@ pub(crate) fn resolve_file(base: &str, carpeta: Option<&str>, relative: &str, re
     } else {
         return Err(fault("INVALID_ARGUMENTS", "Indica una carpeta registrada cuando el ámbito no sea único."));
     };
-    make_scope(base, folder, names, required)
+    let access = folder_access(base, folder)?;
+    if !required.iter().all(|level| access.contains(level)) {
+        return Err(fault("ACCESS_NOT_GRANTED", "La carpeta no tiene los permisos requeridos."));
+    }
+    Ok(folder.clone())
+}
+
+pub(crate) fn resolve_file(base: &str, carpeta: Option<&str>, relative: &str, required: &[&str]) -> Result<Scope, Fault> {
+    let names: Vec<_> = relative.split('/').collect();
+    let folder = resolve_folder(base, carpeta, required)?;
+    make_scope(base, &folder, names, required)
 }
 
 fn make_scope(base: &str, folder: &Folder, names: Vec<&str>, required: &[&str]) -> Result<Scope, Fault> {

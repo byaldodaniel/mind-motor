@@ -56,7 +56,7 @@ fn filesystem(code: &'static str) -> Fault {
     Fault::new(code, "La operación de archivo se detuvo. Revisa el destino y sus permisos.")
 }
 
-fn is_id(value: &str) -> bool {
+pub(crate) fn is_id(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uuid| uuid.to_string() == value)
 }
 
@@ -220,6 +220,28 @@ impl Motor {
         }, request, answer, confirm)
     }
 
+    pub(crate) fn prepare_organize(
+        &self, args: Value, client: Option<&Value>,
+    ) -> Result<motor_files::OrganizePrepared, Fault> {
+        let args = args.as_object().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        self.owner.check().map_err(filesystem)?;
+        motor_files::prepare_organize(&self.base, args, client, || self.owner.check())
+    }
+
+    pub(crate) fn finish_organize(
+        &self, confirmation: motor_files::OrganizeConfirmation,
+        decision: motor_files::OrganizeDecision<'_>, active: impl Fn() -> bool,
+    ) -> Result<Value, Fault> {
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        let confirm = || {
+            if !active() { return Err("SESSION_CLOSED"); }
+            self.owner.check()
+        };
+        confirm().map_err(filesystem)?;
+        motor_files::finish_organize(&self.base, confirmation, decision, confirm)
+    }
+
     pub(crate) fn call(&self, name: &str, args: Value) -> Result<Value, Fault> {
         if name == "acceso" {
             if args["accion"] == "retirar" {
@@ -242,11 +264,15 @@ impl Motor {
             "retomar" => self.resume(args),
             "buscar" => self.search(args),
             "guardar" | "actualizar" if args.get("en").and_then(Value::as_str) == Some("continuidad") => {
+                access::check_continuity(&self.base, true)?;
+                motor_files::recover_move(&self.base, || self.owner.check())?;
                 motor_records::call(&self.base, name, args, || self.owner.check())
             }
             "guardar" => self.save(args, false),
             "actualizar" => self.save(args, true),
-            "leer" | "crear" | "modificar" => motor_files::call(&self.base, name, args, || self.owner.check()),
+            "leer" | "crear" | "crear_carpeta" | "modificar" | "editar" | "organizar"
+            | "mover" | "renombrar" | "papelera" | "restaurar" | "borrar" | "vaciar_papelera"
+            | "explorar" | "eliminados" => motor_files::call(&self.base, name, args, || self.owner.check()),
             _ => Err(Fault::new("UNKNOWN_TOOL", "Herramienta no disponible en el Motor nativo.")),
         }
     }
@@ -283,6 +309,7 @@ impl Motor {
     fn resume(&self, args: &Map<String, Value>) -> Result<Value, Fault> {
         only(args, &["id", "consulta", "proyecto"])?;
         access::check_continuity(&self.base, false)?;
+        motor_files::recover_move(&self.base, || self.owner.check())?;
         let mut candidates = Vec::new();
         let id = match args.get("id") {
             Some(value) => id(value)?.to_owned(),
@@ -319,19 +346,29 @@ impl Motor {
     }
 
     fn search(&self, args: &Map<String, Value>) -> Result<Value, Fault> {
-        only(args, &["en", "consulta", "proyecto", "limite"])?;
-        if args.get("en") != Some(&json!("conversaciones")) {
-            return Err(invalid("Indica buscar en conversaciones."));
+        let target = match args.get("en") {
+            None => "archivos",
+            Some(value) => value.as_str().ok_or_else(|| invalid("en debe ser texto."))?,
+        };
+        match target {
+            "archivos" => motor_files::search_files(&self.base, args, || self.owner.check()),
+            "carpeta" => motor_files::explore_folder(&self.base, args, || self.owner.check()),
+            "eliminados" => motor_files::list_removed(&self.base, args, || self.owner.check()),
+            "conversaciones" => {
+                only(args, &["en", "consulta", "proyecto", "limite"])?;
+                access::check_continuity(&self.base, false)?;
+                motor_files::recover_move(&self.base, || self.owner.check())?;
+                let limit = args.get("limite").map(|limit| limit.as_u64().filter(|limit| (1..=100).contains(limit))
+                    .ok_or_else(|| invalid("limite debe estar entre 1 y 100."))).transpose()?.unwrap_or(20);
+                let hits = self.hits(args)?;
+                let total = hits.len();
+                let visible: Vec<_> = hits.into_iter().take(limit as usize).collect();
+                access::check_continuity(&self.base, false)?;
+                Ok(json!({ "total": total, "mostradas": visible.len(), "conversaciones": visible,
+                    "semantica": { "estado":"no_disponible" } }))
+            }
+            _ => Err(invalid("Indica buscar en archivos, carpeta, eliminados o conversaciones.")),
         }
-        access::check_continuity(&self.base, false)?;
-        let limit = args.get("limite").map(|limit| limit.as_u64().filter(|limit| (1..=100).contains(limit))
-            .ok_or_else(|| invalid("limite debe estar entre 1 y 100."))).transpose()?.unwrap_or(20);
-        let hits = self.hits(args)?;
-        let total = hits.len();
-        let visible: Vec<_> = hits.into_iter().take(limit as usize).collect();
-        access::check_continuity(&self.base, false)?;
-        Ok(json!({ "total": total, "mostradas": visible.len(), "conversaciones": visible,
-            "semantica": { "estado":"no_disponible" } }))
     }
 
     fn hits(&self, args: &Map<String, Value>) -> Result<Vec<Value>, Fault> {
@@ -384,6 +421,7 @@ impl Motor {
             invalid("solicitado debe ser booleano.")
         })).transpose()?.unwrap_or(false);
         access::check_continuity(&self.base, true)?;
+        motor_files::recover_move(&self.base, || self.owner.check())?;
         let previous = if updating {
             let id = id(args.get("id").unwrap_or(&Value::Null))?;
             let expected = args.get("revision").and_then(revision).ok_or_else(|| invalid("Indica la revisión leída."))?;
@@ -565,7 +603,9 @@ impl Motor {
         let expected = previous.map(digest);
         text_write::write_bytes(&scope.root, &scope.relative, markdown(record).as_bytes(), MAX_MARKDOWN,
             expected.as_deref(), || self.confirm(target, scope))
-            .map(|_| ()).map_err(filesystem)
+            .map(|_| ()).map_err(filesystem)?;
+        let _ = motor_files::reconcile_index_by_id(&self.base, &scope.id, || self.owner.check());
+        Ok(())
     }
 }
 
@@ -738,7 +778,10 @@ impl Motor {
     fn rpc_scoped(&self, payload: &Value) -> Result<Value, Fault> {
         let action = payload["accion"].as_str().unwrap_or_default();
         if action == "inicio" {
-            let state = self.call("estado", json!({}))?;
+            let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+            self.owner.check().map_err(filesystem)?;
+            motor_files::recover_move(&self.base, || self.owner.check())?;
+            let state = self.state()?;
             return Ok(json!({"ok":true,"mind":state["mind"],
                 "instrucciones":"Consulta las herramientas y permisos de este Motor Rust.",
                 "destinos":access::destinations(&self.base, None, None)?}));
@@ -752,6 +795,27 @@ impl Motor {
             "conversacion_leer" => self.call("retomar", args).map(|value| json!({"conversacion":value["conversacion"]})),
             "conversacion_guardar" if args.get("id").is_some() => self.call("actualizar", args),
             "conversacion_guardar" => self.call("guardar", args),
+            "conversaciones_buscar" => {
+                let Some(mut fields) = args.as_object().cloned() else {
+                    return Err(invalid("Indica argumentos en un objeto."));
+                };
+                fields.insert("en".into(), json!("conversaciones"));
+                self.call("buscar", Value::Object(fields))
+            }
+            "continuidad_registrar" => {
+                let Some(mut fields) = args.as_object().cloned() else {
+                    return Err(invalid("Indica argumentos en un objeto."));
+                };
+                fields.insert("en".into(), json!("continuidad"));
+                self.call("guardar", Value::Object(fields))
+            }
+            "continuidad_actualizar" => {
+                let Some(mut fields) = args.as_object().cloned() else {
+                    return Err(invalid("Indica argumentos en un objeto."));
+                };
+                fields.insert("en".into(), json!("continuidad"));
+                self.call("actualizar", Value::Object(fields))
+            }
             "solicitar_acceso" => self.call("acceso", args),
             "retirar_acceso" => {
                 let Some(mut fields) = args.as_object().cloned() else {

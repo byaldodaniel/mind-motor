@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{motor_native::Fault, motor_owner::timestamp,
     motor_permissions::{
         continuity_access, folder_status, lower_hex, persisted_continuity_policy,
-        persisted_folder_policy, read_file, read_json, registered_folders,
+        persisted_folder_policy, read_file, read_json, registered_folders, Folder,
     },
     scan, text_write};
 
@@ -77,6 +77,14 @@ fn save(
         Err("FILE_EXISTS" | "VERSION_CONFLICT") => Err(changed()),
         Err(code) => Err(fail(code, "No se pudo guardar la decisión de acceso.")),
     }
+}
+
+pub(crate) fn clean_text(value: &str, max: usize) -> String {
+    clean(value, max)
+}
+
+pub(crate) fn format_client_name(client: Option<&Value>) -> String {
+    client_name(client)
 }
 
 fn clean(value: &str, max: usize) -> String {
@@ -315,6 +323,39 @@ fn pending(
         "instrucciones":format!("{prefix} La solicitud quedó pendiente para que el usuario la revise con \"Autorizar Mind\". Después consulta \"estado\".")}))
 }
 
+pub(crate) fn save_operation_pending(
+    base: &str, kind: &str, operation: Value, client: &str, reason: &str, cancelled: bool,
+    confirm_owner: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<Value, Fault> {
+    let id = Uuid::new_v4().to_string();
+    let created = now()?;
+    let expiry = tomorrow(&created).ok_or_else(|| fail("CLOCK_UNAVAILABLE", "No se pudo calcular la caducidad."))?;
+    let record = json!({
+        "format": "mind-consent-request",
+        "version": 1,
+        "id": id,
+        "kind": kind,
+        "path": Value::Null,
+        "requested": [kind],
+        "reason": clean(reason, 300),
+        "client": clean(client, 120),
+        "createdAt": created,
+        "expiresAt": expiry,
+        "operation": operation,
+    });
+    save(base, &format!("consent-request-{id}.json"), &record, None, confirm_owner)?;
+    let what = if kind == "vaciado" { "la eliminación definitiva" } else { "el borrado" };
+    let mut out = json!({
+        "estado": "pendiente",
+        "solicitud": id,
+        "que_hacer": format!("El usuario debe aprobar {what} en la consola de Mind: \"mind autorizar\" en la carpeta de Mind (o \"Autorizar Mind\"). Hasta entonces no se ha tocado nada."),
+    });
+    if cancelled {
+        out["nota"] = json!("El formulario se cerró sin responder.");
+    }
+    Ok(out)
+}
+
 fn normalize_exclusions(raw: impl IntoIterator<Item = String>) -> Result<Vec<String>, Fault> {
     let invalid = || fail("INVALID_EXCLUSIONS", "Indica hasta 64 rutas relativas dentro de la carpeta.");
     let raw = raw.into_iter().collect::<Vec<_>>();
@@ -411,9 +452,32 @@ pub(crate) fn finish(
                 if live.is_some_and(|value| value["id"] == id && value["path"] == path
                     && value["generation"] == generation) { Ok(()) } else { Err("ACCESS_CHANGED") }
             })?;
+            let _ = crate::motor_files::reconcile_index_by_id(base, &id, &confirm_owner);
+            let folder_obj = Folder {
+                id: id.clone(),
+                root: path.clone(),
+                generation: generation.as_str().map(str::to_owned),
+                exclusions: exclusions.clone(),
+            };
+            let indice = crate::motor_files::index_summary(base, &folder_obj);
             Ok(json!({"estado":"autorizado","carpeta":{"id":id,"ruta":path,"permisos":access,"excluidas":exclusions},
-                "indice":{"estado":"sin-indice"}}))
+                "indice":indice}))
         }
+    }
+}
+
+fn valid_pending_operation(kind: Option<&str>, operation: &Value) -> bool {
+    let Some(kind) = kind.filter(|k| matches!(*k, "borrado" | "vaciado")) else {
+        return true;
+    };
+    let valid_folder = operation["folderId"].as_str().is_some_and(|id| id.len() == 64 && lower_hex(id));
+    if !valid_folder {
+        return false;
+    }
+    if kind == "borrado" {
+        operation["relativePath"].as_str().is_some_and(|p| !p.is_empty() && p.encode_utf16().count() <= 4096)
+    } else {
+        operation["trashId"].as_str().is_some_and(crate::motor_files::valid_trash_id)
     }
 }
 
@@ -428,6 +492,7 @@ fn is_valid_pending(record: &Value, id: &str, now: &str) -> bool {
         && record["requested"].as_array().is_some_and(|items| items.iter().all(Value::is_string))
         && (kind != Some("carpeta")
             || record["path"].as_str().is_some_and(|value| !value.contains('\0') && Path::new(value).is_absolute()))
+        && valid_pending_operation(kind, &record["operation"])
 }
 
 pub(crate) fn list_pending(base: &str) -> Result<Vec<Value>, Fault> {
@@ -453,7 +518,7 @@ pub(crate) fn list_pending(base: &str) -> Result<Vec<Value>, Fault> {
     Ok(requests)
 }
 
-fn remove_base_file(
+pub(crate) fn remove_base_file(
     base: &str, name: &str, confirm_owner: impl FnOnce() -> Result<(), &'static str>,
 ) -> Result<bool, Fault> {
     scan::open_directory(base, "").map_err(|code| fail(code, "No se pudo abrir la Base de forma segura."))?;
@@ -564,7 +629,17 @@ pub(crate) fn retire(
             "path":path,"generation":generation,"exclusions":exclusions
         });
         save(base, &registry_name, &authority, Some(&registry), &confirm_owner)?;
+        let updated_folder = Folder {
+            id: id.to_owned(),
+            root: path.as_str().unwrap_or_default().to_owned(),
+            generation: generation.as_str().map(str::to_owned),
+            exclusions: exclusions.clone(),
+        };
+        let removed_entries = crate::motor_files::prune_excluded_from_index(base, &updated_folder, &confirm_owner).unwrap_or(0);
         result["excluidas"] = json!(exclusions);
+        if removing.is_none() {
+            result["entradas_retiradas_del_indice"] = json!(removed_entries);
+        }
     }
 
     if let Some(removing) = removing {
@@ -662,7 +737,14 @@ pub(crate) fn console(
                 "exclusions": exclusions,
             });
             save(base, &registry_name, &authority, Some(&registry), &confirm_owner)?;
-            Ok(json!({"ok": true, "exclusions": exclusions, "removedEntries": 0}))
+            let updated_folder = Folder {
+                id: id.to_owned(),
+                root: folder.root,
+                generation: folder.generation,
+                exclusions: exclusions.clone(),
+            };
+            let removed_entries = crate::motor_files::prune_excluded_from_index(base, &updated_folder, &confirm_owner).unwrap_or(0);
+            Ok(json!({"ok": true, "exclusions": exclusions, "removedEntries": removed_entries}))
         }
         "retirar_carpeta" => {
             let id = valid_folder_id(payload.get("id"))?;
@@ -716,6 +798,9 @@ pub(crate) fn console(
                     Err("ACCESS_CHANGED")
                 }
             })?;
+            if granted.contains(&"encontrar") {
+                let _ = crate::motor_files::reconcile_folder_index(base, &folder, &confirm_owner);
+            }
             Ok(json!({"ok": true, "acceso": {"folderId": id, "access": access, "grantedAt": granted_at, "channel": channel}}))
         }
         "retirar_acceso" => {
@@ -779,6 +864,25 @@ pub(crate) fn console(
             let removed = remove_base_file(base, &format!("consent-request-{id}.json"), &confirm_owner)?;
             Ok(json!({"ok": true, "retirada": removed}))
         }
+        "leer_indice" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let indice = crate::motor_files::console_read_index(base, id)?;
+            Ok(json!({"ok": true, "indice": indice}))
+        }
+        "indexar_carpeta" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let indice = crate::motor_files::reconcile_index_by_id(base, id, &confirm_owner)?;
+            Ok(json!({"ok": true, "indice": indice}))
+        }
+        "obtener_papelera" => {
+            let id = valid_folder_id(payload.get("id"))?;
+            let trash_id = payload.get("papelera").and_then(Value::as_str)
+                .ok_or_else(|| fail("INVALID_TRASH_ID", "El identificador de la papelera no es válido."))?;
+            let entrada = crate::motor_files::console_get_trash(base, id, trash_id)?;
+            Ok(json!({"ok": true, "entrada": entrada}))
+        }
+        "borrar_elemento" => crate::motor_files::console_delete_entry(base, payload, &confirm_owner),
+        "vaciar_elemento" => crate::motor_files::console_purge_entry(base, payload, &confirm_owner),
         _ => Err(fail("INVALID_ARGUMENTS", "Operación de consola no admitida.")),
     }
 }

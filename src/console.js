@@ -150,10 +150,6 @@ export async function authorizeConsole({ session, prompt, folderPath = null, req
         prompt.write('Rechazada.');
       }
     } else if (request.kind === 'borrado' || request.kind === 'vaciado') {
-      if (session.nativeConsole) {
-        prompt.write('Esta solicitud requiere el Motor completo y se conserva pendiente.');
-        continue;
-      }
       // Borrado o vaciado pedido por un agente: Mind lo describe y lo ejecuta si el usuario confirma.
       const outcome = await reviewOperationRequest({ session, prompt, request });
       if (outcome.done) changes += 1;

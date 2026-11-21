@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::{
     host::{full, Body},
     motor_consent::Prepared,
+    motor_files::{OrganizeDecision, OrganizePrepared},
     motor_native::{Fault, Motor},
     motor_workspace::{with_workspace, Workspace},
     MAX_MESSAGE,
@@ -30,7 +31,10 @@ const ROOTS_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const TOOLS: &[&str] = &[
-    "estado", "retomar", "buscar", "leer", "crear", "modificar", "guardar", "actualizar", "acceso",
+    "estado", "retomar", "buscar", "leer", "crear", "modificar", "organizar",
+    "guardar", "actualizar", "acceso",
+    "crear_carpeta", "editar", "mover", "renombrar", "borrar", "papelera",
+    "restaurar", "vaciar_papelera", "explorar", "eliminados",
 ];
 
 struct Session {
@@ -322,18 +326,35 @@ fn is_call(message: &Value) -> bool {
     message["jsonrpc"] == "2.0" && message["method"] == "tools/call"
 }
 
+fn is_organize_confirm(message: &Value) -> bool {
+    match message.pointer("/params/name").and_then(Value::as_str) {
+        Some("borrar" | "vaciar_papelera") => true,
+        Some("organizar") => matches!(
+            message.pointer("/params/arguments/accion").and_then(Value::as_str),
+            Some("borrar" | "vaciar_papelera")
+        ),
+        _ => false,
+    }
+}
+
 async fn dispatch(
     message: &Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, sse: bool,
 ) -> Response<Body> {
     let Some(messages) = message.as_array() else {
         if let Some(id) = request_id(message).filter(|_| is_call(message)) {
             let is_access = message.pointer("/params/name").is_some_and(|name| name == "acceso");
+            let is_org_confirm = is_organize_confirm(message);
             let roots = !session.scope.lock().unwrap().resolved;
-            if sse && (roots || (is_access && session.form && message.pointer("/params/arguments/accion").and_then(Value::as_str) != Some("retirar"))) {
+            let needs_form = (is_access && message.pointer("/params/arguments/accion").and_then(Value::as_str) != Some("retirar"))
+                || is_org_confirm;
+            if sse && (roots || (needs_form && session.form)) {
                 return stream_call(message.clone(), id, Arc::clone(motor), Arc::clone(session));
             }
             if is_access {
                 return full(StatusCode::OK, access(message, id, motor, session, None).await);
+            }
+            if is_org_confirm {
+                return full(StatusCode::OK, organize_interactive(message, id, motor, session, None).await);
             }
         }
         return match dispatch_one(message, motor, session).await {
@@ -381,8 +402,8 @@ async fn dispatch_one(message: &Value, motor: &Arc<Motor>, session: &Arc<Session
             let Some(name) = params.get("name").and_then(Value::as_str).filter(|name| TOOLS.contains(name)) else {
                 return Some(rpc_error(id, -32602, "Herramienta desconocida."));
             };
-            if name == "acceso" {
-                return Some(rpc_error(id, -32602, "Envía la solicitud de acceso en una petición individual."));
+            if name == "acceso" || is_organize_confirm(message) {
+                return Some(rpc_error(id, -32602, "Envía la solicitud que requiere confirmación en una petición individual."));
             }
             let args = params.get("arguments").unwrap_or(&empty);
             if !args.is_object() {
@@ -450,6 +471,8 @@ fn stream_call(message: Value, id: Value, motor: Arc<Motor>, session: Arc<Sessio
                 let is_access = message.pointer("/params/name").is_some_and(|name| name == "acceso");
                 if is_access {
                     access(&message, id.clone(), &motor, &session, Some(&events)).await
+                } else if is_organize_confirm(&message) {
+                    organize_interactive(&message, id.clone(), &motor, &session, Some(&events)).await
                 } else {
                     dispatch_one(&message, &motor, &session).await
                         .unwrap_or_else(|| rpc_error(id.clone(), -32600, "Mensaje JSON-RPC no válido."))
@@ -548,6 +571,71 @@ async fn run_access(
         session.ensure_active(call.as_deref(), generation)?;
         let active = || session.ensure_active(call.as_deref(), generation).is_ok();
         with_workspace(&workspace, || motor.finish_access(request, answer.as_ref(), active))
+    }).await.map_err(|_| internal())?
+}
+
+async fn organize_interactive(
+    message: &Value, id: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Value {
+    let mut args = message.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+    let Some(obj) = args.as_object_mut() else {
+        return rpc_error(id, -32602, "arguments debe ser un objeto.");
+    };
+    if let Some(name @ ("borrar" | "vaciar_papelera")) = message.pointer("/params/name").and_then(Value::as_str) {
+        if obj.insert("accion".into(), json!(name)).is_some() {
+            return rpc_result(id, tool_reply(Err(Fault::new("INVALID_ARGUMENTS", "La llamada incluye argumentos no admitidos."))));
+        }
+    }
+    let result = run_organize(args, motor, session, events).await;
+    rpc_result(id, tool_reply(result))
+}
+
+async fn run_organize(
+    args: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Result<Value, Fault> {
+    let (workspace, generation) = {
+        let scope = session.scope.lock().unwrap();
+        (scope.workspace.clone(), scope.generation)
+    };
+    let call = events.map(|events| Arc::clone(&events.call));
+    let prepare = tokio::task::spawn_blocking({
+        let (motor, session, workspace, call) = (Arc::clone(motor), Arc::clone(session), workspace.clone(), call.clone());
+        move || {
+            session.ensure_active(call.as_deref(), generation)?;
+            with_workspace(&workspace, || motor.prepare_organize(args, session.client.as_ref()))
+        }
+    });
+    let confirmation = match prepare.await.map_err(|_| internal())?? {
+        OrganizePrepared::Immediate(value) => return Ok(value),
+        OrganizePrepared::Confirm(confirmation) => confirmation,
+    };
+    let (first, second) = match events.filter(|_| session.form) {
+        Some(events) => {
+            let first = events.request("elicitation/create", confirmation.first_form(session.protocol), CLIENT_TIMEOUT).await?;
+            let second = if first["action"] == "accept"
+                && first["content"]["confirmar"] == true
+                && confirmation.requires_second_form()
+            {
+                Some(events.request("elicitation/create", confirmation.second_form(session.protocol), CLIENT_TIMEOUT).await?)
+            } else {
+                None
+            };
+            (Some(first), second)
+        }
+        None => (None, None),
+    };
+    let (motor, session) = (Arc::clone(motor), Arc::clone(session));
+    tokio::task::spawn_blocking(move || {
+        session.ensure_active(call.as_deref(), generation)?;
+        let active = || session.ensure_active(call.as_deref(), generation).is_ok();
+        let decision = match &first {
+            Some(first_val) => OrganizeDecision::FromForms {
+                first: Some(first_val),
+                second: second.as_ref(),
+            },
+            None => OrganizeDecision::Pending { cancelled: false },
+        };
+        with_workspace(&workspace, || motor.finish_organize(confirmation, decision, active))
     }).await.map_err(|_| internal())?
 }
 
@@ -680,22 +768,37 @@ fn definitions() -> Value {
         },
         {
             "name": "buscar",
-            "title": "Buscar conversaciones",
-            "description": "Busca conversaciones por palabras y permite filtrar por proyecto.",
+            "title": "Buscar archivos, carpetas, eliminados o conversaciones",
+            "description": "Busca en los índices persistentes de Mind (archivos, carpeta, eliminados) o en conversaciones.",
             "inputSchema": {"type": "object", "properties": {
-                "en": {"type": "string", "enum": ["conversaciones"]},
+                "en": {"type": "string", "enum": ["archivos", "carpeta", "eliminados", "conversaciones"], "default": "archivos"},
                 "consulta": {"type": "string"}, "proyecto": {"type": "string"},
-                "limite": {"type": "integer", "minimum": 1, "maximum": 100},
-            }, "required": ["en"], "additionalProperties": false},
+                "carpetas": {"type": "array", "items": {"type": "string"}},
+                "carpeta": {"type": "string"}, "ruta": {"type": "string"},
+                "modo": {"type": "string", "enum": ["contiene", "empieza", "exacto"]},
+                "campo": {"type": "string", "enum": ["nombre", "ruta"]},
+                "tipos": {"type": "array", "items": {"type": "string", "enum": ["archivo", "carpeta", "enlace", "otro"]}},
+                "extensiones": {"type": "array", "items": {"type": "string"}},
+                "dentro_de": {"type": "string"},
+                "tamano_min": {"type": "integer", "minimum": 0},
+                "tamano_max": {"type": "integer", "minimum": 0},
+                "modificado_desde": {"type": "string"},
+                "modificado_hasta": {"type": "string"},
+                "orden": {"type": "string", "enum": ["relevancia", "ruta", "modificado", "tamano"]},
+                "profundidad": {"type": "integer", "minimum": 1, "maximum": 8},
+                "desde": {},
+                "limite": {"type": "integer", "minimum": 1, "maximum": 1000},
+            }, "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "openWorldHint": false},
         },
         {
             "name": "leer",
-            "title": "Leer un archivo de texto",
-            "description": "Lee texto UTF-8 y devuelve su versión. desde_linea y lineas permiten acotar la lectura.",
+            "title": "Leer un archivo de texto o documento de oficina",
+            "description": "Lee texto UTF-8 (con su versión) o extrae texto de documentos de oficina (.docx, .xlsx, .pptx, .odt, .ods, .odp). Permite leer por sección o acotar líneas.",
             "inputSchema": {"type": "object", "properties": {
                 "carpeta": {"type": "string", "description": "ID o ruta absoluta de la carpeta registrada."},
                 "ruta": {"type": "string", "description": "Ruta relativa dentro de la carpeta."},
+                "seccion": {"type": "string", "description": "Encabezado Markdown a extraer, o \"?\" para el índice."},
                 "desde_linea": {"type": "integer", "minimum": 1},
                 "lineas": {"type": "integer", "minimum": 1},
             }, "required": ["ruta"], "additionalProperties": false},
@@ -715,14 +818,37 @@ fn definitions() -> Value {
         },
         {
             "name": "modificar",
-            "title": "Modificar un archivo de texto",
-            "description": "Sustituye el contenido UTF-8 completo cuando coincide la versión obtenida al leer.",
+            "title": "Modificar o editar un archivo de texto",
+            "description": "Sustituye el contenido UTF-8 completo cuando coincide la versión obtenida al leer, o aplica reemplazos puntuales con ediciones.",
             "inputSchema": {"type": "object", "properties": {
                 "carpeta": {"type": "string", "description": "ID o ruta absoluta de la carpeta registrada."},
                 "ruta": {"type": "string", "description": "Ruta relativa dentro de la carpeta."},
                 "version": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
                 "contenido": {"type": "string"},
-            }, "required": ["ruta", "version", "contenido"], "additionalProperties": false},
+                "ediciones": {
+                    "type": "array", "minItems": 1, "maxItems": 50,
+                    "items": {"type": "object", "properties": {
+                        "buscar": {"type": "string"}, "reemplazar": {"type": "string"}, "todas": {"type": "boolean"}
+                    }, "required": ["buscar", "reemplazar"], "additionalProperties": false}
+                },
+            }, "required": ["ruta"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "organizar",
+            "title": "Organizar archivos y papelera de Mind",
+            "description": "Mueve, renombra, borra a la papelera de Mind (con confirmación del usuario), lista la papelera, restaura o vacía la papelera (con doble confirmación).",
+            "inputSchema": {"type": "object", "properties": {
+                "accion": {"type": "string", "enum": ["mover", "renombrar", "borrar", "papelera", "restaurar", "vaciar_papelera"]},
+                "carpeta": {"type": "string"},
+                "carpeta_destino": {"type": "string"},
+                "ruta": {"type": "string"},
+                "desde": {"type": "string"},
+                "hasta": {"type": "string"},
+                "nuevo_nombre": {"type": "string"},
+                "id": {"type": "string"},
+                "motivo": {"type": "string"},
+            }, "required": ["accion"], "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
         },
         {

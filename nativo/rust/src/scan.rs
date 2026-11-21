@@ -24,6 +24,10 @@ pub fn handle(request:Value)->Value {
     }
 }
 
+pub(crate) fn scan_directory(root: &str, relative: &str, max: usize) -> Result<(Vec<Value>, bool), ScanError> {
+    platform::scan(root, relative, max)
+}
+
 pub(crate) fn open_reader(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {
     if !relative.split('/').all(reader_component) {
         return Err("UNSAFE_PATH");
@@ -235,7 +239,8 @@ mod platform {
                     if entries.len()==max{return Ok((entries,false))}
                     let attributes=u32le(raw,offset+56);let file_id=u64le(raw,offset+96);
                     let kind=if attributes&0x400!=0{"link"}else if attributes&0x10!=0{"directory"}else{"file"};
-                    let mut entry=json!({"name":name,"type":kind});
+                    let ms=|at:usize|{let ticks=u64le(raw,at) as i64;(ticks>0).then(||(ticks-116_444_736_000_000_000).div_euclid(10_000))};
+                    let mut entry=json!({"name":name,"type":kind,"createdMs":ms(offset+8),"modifiedMs":ms(offset+24),"changedMs":ms(offset+32)});
                     if kind=="file"{entry["size"]=json!(u64le(raw,offset+40))}
                     if file_id!=0{entry["identity"]=json!(format!("nt:{}:{}",volume,file_id))}
                     if !append_entry(&mut entries,&mut response_bytes,entry){return Ok((entries,false))}
@@ -350,7 +355,9 @@ mod platform {
             let mut info:libc::stat=unsafe{mem::zeroed()};
             if unsafe{libc::fstatat(current.as_raw_fd(),raw_name.as_ptr(),&mut info,libc::AT_SYMLINK_NOFOLLOW)}<0{let error=std::io::Error::last_os_error();if error.raw_os_error()==Some(libc::ENOENT){continue}return Err(error.into())}
             let kind=match info.st_mode&libc::S_IFMT{libc::S_IFREG=>"file",libc::S_IFDIR=>"directory",libc::S_IFLNK=>"link",_=>"other"};
-            let mut entry=json!({"name":name,"type":kind,"identity":format!("posix:{}:{}",info.st_dev,info.st_ino)});
+            let modified_ms=(info.st_mtime as i64).saturating_mul(1000).saturating_add((info.st_mtime_nsec as i64)/1_000_000);
+            let changed_ms=(info.st_ctime as i64).saturating_mul(1000).saturating_add((info.st_ctime_nsec as i64)/1_000_000);
+            let mut entry=json!({"name":name,"type":kind,"identity":format!("posix:{}:{}",info.st_dev,info.st_ino),"modifiedMs":modified_ms,"changedMs":changed_ms});
             if kind=="file"{entry["size"]=json!(info.st_size)}if !append_entry(&mut entries,&mut response_bytes,entry){return Ok((entries,false))}
         }
     }

@@ -291,11 +291,24 @@ El Motor aplica los permisos persistidos y el ámbito abierto que comunica el
 iniciador o el cliente. El acceso nuevo requiere el formulario del cliente o
 queda pendiente para la consola habitual. Con el Motor Rust activo,
 `mind autorizar` y `mind permisos` operan a través de ese único proceso
-escritor (incluida la retirada parcial de permisos o completa de carpetas)
-usando `conector-consola.json`, una credencial nueva en cada arranque que
-Rust escribe y borra al cerrar; el token MCP no puede aprobar ni retirar desde
-`/rpc` consola. El modo Rust sigue siendo optativo mientras se portan las
-herramientas y confirmaciones restantes.
+escritor (incluida la retirada parcial de permisos o completa de carpetas y la
+revisión de borrados y vaciados de papelera con doble confirmación) usando
+`conector-consola.json`, una credencial nueva en cada arranque que Rust escribe
+y borra al cerrar; el token MCP no puede aprobar ni retirar desde `/rpc`
+consola. El Motor Rust mantiene además el índice persistido de cada carpeta
+(`folder-index-<id>.json`), el registro de la papelera (`trash-<id>.json`), el
+rastro de eliminados (`folder-removed-<id>.json`), la lectura por secciones y
+de documentos de oficina, la edición puntual y la búsqueda por texto. Las
+consultas consecutivas reutilizan el índice durante un segundo. Pasado ese
+intervalo, la siguiente consulta comprueba cambios externos. Las operaciones
+de Mind actualizan el índice al completar el cambio.
+
+Mind guarda la intención de un traslado antes de mover el archivo. Si falla
+la actualización de rutas, Rust o r3 la completan al retomar la conversación.
+Para enviar algo a la papelera, Rust publica primero su registro compatible
+con r3. Si ese guardado falla, el archivo permanece en su ubicación original.
+
+Rust sigue siendo optativo mientras se portan las funciones restantes.
 
 Para volver a r3, cierra el Motor Rust, quita la selección nativa del iniciador
 y abre la misma Base con r3. Ambos usan el mismo bloqueo y formato de Base. El

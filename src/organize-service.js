@@ -172,7 +172,12 @@ export async function reviewOperationRequest({ session, prompt, request }) {
         return { done: false };
       }
       const deleted = await deleteEntry(session, { requester, folder, entry, by, reason: request.reason, source: 'consola' });
-      prompt.write(`Movido a la papelera de Mind (${deleted.trashId}).`);
+      if (deleted.trash?.status === 'unrecorded') {
+        const trashPath = path.join(folder.path, ...deleted.trashPath.split('/'));
+        prompt.write(`Movido a .papelera-mind (${trashPath}), pero no se pudo guardar su registro en la Base (${deleted.trash?.code ?? 'TRASH_RECORD_FAILED'}).`);
+      } else {
+        prompt.write(`Movido a la papelera de Mind (${deleted.trashId}).`);
+      }
       return { done: true };
     }
     const entry = await session.motor.getTrashEntry(folder.id, operation.trashId);

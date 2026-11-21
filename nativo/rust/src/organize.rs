@@ -1,4 +1,4 @@
-use std::{fs::File, io::{self, BufRead, Read, Write}, time::Duration};
+use std::{fs::File, io::{self, BufRead, Read, Write}, path::Path, time::Duration};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -23,14 +23,26 @@ enum Request {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Expected {
-    #[serde(rename = "type")] kind: Option<String>,
-    size: Option<u64>,
-    modified_ms: Option<i64>,
+pub(crate) struct Expected {
+    #[serde(rename = "type")] pub(crate) kind: Option<String>,
+    pub(crate) size: Option<u64>,
+    pub(crate) modified_ms: Option<i64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Identity(u64, u64);
+
+impl Identity {
+    fn record(self) -> Value {
+        json!({"dev": self.0.to_string(), "ino": self.1.to_string()})
+    }
+}
+
+enum Prepared<'a> {
+    Other,
+    Move(Identity),
+    Trash(&'a Value),
+}
 
 struct Entry {
     file: File,
@@ -146,10 +158,70 @@ fn holder(top: &File, id: Identity, name: &str) -> Result<(File, File, Identity)
 
 pub(crate) fn create_directory(root: &str, path: &str, confirm: impl FnOnce() -> Result<()>) -> Result<()> {
     let request = Request::Mkdir { root: root.to_owned(), relative_path: path.to_owned() };
-    run_request(request, |_| confirm()).map(|_| ())
+    run_request(request, |_, _| confirm()).map(|_| ())
 }
 
-fn run_request(request: Request, approve: impl FnOnce(u64) -> Result<()>) -> Result<Value> {
+pub(crate) fn move_entry(
+    root: &str, from: &str, to: &str, target_root: Option<String>,
+    prepare: impl FnOnce(Value) -> Result<()>,
+) -> Result<Value> {
+    let request = Request::Move {
+        root: root.to_owned(), from: from.to_owned(), to: to.to_owned(), target_root,
+    };
+    run_request(request, |_, prepared| match prepared {
+        Prepared::Move(identity) => prepare(identity.record()),
+        _ => Err("FAILED"),
+    })
+}
+
+pub(crate) fn trash_entry(
+    root: &str, relative_path: &str, trash_id: &str, expect: Option<Expected>,
+    prepare: impl FnOnce(&Value) -> Result<()>,
+) -> Result<Value> {
+    let request = Request::Trash {
+        root: root.to_owned(), relative_path: relative_path.to_owned(),
+        trash_id: trash_id.to_owned(), expect,
+    };
+    run_request(request, |_, prepared| match prepared {
+        Prepared::Trash(metadata) => prepare(metadata),
+        _ => Err("FAILED"),
+    })
+}
+
+// Verifica la identidad a partir del descriptor del directorio y sin seguir enlaces.
+pub(crate) fn location_identity(path: &Path) -> Result<Option<Value>> {
+    if !path.is_absolute() {
+        return Err("UNSAFE_PATH");
+    }
+    let parent = path.parent().and_then(Path::to_str).ok_or("UNSAFE_PATH")?;
+    let name = part(path.file_name().and_then(|name| name.to_str()).ok_or("UNSAFE_PATH")?)?;
+    let directory = match open_directory(parent, "") {
+        Ok(directory) => directory,
+        Err("FILE_NOT_FOUND") => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(fs::occupied(&directory, name)?.map(Identity::record))
+}
+
+pub(crate) fn restore_entry(
+    root: &str, trash_id: &str, name: &str, target_parent: Vec<String>, candidates: Vec<String>,
+    confirm: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
+    let request = Request::Restore {
+        root: root.to_owned(), trash_id: trash_id.to_owned(), name: name.to_owned(),
+        target_parent, candidates,
+    };
+    run_request(request, |_, _| confirm())
+}
+
+pub(crate) fn purge_entry(
+    root: &str, trash_id: &str, confirm: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
+    let request = Request::Purge { root: root.to_owned(), trash_id: trash_id.to_owned() };
+    run_request(request, |_, _| confirm())
+}
+
+fn run_request(request: Request, approve: impl FnOnce(u64, Prepared<'_>) -> Result<()>) -> Result<Value> {
     match request {
         Request::Mkdir { root, relative_path } => {
             let names = parts(&relative_path)?;
@@ -158,7 +230,7 @@ fn run_request(request: Request, approve: impl FnOnce(u64) -> Result<()>) -> Res
             let volume = fs::identity(&top)?;
             let (parent, _) = descend(&top, volume, parents, "PARENT_NOT_FOUND")?;
             if fs::occupied(&parent, name)?.is_some() { return Err("FILE_EXISTS"); }
-            approve(10)?;
+            approve(10, Prepared::Other)?;
             let created = fs::mkdir(&parent, name).map_err(|error| missing(error, "PARENT_NOT_FOUND"))?;
             let id = fs::identity(&created).map_err(|_| "UNCONFIRMED")?;
             same_volume(volume, id).map_err(|_| "UNCONFIRMED")?;
@@ -190,7 +262,7 @@ fn run_request(request: Request, approve: impl FnOnce(u64) -> Result<()>) -> Res
                 Some(_) => return Err("FILE_EXISTS"),
                 None => false,
             };
-            approve(10)?;
+            approve(10, Prepared::Move(entry.id))?;
             if alias {
                 let temporary = format!(".mind-move-{}.tmp", Uuid::new_v4().simple());
                 fs::move_entry(&entry, &source, name, &source, &temporary)?;
@@ -215,7 +287,7 @@ fn run_request(request: Request, approve: impl FnOnce(u64) -> Result<()>) -> Res
             let mut metadata = describe(&entry)?;
             check_expected(&entry, &metadata, expect)?;
             metadata["sha256"] = json!(digest(&entry, &metadata)?);
-            approve(30)?;
+            approve(30, Prepared::Trash(&metadata))?;
             let trash = match fs::mkdir(&top, TRASH) {
                 Ok(file) => file,
                 Err("FILE_EXISTS") => fs::dir(&top, TRASH, false)?,
@@ -247,7 +319,7 @@ fn run_request(request: Request, approve: impl FnOnce(u64) -> Result<()>) -> Res
             let entry = fs::acquire(&folder, name, volume, false).map_err(|e| missing(e, "TRASH_MISSING"))?;
             let (target, chain) = descend(&top, volume, &parents, "PARENT_NOT_FOUND")?;
             if entry.directory && chain.contains(&entry.id) { return Err("INVALID_MOVE"); }
-            approve(10)?;
+            approve(10, Prepared::Other)?;
             for candidate in candidates {
                 if fs::occupied(&target, candidate)?.is_some() { continue; }
                 match fs::move_entry(&entry, &folder, name, &target, candidate) {
@@ -267,7 +339,7 @@ fn run_request(request: Request, approve: impl FnOnce(u64) -> Result<()>) -> Res
             let top = open_directory(&root, "")?;
             let volume = fs::identity(&top)?;
             let (trash, folder, identity) = holder(&top, volume, &id)?;
-            approve(120)?;
+            approve(120, Prepared::Other)?;
             let removed = fs::purge(&folder, volume)?;
             fs::remove_dir(&trash, &id, &folder, identity)?;
             Ok(json!({"removed": removed}))
@@ -282,7 +354,7 @@ pub(crate) fn run(args: &[String]) -> std::result::Result<(), String> {
     stdin.by_ref().take(65_536).read_until(b'\n', &mut line).map_err(|_| "FAILED")?;
     if line.last() != Some(&b'\n') { return Err("FAILED".into()); }
     let data = serde_json::from_slice(&line).map_err(|_| "FAILED")?;
-    let result = run_request(data, |seconds| confirm(&mut stdin, &guard, seconds))?;
+    let result = run_request(data, |seconds, _| confirm(&mut stdin, &guard, seconds))?;
     serde_json::to_writer(io::stdout().lock(), &result).map_err(|_| "UNCONFIRMED".into())
 }
 

@@ -121,6 +121,7 @@ async function openMcp(url, token, name, { onElicit, onRoots, cwd } = {}) {
       const { result } = await send('tools/call', { name, arguments: args });
       assert.equal(result.isError, true, name);
       assert.equal(result.structuredContent.error.codigo, code);
+      return result.structuredContent.error;
     },
     async close() {
       const response = await fetch(url, { method: 'DELETE', headers, signal: AbortSignal.timeout(5_000) });
@@ -223,7 +224,7 @@ async function runInteractiveCli(args, respond, { native = true } = {}) {
   output.on('data', chunk => {
     captured += chunk;
     const tail = captured.slice(seen);
-    if (/(?:\[[sS]\/[nN]\]|\[0-3\]:|\(Enter para ninguna\):)\s$/u.test(tail)) {
+    if (/(?:\[[sS]\/[nN]\]|\[0-3\]:|\(Enter para ninguna\):|para siempre:)\s$/u.test(tail)) {
       const answer = respond(tail, captured);
       seen = captured.length;
       setImmediate(() => input.write(`${answer}\n`));
@@ -493,13 +494,14 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
   const seed = (await first.call('guardar', {
     en: 'continuidad', tipo: 'contexto', contenido: 'Registro previo guardado con Rust',
   })).registro;
-  const markdownPath = path.join(notes, 'Retoma.md');
-  const saved = (await first.call('guardar', {
+  let markdownPath = path.join(notes, 'Retoma.md');
+  let saved = (await first.call('guardar', {
     titulo: 'Arranque habitual en Rust', importante: 'Esta conversación debe recuperarse en r3.',
     destino: markdownPath, referencias: [{ registro: seed.id, relacion: 'continúa' }],
   })).conversacion;
   const written = await first.call('crear', { carpeta: notesId, ruta: 'Nota.txt', contenido: 'Escrita en Rust.\n' });
   assert.equal(written.estado, 'creado');
+  assert.equal(written.indice, 'ok');
   assert.deepEqual(fields((await second.call('retomar', { id: saved.id })).conversacion), fields(saved));
   assert.equal((await second.call('leer', { carpeta: notesId, ruta: 'Nota.txt' })).contenido, 'Escrita en Rust.\n');
   assert.equal((await second.call('leer', { carpeta: extraId, ruta: 'Extra.txt' })).contenido, 'Contenido en carpeta extra.\n');
@@ -507,6 +509,181 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
   await first.denied('guardar', { titulo: 'Sin permiso', importante: 'No sale de la carpeta autorizada.', destino: outside },
     'FOLDER_NOT_AUTHORIZED');
   await assert.rejects(fs.stat(outside), { code: 'ENOENT' });
+
+  // Etapa 2: edición puntual, lectura por sección, organización, papelera e índice compartido.
+  const edited = await first.call('modificar', {
+    carpeta: notesId,
+    ruta: 'Nota.txt',
+    ediciones: [{ buscar: 'Escrita en Rust.', reemplazar: 'Editada en Rust.' }],
+  });
+  assert.equal(edited.estado, 'modificado');
+  assert.equal(edited.indice, 'ok');
+  assert.equal((await second.call('leer', { carpeta: notesId, ruta: 'Nota.txt' })).contenido, 'Editada en Rust.\n');
+  const sectionList = await second.call('leer', { carpeta: notesId, ruta: 'Retoma.md', seccion: '?' });
+  assert.equal(sectionList.indice.length, 1);
+  assert.equal(sectionList.indice[0].titulo, 'Arranque habitual en Rust');
+  const sectionRead = await second.call('leer', { carpeta: notesId, ruta: 'Retoma.md', seccion: 'arranque habitual' });
+  assert.ok(sectionRead.contenido.includes('Esta conversación debe recuperarse en r3.'));
+
+  const createdDir = await first.call('crear', { accion: 'carpeta', carpeta: notesId, ruta: 'Archivo' });
+  assert.equal(createdDir.estado, 'creada');
+  const renamed = await first.call('organizar', {
+    accion: 'renombrar', carpeta: notesId, ruta: 'Nota.txt', nuevo_nombre: 'Nota-v2.txt',
+  });
+  assert.equal(renamed.estado, 'renombrado');
+  const moved = await first.call('organizar', {
+    accion: 'mover', carpeta: notesId, desde: 'Nota-v2.txt', hasta: 'Archivo/Nota-v2.txt',
+  });
+  assert.equal(moved.estado, 'movido');
+  const searchMoved = await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'nota-v2' });
+  assert.deepEqual(searchMoved.resultados.map(item => item.ruta), ['Archivo/Nota-v2.txt']);
+  const searchOld = await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Nota.txt', modo: 'exacto' });
+  assert.equal(searchOld.total, 0);
+  const explored = await second.call('buscar', { en: 'carpeta', carpeta: notesId, ruta: 'Archivo' });
+  assert.deepEqual(explored.entradas.map(item => item.ruta), ['Archivo/Nota-v2.txt']);
+
+  // Compartir el índice sin reescribirlo y detectar cambios externos al refrescarlo.
+  const lookupExternal = (client) => client.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Externo' });
+  const indexPath = path.join(base, 'folder-index-' + notesId + '.json');
+  const currentIndex = await fs.readFile(indexPath);
+  for (const client of [first, second, first]) {
+    assert.equal((await lookupExternal(client)).total, 0);
+    assert.deepEqual(await fs.readFile(indexPath), currentIndex);
+  }
+  const externalPath = path.join(notes, 'Externo.txt');
+  await fs.writeFile(externalPath, 'Creado fuera.\n');
+  await waitUntil(async () => (await lookupExternal(second)).resultados[0]?.bytes === Buffer.byteLength('Creado fuera.\n'),
+    'La búsqueda incorpora el archivo creado fuera de Mind.', 5_000);
+  await fs.writeFile(externalPath, 'Modificado fuera de Mind.\n');
+  await waitUntil(async () => (await lookupExternal(first)).resultados[0]?.bytes === Buffer.byteLength('Modificado fuera de Mind.\n'),
+    'La búsqueda actualiza el tamaño modificado fuera de Mind.', 5_000);
+  await fs.unlink(externalPath);
+  await waitUntil(async () => (await lookupExternal(second)).total === 0,
+    'La búsqueda retira el archivo borrado fuera de Mind.', 5_000);
+  const externalRemoved = (await second.call('buscar', { en: 'eliminados', carpeta: notesId }))
+    .eliminados.find(item => item.ruta === 'Externo.txt');
+  assert.equal(externalRemoved?.por, 'externo');
+
+  const recordPath = path.join(base, 'continuity-' + saved.id + '.json');
+  const relocationPath = path.join(base, 'conversation-relocation.json');
+
+  // La Base ficticia simula un registro dañado antes de tocar el archivo enlazado.
+  const initialRecord = await fs.readFile(recordPath);
+  await fs.writeFile(recordPath, '{dañado');
+  try {
+    await first.denied('organizar', {
+      accion: 'mover', carpeta: notesId, desde: 'Retoma.md', hasta: 'Archivo/Retoma-invalida.md',
+    }, 'RECORD_CORRUPT');
+    await fs.stat(markdownPath);
+    await assert.rejects(fs.stat(path.join(notes, 'Archivo', 'Retoma-invalida.md')), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(relocationPath), { code: 'ENOENT' });
+  } finally {
+    await fs.writeFile(recordPath, initialRecord);
+  }
+
+  async function moveMarkdown(client, from, to, holdRecord) {
+    const expected = await fs.readFile(path.join(notes, from));
+    const locked = holdRecord ? await fs.open(recordPath, 'r+') : null;
+    try {
+      const movedConv = await client.call('organizar', { accion: 'mover', carpeta: notesId, desde: from, hasta: to });
+      assert.equal(movedConv.estado, 'movido');
+      assert.deepEqual(await fs.readFile(path.join(notes, to)), expected);
+      await assert.rejects(fs.stat(path.join(notes, from)), { code: 'ENOENT' });
+      if (locked) {
+        assert.equal(movedConv.continuidad?.estado, 'pendiente');
+        const request = JSON.parse(await fs.readFile(relocationPath, 'utf8'));
+        assert.equal(request.phase, 'moved');
+        assert.ok(request.ids.includes(saved.id));
+        const identity = await fs.stat(path.join(notes, to), { bigint: true });
+        assert.deepEqual(request.identity, { dev: String(identity.dev), ino: String(identity.ino) });
+        assert.equal(JSON.parse(await fs.readFile(recordPath, 'utf8')).content.file, path.join(notes, from));
+        await second.denied('retomar', { id: saved.id }, 'CONVERSATION_RELOCATION_PENDING');
+      } else {
+        assert.equal(movedConv.continuidad?.estado, 'actualizada');
+      }
+    } finally {
+      await locked?.close();
+    }
+  }
+
+  // Comprobar también el reintento real si está ocupado el registro de la conversación.
+  let markdownRelative = 'Archivo/Retoma-movida.md';
+  await moveMarkdown(first, 'Retoma.md', markdownRelative, process.platform === 'win32');
+  markdownPath = path.join(notes, markdownRelative);
+  const resumedMoved = (await second.call('retomar', { id: saved.id })).conversacion;
+  assert.equal(resumedMoved.archivo, markdownPath);
+  assert.equal(resumedMoved.revision, saved.revision + 1);
+  saved = resumedMoved;
+  await assert.rejects(fs.stat(relocationPath), { code: 'ENOENT' });
+  assert.equal(
+    (await second.call('leer', { carpeta: notesId, ruta: markdownRelative })).contenido,
+    await fs.readFile(markdownPath, 'utf8'),
+  );
+
+  // Papelera y confirmaciones por consola (incluida doble confirmación para vaciar).
+  await first.call('crear', { carpeta: notesId, ruta: 'Borrar.txt', contenido: 'Para papelera.\n' });
+  assert.equal((await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Borrar.txt' })).total, 1);
+  const delPending1 = await first.call('organizar', {
+    accion: 'borrar', carpeta: notesId, ruta: 'Borrar.txt', motivo: 'Probar rechazo de borrado.',
+  });
+  assert.equal(delPending1.estado, 'pendiente');
+  const delRejectedOut = await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('¿Mover a la papelera?')) return 'n';
+    assert.fail('Pregunta inesperada al rechazar borrado: ' + tail);
+  });
+  assert.match(delRejectedOut, /Rechazado\./);
+  assert.equal((await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Borrar.txt' })).total, 1);
+
+  const delPending2 = await first.call('organizar', {
+    accion: 'borrar', carpeta: notesId, ruta: 'Borrar.txt', motivo: 'Mover a papelera desde consola.',
+  });
+  assert.equal(delPending2.estado, 'pendiente');
+  const delApprovedOut = await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('¿Mover a la papelera?')) return 's';
+    assert.fail('Pregunta inesperada al aprobar borrado: ' + tail);
+  });
+  assert.match(delApprovedOut, /Movido a la papelera de Mind/);
+  assert.equal((await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Borrar.txt' })).total, 0);
+  const removedList = await second.call('buscar', { en: 'eliminados', carpeta: notesId });
+  assert.ok(removedList.eliminados.some(item => item.ruta === 'Borrar.txt'));
+  const trashList1 = await second.call('organizar', { accion: 'papelera', carpeta: notesId });
+  assert.equal(trashList1.total, 1);
+  const firstTrashId = trashList1.elementos[0].id;
+
+  // Restaurar desde la papelera actualiza el índice en ambas sesiones.
+  const restored = await second.call('organizar', { accion: 'restaurar', carpeta: notesId, id: firstTrashId });
+  assert.equal(restored.estado, 'restaurado');
+  assert.equal(restored.ruta, 'Borrar.txt');
+  assert.equal((await first.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Borrar.txt' })).total, 1);
+  assert.equal((await first.call('organizar', { accion: 'papelera', carpeta: notesId })).total, 0);
+
+  // Volver a borrar y probar la doble confirmación de vaciar_papelera en consola.
+  await first.call('organizar', { accion: 'borrar', carpeta: notesId, ruta: 'Borrar.txt', motivo: 'Para vaciar.' });
+  await runInteractiveCli(['autorizar', '--base', base], tail => (tail.includes('¿Mover a la papelera?') ? 's' : 'n'));
+  const trashToPurgeId = (await second.call('organizar', { accion: 'papelera', carpeta: notesId })).elementos[0].id;
+  const purgePending1 = await first.call('organizar', {
+    accion: 'vaciar_papelera', carpeta: notesId, id: trashToPurgeId, motivo: 'Intento sin escribir VACIAR.',
+  });
+  assert.equal(purgePending1.estado, 'pendiente');
+  const purgeAbortedOut = await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('¿Eliminar definitivamente?')) return 's';
+    if (tail.includes('escribe VACIAR')) return 'CANCELAR';
+    assert.fail('Pregunta inesperada en doble confirmación de vaciado: ' + tail);
+  });
+  assert.match(purgeAbortedOut, /No se escribió VACIAR: no se elimina nada\./);
+  assert.equal((await second.call('organizar', { accion: 'papelera', carpeta: notesId })).total, 1);
+
+  const purgePending2 = await first.call('organizar', {
+    accion: 'vaciar_papelera', carpeta: notesId, id: trashToPurgeId, motivo: 'Vaciado confirmado dos veces.',
+  });
+  assert.equal(purgePending2.estado, 'pendiente');
+  const purgeConfirmedOut = await runInteractiveCli(['autorizar', '--base', base], tail => {
+    if (tail.includes('¿Eliminar definitivamente?')) return 's';
+    if (tail.includes('escribe VACIAR')) return 'VACIAR';
+    assert.fail('Pregunta inesperada al confirmar vaciado: ' + tail);
+  });
+  assert.match(purgeConfirmedOut, /Eliminado definitivamente\./);
+  assert.equal((await second.call('organizar', { accion: 'papelera', carpeta: notesId })).total, 0);
 
   // Formulario del cliente (elicitación), cancelación y ámbitos dinámicos.
   const decisions = [
@@ -518,6 +695,13 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
       await formClient.notify('notifications/cancelled', { requestId });
     },
     () => ({ action: 'accept', content: { acceso: 'leer', excluir: '' } }),
+    () => ({ action: 'decline' }),
+    () => ({ action: 'accept', content: { confirmar: true } }),
+    () => ({ action: 'accept', content: { confirmar: true } }),
+    () => ({ action: 'accept', content: { texto: 'NO' } }),
+    () => ({ action: 'accept', content: { confirmar: true } }),
+    () => ({ action: 'accept', content: { texto: 'VACIAR' } }),
+    () => ({ action: 'accept', content: { confirmar: true } }),
   ];
   const formClient = await openMcp(url, connector.token, 'cliente con formularios', {
     onElicit(params, identifiers) {
@@ -526,15 +710,75 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
       return decisions.shift()(identifiers);
     },
   });
+  let r3TrashId;
+  let retriedTrashId;
   try {
     const elicitReq = { accion: 'solicitar', ruta: elicitFolder, acceso: 'leer', motivo: 'Probar formulario.' };
     assert.equal((await formClient.call('acceso', elicitReq)).estado, 'rechazado');
     await formClient.denied('acceso', elicitReq, 'REQUEST_CANCELLED');
     const elicitGranted = await formClient.call('acceso', elicitReq);
     assert.equal(elicitGranted.estado, 'autorizado');
-    assert.deepEqual(decisions, []);
     const retiredFormFolder = await formClient.call('acceso', { accion: 'retirar', carpeta: elicitFolder, todo: true });
     assert.equal(retiredFormFolder.estado, 'retirada');
+
+    // Borrado y doble confirmación de vaciado por formulario MCP (elicitación).
+    await first.call('crear', { carpeta: notesId, ruta: 'Formulario.txt', contenido: 'Borrar con formulario.\n' });
+    await first.call('crear', { carpeta: notesId, ruta: 'PapeleraR3.txt', contenido: 'Conservar en papelera para r3.\n' });
+    const declinedDel = await formClient.call('organizar', {
+      accion: 'borrar', carpeta: notesId, ruta: 'Formulario.txt', motivo: 'Rechazar en formulario.',
+    });
+    assert.equal(declinedDel.estado, 'rechazado');
+    const acceptedDel = await formClient.call('organizar', {
+      accion: 'borrar', carpeta: notesId, ruta: 'Formulario.txt', motivo: 'Aceptar en formulario.',
+    });
+    assert.equal(acceptedDel.estado, 'en_papelera');
+    assert.equal((await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: 'Formulario.txt' })).total, 0);
+    const rejectedPurge = await formClient.call('organizar', {
+      accion: 'vaciar_papelera', carpeta: notesId, id: acceptedDel.id, motivo: 'Segundo paso fallido.',
+    });
+    assert.equal(rejectedPurge.estado, 'rechazado');
+    assert.equal((await second.call('organizar', { accion: 'papelera', carpeta: notesId })).total, 1);
+    const acceptedPurge = await formClient.call('organizar', {
+      accion: 'vaciar_papelera', carpeta: notesId, id: acceptedDel.id, motivo: 'Doble confirmación válida.',
+    });
+    assert.equal(acceptedPurge.estado, 'eliminado');
+    assert.equal((await second.call('organizar', { accion: 'papelera', carpeta: notesId })).total, 0);
+    const keepInTrash = await formClient.call('organizar', {
+      accion: 'borrar', carpeta: notesId, ruta: 'PapeleraR3.txt', motivo: 'Queda en papelera al volver a r3.',
+    });
+    assert.equal(keepInTrash.estado, 'en_papelera');
+    r3TrashId = keepInTrash.id;
+
+    // Si el registro de papelera está ocupado, el original queda intacto.
+    // Tras liberar el registro, se pide confirmación de nuevo y r3 lo restaura.
+    if (process.platform === 'win32') {
+      const retryName = 'SinRegistro.txt';
+      const retryContent = 'Conservar recuperable.\n';
+      await first.call('crear', { carpeta: notesId, ruta: retryName, contenido: retryContent });
+      const trashRegistryPath = path.join(base, 'trash-' + notesId + '.json');
+      const previousTrash = await fs.readFile(trashRegistryPath);
+      const args = { accion: 'borrar', carpeta: notesId, ruta: retryName, motivo: 'Probar fallo del registro de papelera.' };
+      decisions.push(() => ({ action: 'accept', content: { confirmar: true } }));
+      const trashLock = await fs.open(trashRegistryPath, 'r+');
+      try {
+        const error = await formClient.denied('organizar', args, 'FILE_IN_USE');
+        assert.match(error.mensaje, /original sigue en su ubicación/);
+      } finally {
+        await trashLock.close();
+      }
+      assert.equal(await fs.readFile(path.join(notes, retryName), 'utf8'), retryContent);
+      assert.deepEqual(await fs.readFile(trashRegistryPath), previousTrash);
+      assert.equal((await second.call('buscar', { en: 'archivos', carpeta: notesId, consulta: retryName })).total, 1);
+      assert.deepEqual((await second.call('organizar', { accion: 'papelera', carpeta: notesId })).elementos.map(item => item.id), [r3TrashId]);
+
+      decisions.push(() => ({ action: 'accept', content: { confirmar: true } }));
+      const retried = await formClient.call('organizar', args);
+      assert.equal(retried.estado, 'en_papelera');
+      assert.equal(retried.papelera?.estado, 'registrado');
+      assert.equal(await fs.readFile(retried.ubicacion_en_papelera, 'utf8'), retryContent);
+      retriedTrashId = retried.id;
+    }
+    assert.deepEqual(decisions, []);
   } finally {
     await formClient.close();
   }
@@ -605,13 +849,14 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     const state = await client.call('estado');
     const entry = state.carpetas.find(item => item.id === notesId);
     assert.deepEqual(entry?.permisos, ['encontrar', 'leer']);
-    assert.equal((await client.call('leer', { carpeta: notesId, ruta: 'Nota.txt' })).contenido, 'Escrita en Rust.\n');
+    assert.equal(entry?.indice?.estado, 'vigente');
+    assert.equal((await client.call('leer', { carpeta: notesId, ruta: 'Archivo/Nota-v2.txt' })).contenido, 'Editada en Rust.\n');
     assert.deepEqual(fields((await client.call('retomar', { id: saved.id })).conversacion), fields(saved));
   }
   await first.denied('crear', { carpeta: notesId, ruta: 'Denegado.txt', contenido: 'x' }, 'ACCESS_NOT_GRANTED');
-  const currentNote = await second.call('leer', { carpeta: notesId, ruta: 'Nota.txt' });
+  const currentNote = await second.call('leer', { carpeta: notesId, ruta: 'Archivo/Nota-v2.txt' });
   await second.denied('modificar', {
-    carpeta: notesId, ruta: 'Nota.txt', version: currentNote.version, contenido: 'No permitido',
+    carpeta: notesId, ruta: 'Archivo/Nota-v2.txt', version: currentNote.version, contenido: 'No permitido',
   }, 'ACCESS_NOT_GRANTED');
 
   // Dejar una solicitud pendiente nueva para comprobar que r3 la conserva tras el corte.
@@ -622,8 +867,22 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
   const pendingPath = path.join(base, 'consent-request-' + pendingForR3.solicitud + '.json');
   const pendingRecord = JSON.parse(await fs.readFile(pendingPath, 'utf8'));
 
+  // Otra interrupción deliberada, ahora con un vínculo que debe resolver r3.
+  // La raíz abierta solo concede permiso durante esa conexión.
+  let recovered = saved;
+  if (process.platform === 'win32') {
+    const editingSession = await openMcp(url, connector.token, 'traslado pendiente para r3', { cwd: notes });
+    const nextRelative = 'Archivo/Retoma-r3.md';
+    try {
+      await moveMarkdown(editingSession, markdownRelative, nextRelative, true);
+    } finally {
+      await editingSession.close();
+    }
+    markdownRelative = nextRelative;
+    markdownPath = path.join(notes, markdownRelative);
+    recovered = { ...saved, archivo: markdownPath, revision: saved.revision + 1 };
+  }
   await assert.rejects(fs.stat(path.join(base, 'sesiones')), { code: 'ENOENT' });
-  const recordPath = path.join(base, 'continuity-' + saved.id + '.json');
   const [record, markdown] = await Promise.all([fs.readFile(recordPath), fs.readFile(markdownPath)]);
   assert.deepEqual(await auxiliaryProcesses(owner.pid), []);
   await fs.stat(path.join(base, 'conector-consola.json'));
@@ -639,12 +898,34 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
   assert.equal(rollback.alreadyRunning, false);
   const r3 = await openMcp(rollback.url, rollback.token, 'retoma tras volver a r3');
   try {
-    assert.deepEqual(fields((await r3.call('conversacion_leer', { id: saved.id })).conversacion), fields(saved));
+    assert.deepEqual(fields((await r3.call('conversacion_leer', { id: saved.id })).conversacion), fields(recovered));
+    await assert.rejects(fs.stat(relocationPath), { code: 'ENOENT' });
+    assert.deepEqual(fields((await r3.call('conversacion_leer', { id: saved.id })).conversacion), fields(recovered));
     assert.equal(await rollback.session.policy.get(extraId), null);
     const notesPolicy = await rollback.session.policy.get(notesId);
     assert.deepEqual(notesPolicy?.access, { encontrar: true, leer: true, escribir: false, organizar: false });
     assert.equal(notesPolicy?.channel, 'consola');
-    assert.equal((await r3.call('leer', { carpeta: notesId, ruta: 'Nota.txt' })).contenido, 'Escrita en Rust.\n');
+    assert.equal((await r3.call('leer', { carpeta: notesId, ruta: 'Archivo/Nota-v2.txt' })).contenido, 'Editada en Rust.\n');
+    assert.equal((await r3.call('leer', { carpeta: notesId, ruta: markdownRelative })).contenido, markdown.toString('utf8'));
+    const r3Search = await r3.call('buscar', { carpetas: [notesId], consulta: 'nota-v2' });
+    assert.deepEqual(r3Search.resultados.map(item => item.ruta), ['Archivo/Nota-v2.txt']);
+    const r3Trash = await r3.call('papelera', { carpeta: notesId });
+    assert.deepEqual(r3Trash.elementos.map(item => ({ id: item.id, ruta: item.ruta })), [
+      ...(retriedTrashId ? [{ id: retriedTrashId, ruta: 'SinRegistro.txt' }] : []),
+      { id: r3TrashId, ruta: 'PapeleraR3.txt' },
+    ]);
+    if (retriedTrashId) {
+      const restoring = await openMcp(rollback.url, rollback.token, 'restaura desde la carpeta abierta', { cwd: notes });
+      try {
+        assert.equal((await restoring.call('restaurar', { carpeta: notesId, id: retriedTrashId })).estado, 'restaurado');
+        assert.equal(await fs.readFile(path.join(notes, 'SinRegistro.txt'), 'utf8'), 'Conservar recuperable.\n');
+      } finally {
+        await restoring.close();
+      }
+      assert.deepEqual((await r3.call('papelera', { carpeta: notesId })).elementos.map(item => item.id), [r3TrashId]);
+    }
+    const r3Removed = await r3.call('eliminados', { carpeta: notesId });
+    assert.ok(r3Removed.eliminados.some(item => item.ruta === 'PapeleraR3.txt'));
     await r3.denied('crear', { carpeta: notesId, ruta: 'Denegado-r3.txt', contenido: 'x' }, 'ACCESS_NOT_GRANTED');
     assert.deepEqual(await rollback.session.policy.getContinuity(), {
       leer: true, registrar: true, channel: 'consola', grantedAt: consent.grantedAt,
@@ -656,7 +937,14 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     await r3.close();
   }
   assert.deepEqual(await fs.readFile(markerPath), marker);
-  assert.deepEqual(await fs.readFile(recordPath), record);
+  if (recovered === saved) {
+    assert.deepEqual(await fs.readFile(recordPath), record);
+  } else {
+    const result = JSON.parse(await fs.readFile(recordPath, 'utf8'));
+    assert.equal(result.content.file, markdownPath);
+    assert.equal(result.revision, JSON.parse(record.toString('utf8')).revision + 1);
+    assert.deepEqual(result.references, JSON.parse(record.toString('utf8')).references);
+  }
   assert.deepEqual(await fs.readFile(markdownPath), markdown);
   t.diagnostic('El lanzador salió | consola 403 MCP con PID Rust ' + owner.pid + ' | r3 ' + r3Commit.slice(0, 7) + ' retomó ' + saved.id);
 });

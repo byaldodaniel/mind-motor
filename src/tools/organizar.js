@@ -160,10 +160,17 @@ export function createOrganizeTools({ session, connection }) {
       if (outcome.status !== 'approved') return { estado: 'rechazado', nota: 'El usuario no confirmó el borrado: no se tocó nada.' };
       const currentFolder = await revalidateOrganize(folder.id, resolveFolder, requireAccess);
       const deleted = await deleteEntry(session, { requester, folder: currentFolder, entry, by: `${source}, confirmado por el usuario`, reason, source });
+      const unrecorded = deleted.trash?.status === 'unrecorded';
       return {
-        estado: 'en_papelera', carpeta: currentFolder.id, ruta: relativePath, id: deleted.trashId,
+        estado: unrecorded ? 'en_papelera_sin_registro' : 'en_papelera',
+        carpeta: currentFolder.id, ruta: relativePath, id: deleted.trashId,
         tipo: TYPE_OUT[deleted.type] ?? deleted.type, ubicacion_en_papelera: absolute(currentFolder.path, deleted.trashPath),
-        nota: 'Se puede restaurar con "restaurar" y este id.',
+        papelera: unrecorded
+          ? { estado: 'sin_registro', codigo: deleted.trash?.code ?? 'TRASH_RECORD_FAILED' }
+          : { estado: 'registrado', codigo: null },
+        nota: unrecorded
+          ? 'El elemento se movió a .papelera-mind y se conserva recuperable en ubicacion_en_papelera, pero no se pudo guardar su registro en la Base.'
+          : 'Se puede restaurar con "restaurar" y este id.',
       };
     },
 
