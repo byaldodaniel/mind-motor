@@ -802,7 +802,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const authorization = await motor.grantTextCreate({ requester, folderId: folder.id, relativePath });
       const created = await motor.createTextFile({
         requester, authorization, content: args.contenido,
-        confirmAccess: () => requireAccess(folder, 'escribir'),
+        confirmAccess: async () => {
+          await requireAccess(folder, 'escribir');
+          await host.confirmFileWrite?.();
+        },
       });
       await session.audit('archivo-creado', { carpeta: folder.id, ruta: relativePath, bytes: created.size, cliente: source });
       const registration=selected ? await rememberOutput(motor,args.conversacion,{path:selected.absolute,type:selected.type,bytes:created.size}) : {estado:'sin_conversacion'};
@@ -812,7 +815,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       };
     },
 
-    async modificar(args) {
+    async modificar(args, host) {
       only(args, ['carpeta', 'ruta', 'version', 'contenido']);
       const folder = await resolveFolder(args.carpeta);
       await requireAccess(folder, 'escribir');
@@ -821,7 +824,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const authorization = await motor.grantTextModify({ requester, folderId: folder.id, relativePath });
       const modified = await motor.modifyTextFile({
         requester, authorization, expectedVersion: text(args.version, 'version', { max: 80 }), content: args.contenido,
-        confirmAccess: () => requireAccess(folder, 'escribir'),
+        confirmAccess: async () => {
+          await requireAccess(folder, 'escribir');
+          await host.confirmFileWrite?.();
+        },
       });
       await session.audit('archivo-modificado', { carpeta: folder.id, ruta: relativePath, anterior: modified.previousVersion, nueva: modified.version, cliente: source });
       return {
@@ -981,9 +987,9 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
         try {
           context?.signal?.throwIfAborted();
           const host = { ...context, requester, consent, resolveFolder, requireAccess, requireContinuity, source, readFile, defaultDirectory:session.layout.userDataDirectory };
-          host.fileTool = (name, input) => {
+          host.fileTool = (name, input, confirmFileWrite) => {
             if (!['crear','modificar','crear_carpeta'].includes(name)) throw new MotorError('UNKNOWN_TOOL','Operación de archivo no válida.');
-            return handlers[name](input,{...host,internalFile:true});
+            return handlers[name](input, { ...host, internalFile: true, confirmFileWrite });
           };
           return await handler(args, host);
         } catch (error) {

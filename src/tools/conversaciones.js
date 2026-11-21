@@ -26,6 +26,12 @@ const preferenceResult = value => ({ revision: value.revision, revision_conversa
   general: preferenceOut(value.global), excepcion: value.override ? preferenceOut(value.override) : null,
   heredada: value.inherited, efectiva: { ...preferenceOut(value.effective), automatica: value.effective.automatic,
     indicaciones: value.effective.guidance, contenido_max_bytes: value.effective.maxContentBytes } });
+function requireRevision(value, revision) {
+  if (value.revision !== revision) {
+    throw new MotorError('CONTINUITY_REVISION_CONFLICT', 'La conversación cambió desde la revisión indicada.');
+  }
+}
+
 const fields = {
   destino: {type:'string',description:'Archivo .md absoluto elegido por el usuario. Omitir conserva el anterior o usa el destino predeterminado de Mind.'},
   solicitado: { type: 'boolean', description: 'true solo si el usuario pidió este guardado expresamente. Obligatorio en modo manual. No acredita identidad.' },
@@ -86,6 +92,26 @@ export function createConversationTools({ session }) {
         const {requireContinuity,source} = context;
         only(args, Object.keys(fields));
         await requireContinuity('leer', 'registrar');
+        const before = args.id === undefined ? null : await motor.getConversation(args.id);
+        const policy = await motor.getConversationPreferences(args.id);
+        if ((policy.effective.mode === 'manual' || args.preferencias?.modo === 'manual') && args.solicitado !== true) throw new MotorError('CONVERSATION_MANUAL_ONLY','El usuario eligió guardar solo cuando lo indique.');
+        const retry = before && args.revision !== undefined
+          && Object.keys(args).every(key => ['id', 'revision', 'solicitado'].includes(key));
+        if (retry) {
+          if (args.solicitado !== undefined && typeof args.solicitado !== 'boolean') {
+            throw new MotorError('INVALID_CONVERSATION', 'solicitado debe ser booleano.');
+          }
+          const revision = integer(args.revision, 'revision', { min: 1 });
+          requireRevision(before, revision);
+          if (!before.file) throw new MotorError('CONVERSATION_FILE_REQUIRED', 'La conversación no tiene un archivo Markdown asignado.');
+          const file = await prepareConversationFile({ motor, before, destination: before.file, context, retry: true });
+          await file.write(before, async () => {
+            await requireContinuity('leer', 'registrar');
+            await file.confirmAccess();
+            requireRevision(await motor.getConversation(before.id), revision);
+          });
+          return { estado: 'archivo_completado', conversacion: output(before) };
+        }
         const input = { source };
         for (const [a, b] of [['id','id'],['revision','expectedRevision'],['titulo','title'],
           ['importante','important'],['proyecto','project'],['agente','agent'],['id_externo','externalId']]) {
@@ -100,9 +126,6 @@ export function createConversationTools({ session }) {
           }
           input.references = referencesIn(args.referencias);
         }
-        const before = args.id === undefined ? null : await motor.getConversation(args.id);
-        const policy = await motor.getConversationPreferences(args.id);
-        if ((policy.effective.mode === 'manual' || args.preferencias?.modo === 'manual') && args.solicitado !== true) throw new MotorError('CONVERSATION_MANUAL_ONLY','El usuario eligió guardar solo cuando lo indique.');
         const destinations=await motor.getWorkDestinations({conversation:args.id,project:args.proyecto??before?.project??undefined});
         const file = await prepareConversationFile({motor,before,destination:args.destino,
           directory:args.preferencias?.carpeta_destino ?? policy.override?.directory
@@ -112,12 +135,19 @@ export function createConversationTools({ session }) {
           ?? session.layout.userDataDirectory,context});
         input.file = file.target;
         await requireContinuity('leer', 'registrar');
-        const value = await motor.saveConversation(input, { confirm: async () => {
+        const value = await motor.saveConversation(input, { markdownBase: file.markdownBase, confirm: async () => {
           await requireContinuity('leer', 'registrar');
           await file.confirmAccess();
         } });
         try { await file.write(value); }
-        catch(error) { return {estado:'pendiente_archivo',conversacion:output(value),archivo:{estado:'pendiente',ruta:file.target,codigo:error.code ?? 'WRITE_FAILED'},nota:'El elemento quedó en continuidad, pero el archivo no pudo actualizarse. No afirmar guardado completo.'}; }
+        catch (error) {
+          return {
+            estado: 'pendiente_archivo', conversacion: output(value),
+            archivo: { estado: 'pendiente', ruta: file.target, codigo: error.code ?? 'WRITE_FAILED' },
+            reintento: { id: value.id, revision: value.revision, ...(args.solicitado === true ? { solicitado: true } : {}) },
+            nota: 'Para completar solo el Markdown, usa actualizar (o conversacion_guardar) con los datos de reintento.',
+          };
+        }
         return { estado: args.id === undefined ? 'registrada' : 'actualizada', conversacion: output(value) };
       },
     },

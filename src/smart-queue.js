@@ -134,11 +134,12 @@ export async function resolveToolResourceKeys(name, args = {}, resolveFolderKey)
   }
 
   if (name === 'conversacion_configurar') {
-    return [`conversation-config:${hasText(args?.id) ? args.id : 'global'}`];
+    return [hasText(args?.id) ? `conversation:${args.id}` : 'conversation-config:global'];
   }
 
   if (name === 'conversaciones_preparar') return ['conversation-search-prep'];
   if (name === 'destinos_configurar') return ['destinations-config'];
+  if (name === 'continuidad_actualizar' && hasText(args?.id)) return ['continuity', `conversation:${args.id}`];
   if (CONTINUITY_TOOLS.has(name)) return ['continuity'];
   if (name === 'crear_respaldo') return ['backup'];
 

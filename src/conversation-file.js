@@ -13,8 +13,12 @@ export function matchesConversationMarkdown(text, value) {
       || Number(marker[2]) > value.revision) return false;
   return text.slice(marker[0].length) === conversationMarkdown(value).replace(/^[^\n]*\n/, '');
 }
+const fileConflict = () => new MotorError('CONVERSATION_FILE_CONFLICT',
+  'El archivo existe o fue editado fuera de Mind. Se conserva intacto: elige otro destino o revisa su contenido antes de actualizar.');
+const fileRaces = new Set(['FILE_EXISTS', 'FILE_NOT_FOUND', 'VERSION_CONFLICT']);
+
 // Las únicas escrituras pasan por las herramientas seguras y sus permisos.
-export async function prepareConversationFile({ motor, before, destination, directory, context }) {
+export async function prepareConversationFile({ motor, before, destination, directory, context, retry = false }) {
   const folders = await motor.listAuthorizedFolders();
   let target = destination ?? before?.file;
   if (!target) {
@@ -42,8 +46,15 @@ export async function prepareConversationFile({ motor, before, destination, dire
   let previous;
   try { previous = await context.readFile(folder,relative); }
   catch(error) { if(error.code !== 'FILE_NOT_FOUND') throw error; }
-  if (previous && (!before || before.file !== target || !matchesConversationMarkdown(previous.content, before))) {
-    throw new MotorError('CONVERSATION_FILE_CONFLICT','El archivo existe o fue editado fuera de Mind. Se conserva intacto: elige otro destino o revisa su contenido antes de actualizar.');
+  const version = previous?.version ?? null;
+  const matches = previous && before?.file === target && matchesConversationMarkdown(previous.content, before);
+  if (retry) {
+    const baseline = before.markdownBase;
+    // Antes de registrar huellas, solo es demostrable la ausencia o un Markdown ya sincronizado.
+    const expected = baseline?.file === target ? baseline.version : null;
+    if (!matches && version !== expected) throw fileConflict();
+  } else if (previous && !matches) {
+    throw fileConflict();
   }
   const components = relative.split('/').slice(0,-1);
   for (let i=1;i<=components.length;i++) {
@@ -51,10 +62,28 @@ export async function prepareConversationFile({ motor, before, destination, dire
     try { await context.fileTool('crear_carpeta',{carpeta:folder.id,ruta:route}); }
     catch(error) { if (!['ENTRY_EXISTS','FILE_EXISTS','DIRECTORY_EXISTS','DESTINATION_EXISTS','TARGET_EXISTS'].includes(error.code)) throw error; }
   }
-  return { target, confirmAccess: () => context.requireAccess(folder, 'leer', 'escribir'), async write(value) {
-    const args = {carpeta:folder.id,ruta:relative,contenido:conversationMarkdown(value)};
-    return previous
-      ? context.fileTool('modificar',{...args,version:previous.version})
-      : context.fileTool('crear',args);
-  }};
+  return {
+    target, markdownBase: { file: target, version },
+    confirmAccess: () => context.requireAccess(folder, 'leer', 'escribir'),
+    async write(value, confirm) {
+      const content = conversationMarkdown(value);
+      if (retry && matches) {
+        await confirm();
+        return;
+      }
+      const args = { carpeta: folder.id, ruta: relative, contenido: content };
+      try {
+        if (previous) await context.fileTool('modificar', { ...args, version }, confirm);
+        else await context.fileTool('crear', args, confirm);
+      } catch (error) {
+        if (!retry || !fileRaces.has(error.code)) throw error;
+        const current = await context.readFile(folder, relative).catch(error => {
+          if (error.code !== 'FILE_NOT_FOUND') throw error;
+          return null;
+        });
+        if (current?.content !== content) throw fileConflict();
+        await confirm();
+      }
+    },
+  };
 }

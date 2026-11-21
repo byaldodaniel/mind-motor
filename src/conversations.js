@@ -37,6 +37,9 @@ function loadMeaningCorpus(db, project) {
   return db.prepare('SELECT id,revision,updated,title,project,important FROM conversations' + scope + ' ORDER BY id').all(...args);
 }
 function content(input) {
+  const markdownBase = input.markdownBase;
+  const validMarkdownBase = typeof input.file === 'string' && markdownBase?.file === input.file
+    && (markdownBase.version === null || typeof markdownBase.version === 'string' && /^sha256:[a-f0-9]{64}$/.test(markdownBase.version));
   return {
     format: FORMAT, version: 1,
     title: text(input.title, 'title'),
@@ -44,6 +47,7 @@ function content(input) {
     project: text(input.project, 'project', { nullable: true }),
     agent: text(input.agent, 'agent', { nullable: true }),
     ...(input.file === undefined ? {} : { file: text(input.file, 'file', {max:4096}) }),
+    ...(validMarkdownBase ? { markdownBase: { file: input.file, version: markdownBase.version } } : {}),
     externalId: text(input.externalId, 'externalId', { nullable: true, max: 512 }),
     ...(input.preferences == null ? {} : { preferences: retention(input.preferences) }),
   };
@@ -134,7 +138,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     return conversation;
   }
 
-  async function saveConversationUnlocked(input, { confirm } = {}) {
+  async function saveConversationUnlocked(input, { confirm, markdownBase } = {}) {
     const allowed = ['id', 'expectedRevision', 'title', 'important', 'project', 'agent', 'externalId', 'references', 'source', 'preferences', 'explicit', 'file'];
     if (!input || typeof input !== 'object' || Array.isArray(input)
         || Object.keys(input).some(key => !allowed.includes(key))) fail('INVALID_CONVERSATION', 'Campos de conversación no válidos.');
@@ -149,7 +153,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     if (input.id === undefined) {
       if (input.expectedRevision !== undefined) fail('INVALID_CONVERSATION', 'Una conversación nueva no indica revisión previa.');
       const entry = await continuity.recordContinuity({
-        kind: 'conversacion', content: content(input), source: input.source,
+        kind: 'conversacion', content: content({ ...input, markdownBase }), source: input.source,
         references: input.references,
       }, { confirm });
       return asConversation(entry);
@@ -160,8 +164,11 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     }
     // La lectura-modificación del JSON se coordina en continuidad, incluyendo
     // las escrituras hechas por las herramientas genéricas de continuidad.
-    const next = content(Object.fromEntries(['title', 'important', 'project', 'agent', 'externalId', 'preferences', 'file']
-      .map(key => [key, Object.hasOwn(input, key) ? input[key] : before[key]])));
+    const fields = ['title', 'important', 'project', 'agent', 'externalId', 'preferences', 'file'];
+    const next = content({
+      ...Object.fromEntries(fields.map(key => [key, Object.hasOwn(input, key) ? input[key] : before[key]])),
+      markdownBase,
+    });
     const entry = await continuity.updateContinuity(input.id, {
       content: next, ...(input.references !== undefined ? { references: input.references } : {}),
     }, { expectedRevision: input.expectedRevision, confirm });

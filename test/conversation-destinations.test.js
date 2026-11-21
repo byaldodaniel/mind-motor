@@ -50,3 +50,50 @@ test('manual no crea carpeta; un destino externo no concede permisos',async t=>{
  assert.equal((await f.call('conversacion_guardar',{titulo:'No',importante:'No guardar.',solicitado:true,destino:path.join(f.root,'fuera.md')})).code,'FOLDER_NOT_AUTHORIZED');
  assert.equal((await f.session.motor.listContinuityIds()).length,0);
 });
+
+test('completa un Markdown ausente tras retomar, sin otro registro ni sobrescritura', async t => {
+  const f = await setup(t);
+  const target = path.join(f.folder, 'Pendiente.md');
+  const faultyCall = f.agent({
+    ...f.session,
+    motor: {
+      ...f.session.motor,
+      async createTextFile() {
+        throw Object.assign(new Error('Fallo ficticio de Markdown'), { code: 'CREATE_FAILED' });
+      },
+    },
+  }, connection());
+  const saved = await faultyCall('conversacion_guardar', {
+    titulo: 'Nota ficticia', importante: 'Conservar este contenido.', destino: target,
+  });
+  assert.equal(saved.data.estado, 'pendiente_archivo', saved.text);
+  const id = saved.data.conversacion.id;
+  assert.deepEqual(saved.data.reintento, { id, revision: 1 });
+  const record = path.join(f.layout.baseDirectory, 'continuity-' + id + '.json');
+  const originalRecord = await fs.readFile(record);
+  await assert.rejects(fs.stat(target), { code: 'ENOENT' });
+  await f.session.close();
+
+  const reopened = await f.open();
+  const call = f.agent(reopened, connection());
+  await fs.writeFile(target, 'Archivo de otra persona', { flag: 'wx' });
+  const conflict = await call('conversacion_guardar', saved.data.reintento);
+  assert.equal(conflict.code, 'CONVERSATION_FILE_CONFLICT', conflict.text);
+  assert.equal(await fs.readFile(target, 'utf8'), 'Archivo de otra persona');
+  await fs.unlink(target);
+
+  const retries = await Promise.all([
+    call('conversacion_guardar', saved.data.reintento),
+    call('conversacion_guardar', saved.data.reintento),
+  ]);
+  for (const result of retries) {
+    assert.equal(result.data.estado, 'archivo_completado', result.text);
+    assert.deepEqual(result.data.conversacion, saved.data.conversacion);
+  }
+  const markdown = await fs.readFile(target, 'utf8');
+  assert.equal(markdown, '<!-- mind-conversation:' + id + ' revision:1 -->\n# Nota ficticia\n\nConservar este contenido.\n');
+  assert.equal((await call('conversacion_guardar', saved.data.reintento)).data.estado, 'archivo_completado');
+  assert.equal(await fs.readFile(target, 'utf8'), markdown);
+  assert.deepEqual(await fs.readFile(record), originalRecord);
+  assert.deepEqual(await reopened.motor.listContinuityIds(), [id]);
+});

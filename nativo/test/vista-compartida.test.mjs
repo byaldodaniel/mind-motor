@@ -341,6 +341,46 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
       assert.equal(JSON.parse(await fs.readFile(storedPath, 'utf8')).revision, saved.revision);
       assert.equal(await fs.readFile(saved.archivo, 'utf8'),
         '<!-- mind-conversation:' + saved.id + ' revision:2 -->\n# ' + saved.titulo + '\n\n' + saved.importante + '\n');
+
+      if (process.platform === 'win32') {
+        const oldMarkdown = await fs.readFile(saved.archivo, 'utf8');
+        const handle = await fs.open(saved.archivo, 'r+');
+        let pending;
+        try {
+          pending = await second.call('actualizar', { ...update, revision: saved.revision, importante: 'Nota pendiente recuperada.' });
+        } finally {
+          await handle.close();
+        }
+        assert.equal(pending.estado, 'pendiente_archivo');
+        assert.equal(pending.archivo.codigo, 'FILE_IN_USE');
+        assert.deepEqual(pending.reintento, { id: saved.id, revision: 3 });
+        assert.equal(await fs.readFile(saved.archivo, 'utf8'), oldMarkdown);
+        const record = await fs.readFile(storedPath);
+        const ids = (await fs.readdir(base)).filter(name => /^continuity-/.test(name));
+
+        const edited = oldMarkdown + 'Cambio externo que debe conservarse.\n';
+        await fs.writeFile(saved.archivo, edited);
+        await second.call('actualizar', pending.reintento, 'CONVERSATION_FILE_CONFLICT');
+        assert.equal(await fs.readFile(saved.archivo, 'utf8'), edited);
+        await fs.unlink(saved.archivo);
+        await second.call('actualizar', pending.reintento, 'CONVERSATION_FILE_CONFLICT');
+        await assert.rejects(fs.stat(saved.archivo), { code: 'ENOENT' });
+        await fs.writeFile(saved.archivo, oldMarkdown, { flag: 'wx' });
+
+        await second.call('actualizar', { ...pending.reintento, revision: 2 }, 'CONTINUITY_REVISION_CONFLICT');
+        const repaired = await second.call('actualizar', pending.reintento);
+        assert.equal(repaired.estado, 'archivo_completado');
+        assert.deepEqual(repaired.conversacion, pending.conversacion);
+        const markdown = await fs.readFile(saved.archivo, 'utf8');
+        assert.equal(markdown, '<!-- mind-conversation:' + saved.id + ' revision:3 -->\n# '
+          + saved.titulo + '\n\n' + pending.conversacion.importante + '\n');
+        assert.equal((await second.call('actualizar', pending.reintento)).estado, 'archivo_completado');
+        assert.equal(await fs.readFile(saved.archivo, 'utf8'), markdown);
+        assert.deepEqual(await fs.readFile(storedPath), record);
+        assert.deepEqual((await fs.readdir(base)).filter(name => /^continuity-/.test(name)), ids);
+        saved = (await second.call('retomar', { id: saved.id })).conversacion;
+        assert.deepEqual(saved, { ...pending.conversacion, resultados: [] });
+      }
     }
   } finally {
     await second.close();

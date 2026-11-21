@@ -233,7 +233,13 @@ Las herramientas normales conservan permisos, revisiones y destinos. El
 anfitrión abre el archivo de forma segura y espera que el Motor confirme el
 permiso. El JSON y el Markdown se publican en el orden habitual, con una
 operación atómica por archivo y el estado explícito de Markdown pendiente si
-falla ese paso. Una vez elegido Rust, el guardado depende de ese anfitrión.
+falla ese paso. Para completar el archivo, pasa el objeto `reintento` a
+`actualizar` (o a `conversacion_guardar` en el catálogo completo). El ID y la
+revisión se mantienen. Mind solo sustituye un Markdown cuando coincide con la
+huella guardada antes del fallo. Si ya contiene la nota, confirma sin escribir
+otra vez. Para registros anteriores que carecen de huella, un Markdown
+existente con contenido distinto se conserva. Una vez elegido Rust, el
+guardado depende de ese anfitrión.
 
 Para comprobar permisos, creación, actualización y vuelta a r3 con una Base
 ficticia y `MIND_NATIVE_EXE` definido:
