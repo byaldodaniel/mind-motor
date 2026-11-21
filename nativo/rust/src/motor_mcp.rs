@@ -1,35 +1,191 @@
-use std::{collections::HashMap, convert::Infallible, sync::Arc, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    pin::Pin,
+    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::{body::Incoming, header::{self, HeaderValue}, Method, Request, Response, StatusCode};
+use futures_util::Stream;
+use http_body_util::{BodyExt, Full, Limited, StreamBody};
+use hyper::{body::{Frame, Incoming}, header::{self, HeaderValue}, Method, Request, Response, StatusCode};
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Notify};
 use uuid::Uuid;
 
-use crate::{host::{full, Body}, motor_native::Motor, MAX_MESSAGE};
+use crate::{
+    host::{full, Body},
+    motor_consent::Prepared,
+    motor_native::{Fault, Motor},
+    motor_workspace::{with_workspace, Workspace},
+    MAX_MESSAGE,
+};
 
 const SESSION_HEADER: &str = "mcp-session-id";
 const SESSION_IDLE: Duration = Duration::from_secs(15 * 60);
+const ROOTS_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const TOOLS: &[&str] = &[
-    "estado", "retomar", "buscar", "leer", "crear", "modificar", "guardar", "actualizar",
+    "estado", "retomar", "buscar", "leer", "crear", "modificar", "guardar", "actualizar", "acceso",
 ];
+
+struct Session {
+    seen: Instant,
+    context: Arc<SessionContext>,
+}
+
+struct SessionContext {
+    protocol: &'static str,
+    form: bool,
+    client: Option<Value>,
+    scope: Mutex<Scope>,
+    refresh: Option<tokio::sync::Mutex<()>>,
+    live: AtomicBool,
+    pending: Mutex<Pending>,
+}
+
+struct Scope {
+    workspace: Workspace,
+    generation: u64,
+    resolved: bool,
+}
+
+#[derive(Default)]
+struct Pending {
+    replies: HashMap<Uuid, oneshot::Sender<Result<Value, Fault>>>,
+    calls: HashMap<Uuid, Arc<StreamCall>>,
+}
+
+struct StreamCall {
+    id: Value,
+    active: AtomicBool,
+    cancelled: Notify,
+}
+
+impl StreamCall {
+    fn cancel(&self) {
+        self.active.store(false, Ordering::Release);
+        self.cancelled.notify_one();
+    }
+}
+
+impl SessionContext {
+    fn close(&self) {
+        self.live.store(false, Ordering::Release);
+        let mut pending = self.pending.lock().unwrap();
+        for call in pending.calls.values() {
+            call.cancel();
+        }
+        pending.replies.clear();
+        pending.calls.clear();
+    }
+
+    fn workspace(&self) -> Workspace {
+        self.scope.lock().unwrap().workspace.clone()
+    }
+
+    fn receive(&self, message: &Value) -> bool {
+        if message["jsonrpc"] != "2.0" {
+            return false;
+        }
+        if message.get("method").is_none() {
+            let result = message.get("result");
+            let error = message.get("error");
+            if result.is_some() == error.is_some() {
+                return false;
+            }
+            let Some(id) = message["id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) else {
+                return false;
+            };
+            if let Some(reply) = self.pending.lock().unwrap().replies.remove(&id) {
+                let answer = result.cloned().ok_or_else(|| Fault::new("CLIENT_ERROR", "El cliente rechazó la solicitud."));
+                let _ = reply.send(answer);
+            }
+            return true;
+        }
+        if message.get("id").is_some() {
+            return false;
+        }
+        match message["method"].as_str() {
+            Some("notifications/cancelled") => {
+                if let Some(target) = message.pointer("/params/requestId") {
+                    for call in self.pending.lock().unwrap().calls.values() {
+                        if &call.id == target {
+                            call.cancel();
+                        }
+                    }
+                }
+            }
+            Some("notifications/roots/list_changed") if self.refresh.is_some() => {
+                let mut scope = self.scope.lock().unwrap();
+                scope.generation += 1;
+                scope.resolved = false;
+                scope.workspace.roots.clear();
+                scope.workspace.user_data = None;
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+struct CallGuard<'a> {
+    session: &'a SessionContext,
+    key: Uuid,
+    call: Arc<StreamCall>,
+}
+
+impl Drop for CallGuard<'_> {
+    fn drop(&mut self) {
+        self.call.cancel();
+        self.session.pending.lock().unwrap().calls.remove(&self.key);
+    }
+}
+
+struct ReplyGuard<'a> {
+    session: &'a SessionContext,
+    id: Uuid,
+}
+
+impl Drop for ReplyGuard<'_> {
+    fn drop(&mut self) {
+        self.session.pending.lock().unwrap().replies.remove(&self.id);
+    }
+}
 
 /// El anfitrión valida el origen y el token antes de entregar la petición.
 pub(crate) struct Mcp {
-    sessions: Mutex<HashMap<Uuid, Instant>>,
+    sessions: tokio::sync::Mutex<HashMap<Uuid, Session>>,
+}
+
+fn prune(sessions: &mut HashMap<Uuid, Session>) {
+    sessions.retain(|_, session| {
+        if session.seen.elapsed() < SESSION_IDLE {
+            return true;
+        }
+        session.context.close();
+        false
+    });
 }
 
 impl Mcp {
     pub(crate) fn new() -> Self {
-        Self { sessions: Mutex::new(HashMap::new()) }
+        Self { sessions: tokio::sync::Mutex::new(HashMap::new()) }
+    }
+
+    pub(crate) async fn count(&self) -> usize {
+        let mut sessions = self.sessions.lock().await;
+        prune(&mut sessions);
+        sessions.len()
     }
 
     pub(crate) async fn handle(&self, req: Request<Incoming>, motor: Arc<Motor>) -> Response<Body> {
         let (parts, incoming) = req.into_parts();
         if parts.method != Method::POST && parts.method != Method::DELETE {
-            // Este catálogo no inicia solicitudes al cliente ni necesita un stream SSE.
             let mut response = full(StatusCode::METHOD_NOT_ALLOWED, json!({"error": "METHOD_NOT_ALLOWED"}));
             response.headers_mut().insert(header::ALLOW, HeaderValue::from_static("POST, DELETE"));
             return response;
@@ -40,14 +196,15 @@ impl Mcp {
                 let id = value.to_str().ok().and_then(|value| Uuid::parse_str(value).ok());
                 let Some(id) = id else { return missing_session() };
                 let mut sessions = self.sessions.lock().await;
-                sessions.retain(|_, seen| seen.elapsed() < SESSION_IDLE);
-                let Some(seen) = sessions.get_mut(&id) else { return missing_session() };
+                prune(&mut sessions);
+                let Some(session) = sessions.get_mut(&id) else { return missing_session() };
                 if parts.method == Method::DELETE {
+                    session.context.close();
                     sessions.remove(&id);
                     return full(StatusCode::OK, json!({"closed": true}));
                 }
-                *seen = Instant::now();
-                Some(id)
+                session.seen = Instant::now();
+                Some((id, Arc::clone(&session.context)))
             }
             None if parts.method == Method::DELETE => {
                 return full(StatusCode::BAD_REQUEST, json!({"error": "MISSING_SESSION_ID"}));
@@ -68,9 +225,13 @@ impl Mcp {
         };
 
         match session {
-            Some(id) => with_session(dispatch(&message, &motor).await, id),
+            Some((id, context)) => {
+                let sse = parts.headers.get_all(header::ACCEPT).iter().filter_map(|value| value.to_str().ok())
+                    .any(|value| value.split(',').any(|media| media.trim() == "text/event-stream"));
+                with_session(dispatch(&message, &motor, &context, sse).await, id)
+            }
             None if message.get("method").and_then(Value::as_str) == Some("initialize") => {
-                self.initialize(&message).await
+                self.initialize(&message, &parts.headers, motor).await
             }
             None if message.get("method").and_then(Value::as_str) == Some("server/discover") => {
                 full(StatusCode::NOT_FOUND, json!({"error": "DISCOVERY_NOT_SUPPORTED"}))
@@ -82,7 +243,7 @@ impl Mcp {
         }
     }
 
-    async fn initialize(&self, message: &Value) -> Response<Body> {
+    async fn initialize(&self, message: &Value, headers: &hyper::HeaderMap, motor: Arc<Motor>) -> Response<Body> {
         let id = request_id(message).unwrap_or(Value::Null);
         if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || id.is_null() {
             return full(StatusCode::BAD_REQUEST, rpc_error(id, -32600, "Mensaje JSON-RPC no válido."));
@@ -92,13 +253,43 @@ impl Mcp {
         if !params.is_object() {
             return full(StatusCode::BAD_REQUEST, rpc_error(id, -32602, "params debe ser un objeto."));
         }
-        let protocol = params.get("protocolVersion").and_then(Value::as_str)
-            .filter(|version| PROTOCOLS.contains(version)).unwrap_or(PROTOCOLS[0]);
+        let requested = params.get("protocolVersion").and_then(Value::as_str);
+        let protocol = PROTOCOLS.iter().copied().find(|version| Some(*version) == requested).unwrap_or(PROTOCOLS[0]);
+        let form = params.pointer("/capabilities/elicitation").and_then(Value::as_object)
+            .is_some_and(|elicitation| elicitation.is_empty() || elicitation.get("form").is_some_and(Value::is_object));
+        let client = params.get("clientInfo").filter(|client| client.is_object()).cloned();
+        let (paths, cwd) = match declared_paths(headers.get("x-mind-workspace")) {
+            Ok(declared) => declared,
+            Err(()) => return full(StatusCode::BAD_REQUEST, rpc_error(id, -32602, "Carpeta de trabajo no válida.")),
+        };
+        let roots = paths.is_empty() && params.pointer("/capabilities/roots").is_some_and(Value::is_object);
+        let open_scope = tokio::task::spawn_blocking(move || {
+            if roots || !paths.is_empty() {
+                return motor.workspace(&paths, true);
+            }
+            if let Some(cwd) = cwd {
+                let candidate = motor.workspace(&[cwd], true)?;
+                if candidate.has_roots() {
+                    return Ok(candidate);
+                }
+            }
+            motor.workspace(&[], false)
+        });
+        let workspace = match open_scope.await {
+            Ok(Ok(workspace)) => workspace,
+            Ok(Err(error)) => return full(StatusCode::BAD_REQUEST, rpc_error(id, -32602, &error.message)),
+            Err(_) => return full(StatusCode::INTERNAL_SERVER_ERROR, rpc_error(id, -32603, "Mind no pudo abrir la sesión.")),
+        };
         let session = Uuid::new_v4();
+        let context = Arc::new(SessionContext {
+            protocol, form, client, live: AtomicBool::new(true),
+            scope: Mutex::new(Scope { workspace, generation: 0, resolved: !roots }),
+            refresh: roots.then(|| tokio::sync::Mutex::new(())),
+            pending: Mutex::new(Pending::default()),
+        });
         let mut sessions = self.sessions.lock().await;
-        sessions.retain(|_, seen| seen.elapsed() < SESSION_IDLE);
-        sessions.insert(session, Instant::now());
-        drop(sessions);
+        prune(&mut sessions);
+        sessions.insert(session, Session { seen: Instant::now(), context });
         let result = json!({
             "protocolVersion": protocol,
             "capabilities": { "tools": { "listChanged": false } },
@@ -109,9 +300,43 @@ impl Mcp {
     }
 }
 
-async fn dispatch(message: &Value, motor: &Arc<Motor>) -> Response<Body> {
+fn declared_paths(value: Option<&HeaderValue>) -> Result<(Vec<String>, Option<String>), ()> {
+    let Some(value) = value else { return Ok((Vec::new(), None)) };
+    let raw = URL_SAFE_NO_PAD.decode(value.as_bytes()).map_err(|_| ())?;
+    let workspace: Value = serde_json::from_slice(&raw).map_err(|_| ())?;
+    let object = workspace.as_object().ok_or(())?;
+    let mut paths = Vec::new();
+    if let Some(entries) = object.get("paths") {
+        for path in entries.as_array().ok_or(())? {
+            let path = path.as_str().ok_or(())?;
+            if !path.trim().is_empty() {
+                paths.push(path.to_owned());
+            }
+        }
+    }
+    let cwd = object.get("cwd").and_then(Value::as_str).filter(|cwd| !cwd.trim().is_empty()).map(str::to_owned);
+    Ok((paths, cwd))
+}
+
+fn is_call(message: &Value) -> bool {
+    message["jsonrpc"] == "2.0" && message["method"] == "tools/call"
+}
+
+async fn dispatch(
+    message: &Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, sse: bool,
+) -> Response<Body> {
     let Some(messages) = message.as_array() else {
-        return match dispatch_one(message, motor).await {
+        if let Some(id) = request_id(message).filter(|_| is_call(message)) {
+            let is_access = message.pointer("/params/name").is_some_and(|name| name == "acceso");
+            let roots = !session.scope.lock().unwrap().resolved;
+            if sse && (roots || (is_access && session.form && message.pointer("/params/arguments/accion").and_then(Value::as_str) != Some("retirar"))) {
+                return stream_call(message.clone(), id, Arc::clone(motor), Arc::clone(session));
+            }
+            if is_access {
+                return full(StatusCode::OK, access(message, id, motor, session, None).await);
+            }
+        }
+        return match dispatch_one(message, motor, session).await {
             Some(reply) => full(StatusCode::OK, reply),
             None => accepted(),
         };
@@ -121,14 +346,17 @@ async fn dispatch(message: &Value, motor: &Arc<Motor>) -> Response<Body> {
     }
     let mut replies = Vec::new();
     for message in messages {
-        if let Some(reply) = dispatch_one(message, motor).await {
+        if let Some(reply) = dispatch_one(message, motor, session).await {
             replies.push(reply);
         }
     }
     if replies.is_empty() { accepted() } else { full(StatusCode::OK, json!(replies)) }
 }
 
-async fn dispatch_one(message: &Value, motor: &Arc<Motor>) -> Option<Value> {
+async fn dispatch_one(message: &Value, motor: &Arc<Motor>, session: &Arc<SessionContext>) -> Option<Value> {
+    if session.receive(message) {
+        return None;
+    }
     let id = request_id(message);
     if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Some(rpc_error(id.unwrap_or(Value::Null), -32600, "Mensaje JSON-RPC no válido."));
@@ -136,7 +364,6 @@ async fn dispatch_one(message: &Value, motor: &Arc<Motor>) -> Option<Value> {
     let Some(method) = message.get("method").and_then(Value::as_str) else {
         return Some(rpc_error(id.unwrap_or(Value::Null), -32600, "Mensaje JSON-RPC no válido."));
     };
-    // notifications/initialized confirma el inicio de un catálogo fijo.
     let id = match id {
         Some(id) => id,
         None if message.get("id").is_none() => return None,
@@ -154,21 +381,215 @@ async fn dispatch_one(message: &Value, motor: &Arc<Motor>) -> Option<Value> {
             let Some(name) = params.get("name").and_then(Value::as_str).filter(|name| TOOLS.contains(name)) else {
                 return Some(rpc_error(id, -32602, "Herramienta desconocida."));
             };
+            if name == "acceso" {
+                return Some(rpc_error(id, -32602, "Envía la solicitud de acceso en una petición individual."));
+            }
             let args = params.get("arguments").unwrap_or(&empty);
             if !args.is_object() {
                 return Some(rpc_error(id, -32602, "arguments debe ser un objeto."));
             }
             let motor = Arc::clone(motor);
+            let session = Arc::clone(session);
             let (name, args) = (name.to_owned(), args.clone());
-            match tokio::task::spawn_blocking(move || motor.call(&name, args)).await {
-                Ok(Ok(value)) => tool_result(value, false),
-                Ok(Err(error)) => tool_result(json!({"error": {"codigo": error.code, "mensaje": error.message}}), true),
-                Err(_) => tool_result(json!({"error": {"codigo": "ERROR_INTERNO", "mensaje": "Mind no pudo completar la operación."}}), true),
-            }
+            let result = tokio::task::spawn_blocking(move || {
+                if !session.live.load(Ordering::Acquire) { return Err(closed()); }
+                with_workspace(&session.workspace(), || motor.call(&name, args))
+            }).await.unwrap_or_else(|_| Err(internal()));
+            tool_reply(result)
         }
         _ => return Some(rpc_error(id, -32601, "Método no admitido.")),
     };
     Some(rpc_result(id, result))
+}
+
+struct ServerEvents<'a> {
+    session: &'a SessionContext,
+    sender: &'a mpsc::Sender<Frame<Bytes>>,
+    call: Arc<StreamCall>,
+}
+
+impl ServerEvents<'_> {
+    async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, Fault> {
+        if !self.session.live.load(Ordering::Acquire) {
+            return Err(closed());
+        }
+        if !self.call.active.load(Ordering::Acquire) {
+            return Err(cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        let request = ReplyGuard { session: self.session, id: Uuid::new_v4() };
+        self.session.pending.lock().unwrap().replies.insert(request.id, reply);
+        self.sender.send(frame(json!({
+            "jsonrpc": "2.0", "id": request.id.to_string(), "method": method, "params": params,
+        }))).await.map_err(|_| closed())?;
+        match tokio::time::timeout(timeout, answer).await {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(_)) => Err(closed()),
+            Err(_) => Err(Fault::new("CLIENT_TIMEOUT", "El cliente no respondió a tiempo.")),
+        }
+    }
+}
+
+fn stream_call(message: Value, id: Value, motor: Arc<Motor>, session: Arc<SessionContext>) -> Response<Body> {
+    let (sender, receiver) = mpsc::channel(2);
+    let key = Uuid::new_v4();
+    let call = Arc::new(StreamCall { id: id.clone(), active: AtomicBool::new(true), cancelled: Notify::new() });
+    session.pending.lock().unwrap().calls.insert(key, Arc::clone(&call));
+    tokio::spawn(async move {
+        let _guard = CallGuard { session: &session, key, call: Arc::clone(&call) };
+        let events = ServerEvents { session: &session, sender: &sender, call: Arc::clone(&call) };
+        let reply = tokio::select! {
+            biased;
+            _ = sender.closed() => return,
+            _ = call.cancelled.notified() => {
+                let error = if session.live.load(Ordering::Acquire) { cancelled() } else { closed() };
+                rpc_result(id.clone(), tool_reply(Err(error)))
+            }
+            result = async {
+                refresh_roots(&motor, &session, &events).await;
+                let is_access = message.pointer("/params/name").is_some_and(|name| name == "acceso");
+                if is_access {
+                    access(&message, id.clone(), &motor, &session, Some(&events)).await
+                } else {
+                    dispatch_one(&message, &motor, &session).await
+                        .unwrap_or_else(|| rpc_error(id.clone(), -32600, "Mensaje JSON-RPC no válido."))
+                }
+            } => result,
+        };
+        let _ = sender.send(frame(reply)).await;
+    });
+    let body = StreamBody::new(EventStream(receiver)).boxed();
+    let mut response = Response::new(body);
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+}
+
+async fn refresh_roots(motor: &Arc<Motor>, session: &Arc<SessionContext>, events: &ServerEvents<'_>) {
+    let Some(refresh) = &session.refresh else { return };
+    let _refresh = refresh.lock().await;
+    let generation = {
+        let scope = session.scope.lock().unwrap();
+        if scope.resolved { return; }
+        scope.generation
+    };
+    let result = events.request("roots/list", json!({}), ROOTS_TIMEOUT).await;
+    let workspace = match result.ok().and_then(root_paths) {
+        Some(paths) => {
+            let motor = Arc::clone(motor);
+            tokio::task::spawn_blocking(move || motor.workspace(&paths, true)).await.ok().and_then(Result::ok)
+        }
+        None => None,
+    };
+    let mut scope = session.scope.lock().unwrap();
+    if scope.generation == generation && events.call.active.load(Ordering::Acquire) && session.live.load(Ordering::Acquire) {
+        if let Some(workspace) = workspace {
+            scope.workspace = workspace;
+        }
+        scope.resolved = true;
+    }
+}
+
+fn root_paths(result: Value) -> Option<Vec<String>> {
+    let roots = result["roots"].as_array()?;
+    if roots.len() > 64 {
+        return None;
+    }
+    roots.iter().map(|root| {
+        let url = reqwest::Url::parse(root["uri"].as_str()?).ok()?;
+        if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
+            return None;
+        }
+        url.to_file_path().ok()?.into_os_string().into_string().ok()
+    }).collect()
+}
+
+async fn access(
+    message: &Value, id: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Value {
+    let args = message.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+    if !args.is_object() {
+        return rpc_error(id, -32602, "arguments debe ser un objeto.");
+    }
+    let result = run_access(args, motor, session, events).await;
+    rpc_result(id, tool_reply(result))
+}
+
+async fn run_access(
+    args: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Result<Value, Fault> {
+    let (workspace, generation) = {
+        let scope = session.scope.lock().unwrap();
+        (scope.workspace.clone(), scope.generation)
+    };
+    let call = events.map(|events| Arc::clone(&events.call));
+    let prepare = tokio::task::spawn_blocking({
+        let (motor, session, workspace, call) = (Arc::clone(motor), Arc::clone(session), workspace.clone(), call.clone());
+        move || {
+            session.ensure_active(call.as_deref(), generation)?;
+            with_workspace(&workspace, || {
+                if args["accion"] == "retirar" {
+                    return motor.call("acceso", args).map(Prepared::Authorized);
+                }
+                motor.prepare_access(args, session.client.as_ref())
+            })
+        }
+    });
+    let request = match prepare.await.map_err(|_| internal())?? {
+        Prepared::Authorized(value) => return Ok(value),
+        Prepared::Request(request) => request,
+    };
+    let answer = match events.filter(|_| session.form) {
+        Some(events) => Some(events.request("elicitation/create", request.form(session.protocol), CLIENT_TIMEOUT).await?),
+        None => None,
+    };
+    let (motor, session) = (Arc::clone(motor), Arc::clone(session));
+    tokio::task::spawn_blocking(move || {
+        session.ensure_active(call.as_deref(), generation)?;
+        let active = || session.ensure_active(call.as_deref(), generation).is_ok();
+        with_workspace(&workspace, || motor.finish_access(request, answer.as_ref(), active))
+    }).await.map_err(|_| internal())?
+}
+
+impl SessionContext {
+    fn ensure_active(&self, call: Option<&StreamCall>, generation: u64) -> Result<(), Fault> {
+        if !self.live.load(Ordering::Acquire) {
+            return Err(closed());
+        }
+        if call.is_some_and(|call| !call.active.load(Ordering::Acquire)) {
+            return Err(cancelled());
+        }
+        if self.scope.lock().unwrap().generation != generation {
+            return Err(Fault::new("WORKSPACE_CHANGED", "Las carpetas abiertas cambiaron durante la solicitud."));
+        }
+        Ok(())
+    }
+}
+
+fn internal() -> Fault {
+    Fault::new("ERROR_INTERNO", "Mind no pudo completar la operación.")
+}
+
+fn closed() -> Fault {
+    Fault::new("SESSION_CLOSED", "La sesión con el agente terminó.")
+}
+
+fn cancelled() -> Fault {
+    Fault::new("REQUEST_CANCELLED", "La solicitud se canceló.")
+}
+
+fn frame(message: Value) -> Frame<Bytes> {
+    Frame::data(Bytes::from(format!("event: message\ndata: {message}\n\n")))
+}
+
+struct EventStream(mpsc::Receiver<Frame<Bytes>>);
+
+impl Stream for EventStream {
+    type Item = Result<Frame<Bytes>, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx).map(|frame| frame.map(Ok))
+    }
 }
 
 fn request_id(message: &Value) -> Option<Value> {
@@ -185,7 +606,11 @@ fn rpc_error(id: Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-fn tool_result(value: Value, is_error: bool) -> Value {
+fn tool_reply(result: Result<Value, Fault>) -> Value {
+    let (value, is_error) = match result {
+        Ok(value) => (value, false),
+        Err(error) => (json!({"error": {"codigo": error.code, "mensaje": error.message}}), true),
+    };
     let structured = if value.is_object() { value } else { json!({"valor": value}) };
     let mut result = json!({
         "content": [{"type": "text", "text": structured.to_string()}],
@@ -220,6 +645,23 @@ fn definitions() -> Value {
         "description": "Indica registro o ubicacion. La relación es opcional.",
     }});
     json!([
+        {
+            "name": "acceso",
+            "title": "Solicitar autorización",
+            "description": "Solicita acceso a una carpeta o a la continuidad para que el usuario decida. También permite reducir permisos o excluir rutas de una carpeta.",
+            "inputSchema": {"type": "object", "properties": {
+                "accion": {"type":"string","enum":["solicitar","retirar"]},
+                "ruta": {"type":"string"},
+                "acceso": {"type":"string","enum":["encontrar","leer","completo"]},
+                "permisos": {"type":"array","items":{"type":"string","enum":["encontrar","leer","escribir","organizar"]}},
+                "continuidad": {"type":"array","items":{"type":"string","enum":["leer","registrar"]}},
+                "motivo": {"type":"string"},
+                "carpeta": {"type":"string"},
+                "excluir": {"type":"array","items":{"type":"string"}},
+                "todo": {"type":"boolean"},
+            }, "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false},
+        },
         {
             "name": "estado",
             "title": "Estado de Mind",

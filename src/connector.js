@@ -7,13 +7,14 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MotorError } from './errors.js';
-import { FOLD_CASE } from './paths.js';
+import { contains, FOLD_CASE } from './paths.js';
 import { classifyToolPriority, QUEUE_PRIORITY } from './smart-queue.js';
 import { launchIndependent } from './independent-launch.js';
 import { predatesSystemBoot, systemBootTime } from './process-identity.js';
 import { waitForHandoff } from './update-handoff-state.js';
 import { productPaths, productRuntime } from './layout.js';
 import { readManifestFile } from './product-files.js';
+import { MOTOR_VERSION } from './version.js';
 
 export const CONNECTOR_STATE_FILE = 'conector.json';
 export const CONNECTOR_SECRET_FILE = 'conector-secreto.json';
@@ -313,6 +314,37 @@ function defaultNodeExecutable(layout) {
   return process.execPath;
 }
 
+async function nativeMotorCommand(layout, baseDirectory) {
+  const configured = process.env.MIND_MOTOR_NATIVO_EXE;
+  if (!configured || !path.isAbsolute(configured)) {
+    throw new MotorError('NATIVE_MOTOR_EXECUTABLE_REQUIRED', 'Indica una ruta absoluta al Motor Rust en MIND_MOTOR_NATIVO_EXE.');
+  }
+  const executable = await fs.realpath(configured).catch(() => null);
+  const file = executable ? await fs.stat(executable).catch(() => null) : null;
+  if (!file?.isFile()) {
+    throw new MotorError('NATIVE_MOTOR_EXECUTABLE_UNAVAILABLE', 'El ejecutable configurado del Motor Rust no está disponible.');
+  }
+  const base = await canonicalBaseDirectory(baseDirectory);
+  const motorDirectory = layout?.motorDirectory ? await canonicalBaseDirectory(layout.motorDirectory) : null;
+  if (motorDirectory && contains(motorDirectory, base)) {
+    throw new MotorError('BASE_OVERLAPS_MOTOR', 'La Base no puede estar dentro del Motor.');
+  }
+  const args = ['motor', '--base', base, '--conector'];
+  if (motorDirectory) args.push('--directorio-motor', motorDirectory);
+  if (layout?.root) {
+    const { releaseQuarantine } = await import('./quarantine.js');
+    const quarantine = await releaseQuarantine(layout);
+    if (quarantine.aviso) process.stderr.write('Aviso: ' + quarantine.aviso + '\n');
+    args.push('--raiz-instalacion', await canonicalBaseDirectory(layout.root));
+    if (layout.userDataDirectory) {
+      const { ensureUserDataDirectory } = await import('./user-data-directory.js');
+      await ensureUserDataDirectory(layout);
+      args.push('--datos-usuario', await canonicalBaseDirectory(layout.userDataDirectory));
+    }
+  }
+  return { executable, args };
+}
+
 /**
  * «El primero enciende»: reutiliza el Motor Central vivo en <10 ms o lo despierta en
  * segundo plano sin ventanas y espera hasta que publique su puerto y salud.
@@ -322,6 +354,14 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
   if (typeof targetBase !== 'string' || !path.isAbsolute(targetBase)) {
     throw new MotorError('INVALID_BASE', 'La ruta de la Base debe ser absoluta.');
   }
+  const native = process.env.MIND_MOTOR_NATIVO === '1';
+  const check = async () => {
+    const ready = await checkHealthyConnector(targetBase);
+    if (native && ready && ready.health.backend !== 'rust') {
+      throw new MotorError('NATIVE_MOTOR_BUSY', 'La Base sigue abierta con el Motor anterior. Ciérralo antes de arrancar Rust.');
+    }
+    return ready;
+  };
   // Un relevo que sustituye/verifica el programa es el único que puede encender
   // el candidato. Los puentes y la consola esperan sin crear un Motor competidor.
   async function waitForProgram() {
@@ -336,17 +376,18 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
     return result?.waited === true;
   }
   await waitForProgram();
-  const existing = await checkHealthyConnector(targetBase);
+  const existing = await check();
   if (existing) return { ...existing, spawned: false };
   // La quietud pudo empezar durante la comprobación HTTP anterior.
   if (await waitForProgram()) {
-    const ready = await checkHealthyConnector(targetBase);
+    const ready = await check();
     if (ready) return { ...ready, spawned: false };
   }
 
-  const nodeExecutable = defaultNodeExecutable(layout);
-  const entrypoint = defaultEntrypoint(layout);
-  const args = [entrypoint, 'motor', '--base', targetBase];
+  const command = native ? await nativeMotorCommand(layout, targetBase) : {
+    executable: defaultNodeExecutable(layout),
+    args: [defaultEntrypoint(layout), 'motor', '--base', targetBase],
+  };
   const errorFile = newStartupErrorFile();
   // El Motor sirve a todos los chats: no debe morir cuando se cierra el cliente que
   // lo encendió (en Windows, el Job Object del cliente lo arrastraría).
@@ -354,9 +395,12 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
   // Un relevista usa Python de su snapshot. El Motor normal debe conservar el
   // ejecutor de la instalación que seguirá existiendo tras limpiar ese snapshot.
   if (layout?.pythonExecutable) motorEnvironment.MIND_PYTHON = layout.pythonExecutable;
+  if (native) {
+    motorEnvironment.MIND_MOTOR_NATIVO_VERSION = MOTOR_VERSION;
+    motorEnvironment.MIND_MOTOR_NATIVO_REVISION = String(layout?.manifest?.packageRevision ?? 0);
+  }
   const launched = await launch({
-    executable: nodeExecutable,
-    args,
+    ...command,
     cwd: os.tmpdir(),
     env: motorEnvironment,
   });
@@ -364,12 +408,12 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
   const deadline = Date.now() + startupTimeoutMs;
   try {
     while (Date.now() < deadline) {
-      const ready = await checkHealthyConnector(targetBase);
+      const ready = await check();
       if (ready) return { ...ready, spawned: true, launch: { mecanismo: launched.mecanismo, independencia: launched.independencia, aviso: launched.aviso ?? null } };
       const exited = launched.exited();
       if (exited !== null) {
         await delay(25);
-        const raceWinner = await checkHealthyConnector(targetBase);
+        const raceWinner = await check();
         if (raceWinner) return { ...raceWinner, spawned: false };
         const storedError = await readRegularJson(errorFile);
         if (typeof storedError?.code === 'string') {

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MotorError } from './errors.js';
-import { currentDirectory } from './paths.js';
+import { contains, currentDirectory } from './paths.js';
 import { resolveLayout, productInstallation, productRuntime } from './layout.js';
 import { MOTOR_VERSION } from './version.js';
 import { COMMANDS } from './commands/index.js';
@@ -131,6 +131,27 @@ function report(error) {
   return 1;
 }
 
+/** Las órdenes locales conservan el terminal y comparten la propiedad exclusiva con Rust. */
+async function holdLegacyConsoleOwner(layout) {
+  const { canonicalBaseDirectory, connectorPaths, readConnectorState } = await import('./connector.js');
+  const base = await canonicalBaseDirectory(layout.baseDirectory);
+  // La propiedad depende del bloqueo, incluso si el Motor dejó de responder.
+  if (process.env.MIND_MOTOR_NATIVO !== '1' && (await readConnectorState(base))?.backend !== 'rust') return null;
+  if (contains(layout.motorDirectory, layout.baseDirectory) || contains(layout.motorDirectory, base)) {
+    throw new MotorError('BASE_OVERLAPS_MOTOR', 'La Base no puede estar dentro del Motor.');
+  }
+  const { mkdir } = await import('node:fs/promises');
+  const { acquireOwnerFileLock } = await import('./process-identity.js');
+  await mkdir(base, { recursive: true, mode: 0o700 });
+  try {
+    return await acquireOwnerFileLock(connectorPaths(base).lockFile, { pythonExecutable: layout.pythonExecutable });
+  } catch (error) {
+    if (error.code !== 'LOCK_BUSY') throw error;
+    throw new MotorError('BASE_OCUPADA',
+      'El Motor está usando esta Base. Cierra las sesiones de Mind, usa "mind apagar" y vuelve a ejecutar esta orden.');
+  }
+}
+
 /** Sesión sin observación: cada operación reconcilia bajo demanda lo que necesita. */
 async function withSession(options, task, { observe = false } = {}) {
   const { openSession } = await import('./session.js');
@@ -139,30 +160,38 @@ async function withSession(options, task, { observe = false } = {}) {
   const { releaseQuarantine } = await import('./quarantine.js');
   const quarantine = await releaseQuarantine(layout);
   if (quarantine.aviso) process.stderr.write(`Aviso: ${quarantine.aviso}\n`);
-  const session = await openSession({ layout, motorVersion: MOTOR_VERSION, observe });
+  const release = await holdLegacyConsoleOwner(layout);
   try {
-    if (options.autoWorkspace) {
-      const { createWorkspaceAccess } = await import('./workspace-access.js');
-      const workspace = createWorkspaceAccess(session, { paths: options.workspacePaths });
-      try {
-        await session.start();
-        await session.sync();
-        await workspace.initialize({ clientCapabilities: {} });
-        return await task(workspace.session);
-      } finally {
-        await workspace.close();
+    const session = await openSession({ layout, motorVersion: MOTOR_VERSION, observe });
+    try {
+      if (options.autoWorkspace) {
+        const { createWorkspaceAccess } = await import('./workspace-access.js');
+        const workspace = createWorkspaceAccess(session, { paths: options.workspacePaths });
+        try {
+          await session.start();
+          await session.sync();
+          await workspace.initialize({ clientCapabilities: {} });
+          return await task(workspace.session);
+        } finally {
+          await workspace.close();
+        }
       }
+      await session.start();
+      return await task(session);
+    } finally {
+      await session.close();
     }
-    await session.start();
-    return await task(session);
   } finally {
-    await session.close();
+    await release?.();
   }
 }
 
 export async function main(args) {
   try {
     const { options, command, parameters } = parse(args);
+    if (command === 'mcp' && options.direct && process.env.MIND_MOTOR_NATIVO === '1') {
+      throw new MotorError('NATIVE_MOTOR_DIRECT_UNSUPPORTED', 'El Motor Rust usa el conector. Inicia mcp sin --direct.');
+    }
     options.autoWorkspace = ['estado', 'herramienta', 'inicio'].includes(command);
     if (!['version', '--version', 'actualizar', 'corregir', 'despertar', 'apagar', 'motor'].includes(command)) {
       const { prepareProductMcp } = await import('./product-mcp.js');
@@ -209,6 +238,11 @@ export async function main(args) {
       case 'motor': {
         if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `motor no admite argumentos (${parameters[0]}).`);
         const layout = await resolveLayout({ base: options.base });
+        if (process.env.MIND_MOTOR_NATIVO === '1') {
+          const { ensureCentralMotor } = await import('./connector.js');
+          await ensureCentralMotor({ layout, baseDirectory: layout.baseDirectory });
+          return 0;
+        }
         const { releaseQuarantine } = await import('./quarantine.js');
         const quarantine = await releaseQuarantine(layout);
         if (quarantine.aviso) process.stderr.write(`Aviso: ${quarantine.aviso}\n`);
@@ -279,7 +313,7 @@ export async function main(args) {
           return await runMcpSession({ layout, parameters, workspacePaths: options.workspacePaths });
         }
         if (parameters.length > 0) throw new MotorError('INVALID_ARGUMENTS', `mcp no admite argumentos (${parameters[0]}).`);
-        if (options.nativo || process.env.MIND_PUENTE_NATIVO === '1') {
+        if (process.env.MIND_MOTOR_NATIVO !== '1' && (options.nativo || process.env.MIND_PUENTE_NATIVO === '1')) {
           const nativeCode = await tryNativeMcpBridge({ layout, workspacePaths: options.workspacePaths });
           if (nativeCode !== null) return nativeCode;
         }

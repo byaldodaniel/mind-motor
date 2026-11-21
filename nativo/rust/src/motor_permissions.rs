@@ -8,7 +8,11 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
-use crate::{motor_native::Fault, scan};
+use crate::{
+    motor_native::Fault,
+    motor_workspace::{current_workspace, physical_directory, relative_parts, same_path},
+    scan,
+};
 
 const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 const FOLDER_LEVELS: [&str; 4] = ["encontrar", "leer", "escribir", "organizar"];
@@ -67,6 +71,9 @@ fn valid_channel(record: &Value) -> bool {
 }
 
 pub(crate) fn continuity_access(base: &str) -> Result<Vec<&'static str>, Fault> {
+    if current_workspace().is_some_and(|workspace| workspace.has_roots()) {
+        return Ok(vec!["leer", "registrar"]);
+    }
     let Some(policy) = read_json(base, "agent-continuity-access.json")? else {
         return Ok(Vec::new());
     };
@@ -99,24 +106,6 @@ fn generation(value: &Value) -> Option<&str> {
     })
 }
 
-fn relative_parts<'a>(parent: &Path, child: &'a Path) -> Option<Vec<&'a str>> {
-    let mut child = child.components();
-    for expected in parent.components() {
-        let actual = child.next()?;
-        let (expected, actual) = (expected.as_os_str().to_str()?, actual.as_os_str().to_str()?);
-        let equal = if cfg!(windows) { expected.to_lowercase() == actual.to_lowercase() } else { expected == actual };
-        if !equal {
-            return None;
-        }
-    }
-    child
-        .map(|part| {
-            let Component::Normal(part) = part else { return None };
-            part.to_str()
-        })
-        .collect()
-}
-
 fn valid_absolute(path: &Path) -> bool {
     path.is_absolute() && path.to_str().is_some_and(|path| !path.contains('\0'))
         && !path.components().any(|part| matches!(part, Component::ParentDir))
@@ -145,7 +134,7 @@ fn load_folder(base: &str, id: &str, record: Value) -> Result<Folder, Fault> {
     let size = record.as_object().ok_or_else(invalid)?.len();
     let root = record["path"].as_str().ok_or_else(invalid)?;
     let root_path = Path::new(root);
-    let canonical_id = format!("{:x}", Sha256::digest(if cfg!(windows) { root.to_lowercase() } else { root.to_owned() }));
+    let canonical_id = folder_id(root);
     if record["format"] != "mind-folder-authorization"
         || record["id"] != id || canonical_id != id || !valid_absolute(root_path)
     {
@@ -166,7 +155,18 @@ fn load_folder(base: &str, id: &str, record: Value) -> Result<Folder, Fault> {
     Ok(Folder { id: id.to_owned(), root: root.to_owned(), generation: folder_generation, exclusions })
 }
 
-fn folders(base: &str) -> Result<Vec<Folder>, Fault> {
+fn folder_id(root: &str) -> String {
+    let normalized = if cfg!(windows) { root.to_lowercase() } else { root.to_owned() };
+    format!("{:x}", Sha256::digest(normalized))
+}
+
+pub(crate) fn is_workspace_folder(id: &str) -> bool {
+    current_workspace().is_some_and(|workspace| {
+        workspace.roots.iter().any(|root| folder_id(root) == id)
+    })
+}
+
+fn registered_folders(base: &str) -> Result<Vec<Folder>, Fault> {
     // Solo enumeramos nombres técnicos bajo la Base. La apertura de cada registro
     // usa el lector por descriptores.
     scan::open_directory(base, "").map_err(|code| fault(code, "No se pudo abrir la Base de forma segura."))?;
@@ -188,7 +188,41 @@ fn folders(base: &str) -> Result<Vec<Folder>, Fault> {
     Ok(records)
 }
 
+fn folders(base: &str) -> Result<Vec<Folder>, Fault> {
+    let mut registered = registered_folders(base)?;
+    let Some(workspace) = current_workspace() else { return Ok(registered) };
+    if workspace.active {
+        let destinations = configured_directories(base)?;
+        let mut visible = Vec::new();
+        for folder in registered {
+            if workspace.grants(&folder.root)
+                || (contains_destination(Path::new(&folder.root), &destinations)
+                    && registered_access(base, &folder)?.contains(&"encontrar"))
+            {
+                visible.push(folder);
+            }
+        }
+        registered = visible;
+    }
+    for root in workspace.roots {
+        if !registered.iter().any(|folder| same_path(&folder.root, Path::new(&root))) {
+            registered.push(Folder {
+                id: folder_id(&root), root, generation: None, exclusions: Vec::new(),
+            });
+        }
+    }
+    registered.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(registered)
+}
+
 fn folder_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, Fault> {
+    if current_workspace().is_some_and(|workspace| workspace.grants(&folder.root)) {
+        return Ok(FOLDER_LEVELS.to_vec());
+    }
+    registered_access(base, folder)
+}
+
+fn registered_access(base: &str, folder: &Folder) -> Result<Vec<&'static str>, Fault> {
     let Some(record) = read_json(base, &format!("folder-access-{}.json", folder.id))? else {
         return Ok(Vec::new());
     };
@@ -255,9 +289,9 @@ fn valid_destination_layer(value: &Value) -> bool {
     }))
 }
 
-pub(crate) fn destinations(base: &str, project: Option<&str>, conversation: Option<&str>) -> Result<Value, Fault> {
+fn destination_registry(base: &str) -> Result<Option<Value>, Fault> {
     let Some(data) = read_json(base, "work-destinations.json")? else {
-        return Ok(json!({"revision": 0, "general": {}, "proyecto": null, "conversacion": null, "efectivos": {}}));
+        return Ok(None);
     };
     let invalid = || fault("INVALID_DESTINATIONS", "La configuración de destinos es incompatible.");
     if data["format"] != "mind-work-destinations" || data["version"] != 1
@@ -271,11 +305,45 @@ pub(crate) fn destinations(base: &str, project: Option<&str>, conversation: Opti
     if !projects.values().chain(conversations.values()).all(valid_destination_layer) {
         return Err(invalid());
     }
+    Ok(Some(data))
+}
+
+fn configured_directories(base: &str) -> Result<Vec<PathBuf>, Fault> {
+    let Some(data) = destination_registry(base)? else { return Ok(Vec::new()) };
+    let layers = std::iter::once(&data["general"])
+        .chain(data["proyectos"].as_object().into_iter().flat_map(Map::values))
+        .chain(data["conversaciones"].as_object().into_iter().flat_map(Map::values));
+    Ok(layers.flat_map(|layer| {
+        layer.get("carpeta").into_iter()
+            .chain(layer["tipos"].as_object().into_iter().flat_map(Map::values))
+    }).filter_map(Value::as_str).map(PathBuf::from).collect())
+}
+
+fn contains_destination(root: &Path, directories: &[PathBuf]) -> bool {
+    directories.iter().any(|destination| relative_parts(root, destination).is_some())
+}
+
+pub(crate) fn check_workspace_request(base: &str, path: &Path) -> Result<(), Fault> {
+    let Some(workspace) = current_workspace().filter(|workspace| workspace.active) else {
+        return Ok(());
+    };
+    if let Some(root) = physical_directory(path) {
+        if workspace.grants(&root) || contains_destination(Path::new(&root), &configured_directories(base)?) {
+            return Ok(());
+        }
+    }
+    Err(fault("WORKSPACE_REQUIRED", "Abre esta carpeta en tu agente para trabajar con ella mediante Mind."))
+}
+
+pub(crate) fn destinations(base: &str, project: Option<&str>, conversation: Option<&str>) -> Result<Value, Fault> {
+    let Some(data) = destination_registry(base)? else {
+        return Ok(json!({"revision": 0, "general": {}, "proyecto": null, "conversacion": null, "efectivos": {}}));
+    };
     let project = project.and_then(|project| {
         let name: String = project.nfd().filter(|character| !is_combining_mark(*character)).collect();
-        projects.get(&name.to_lowercase())
+        data["proyectos"].get(name.to_lowercase())
     });
-    let conversation = conversation.and_then(|id| conversations.get(id));
+    let conversation = conversation.and_then(|id| data["conversaciones"].get(id));
     let layers = [conversation, project, Some(&data["general"])];
     let effective: Map<String, Value> = OUTPUT_TYPES.into_iter().filter_map(|kind| {
         layers.iter().flatten().find_map(|layer| {
@@ -322,6 +390,9 @@ pub(crate) fn markdown_destination(
         .or_else(|| memory_directory(&configured["general"]));
     if let Some(directory) = directory {
         return Ok(Path::new(directory).join(filename));
+    }
+    if let Some(directory) = current_workspace().and_then(|workspace| workspace.user_data) {
+        return Ok(Path::new(&directory).join(filename));
     }
     let mut writable = Vec::new();
     for folder in folders(base)? {

@@ -7,18 +7,22 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use http_body_util::{BodyExt, Limited};
 use hyper::{body::Incoming, header, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{net::TcpListener, sync::Notify, task::JoinSet};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use uuid::Uuid;
 
 use crate::{
     host::{self, Body},
+    motor_connector::Connector,
+    motor_consent::{self as consent, AccessRequest, Prepared},
     motor_mcp::Mcp,
     motor_owner::{timestamp, Owner},
+    motor_workspace::{with_workspace, Workspace},
     motor_files, motor_permissions as access, motor_records, organize, scan, text_write,
 };
 
@@ -112,10 +116,11 @@ pub(crate) struct Motor {
     base_id: String,
     owner: Owner,
     work: Mutex<()>,
+    layout: Layout,
 }
 
 impl Motor {
-    fn open(base: String) -> Result<Self, Fault> {
+    fn open(base: String, layout: Layout) -> Result<Self, Fault> {
         let marker = access::read_json(&base, "mind-base.json")?.ok_or_else(|| {
             Fault::new("BASE_NOT_FOUND", "Indica una Base preparada por Mind.")
         })?;
@@ -126,10 +131,60 @@ impl Motor {
         let owner = Owner::acquire(&base).map_err(|error| {
             Fault::new("BASE_OWNERSHIP", error)
         })?;
-        Ok(Self { base, base_id, owner, work: Mutex::new(()) })
+        Ok(Self { base, base_id, owner, work: Mutex::new(()), layout })
+    }
+
+    pub(crate) fn workspace(&self, paths: &[String], active: bool) -> Result<Workspace, Fault> {
+        Workspace::open(&self.base, self.layout.motor.as_deref(), self.layout.installation.as_deref(),
+            self.layout.user_data.as_deref(), paths, active)
+    }
+
+    pub(crate) fn prepare_access(&self, args: Value, client: Option<&Value>) -> Result<Prepared, Fault> {
+        let mut args = args.as_object().cloned().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
+        if args.remove("accion").is_some_and(|action| action != "solicitar") {
+            return Err(invalid("Indica accion solicitar para solicitar acceso."));
+        }
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        self.owner.check().map_err(filesystem)?;
+        consent::prepare(consent::Paths {
+            base: &self.base,
+            motor: self.layout.motor.as_deref(),
+            installation: self.layout.installation.as_deref(),
+            user_data: self.layout.user_data.as_deref(),
+        }, &args, client)
+    }
+
+    pub(crate) fn finish_access(
+        &self, request: AccessRequest, answer: Option<&Value>, active: impl Fn() -> bool,
+    ) -> Result<Value, Fault> {
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        let confirm = || {
+            if !active() { return Err("SESSION_CLOSED"); }
+            self.owner.check()
+        };
+        confirm().map_err(filesystem)?;
+        consent::finish(consent::Paths {
+            base: &self.base,
+            motor: self.layout.motor.as_deref(),
+            installation: self.layout.installation.as_deref(),
+            user_data: self.layout.user_data.as_deref(),
+        }, request, answer, confirm)
     }
 
     pub(crate) fn call(&self, name: &str, args: Value) -> Result<Value, Fault> {
+        if name == "acceso" {
+            if args["accion"] == "retirar" {
+                let mut args = args.as_object().cloned().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
+                args.remove("accion");
+                let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+                self.owner.check().map_err(filesystem)?;
+                return consent::retire(&self.base, &args, || self.owner.check());
+            }
+            return match self.prepare_access(args, None)? {
+                Prepared::Authorized(value) => Ok(value),
+                Prepared::Request(request) => self.finish_access(request, None, || true),
+            };
+        }
         let args = args.as_object().ok_or_else(|| invalid("Indica argumentos en un objeto."))?;
         let _work = self.work.lock().map_err(|_| Fault::new("MOTOR_UNAVAILABLE", "El Motor no pudo coordinar la petición."))?;
         self.owner.check().map_err(filesystem)?;
@@ -153,6 +208,7 @@ impl Motor {
             "motor_central": { "pid": std::process::id(), "estado": "active" },
             "continuidad": { "permisos": access::continuity_access(&self.base)? },
             "carpetas": access::folder_status(&self.base)?,
+            "solicitudes_pendientes": consent::list_pending(&self.base)?,
         }))
     }
 
@@ -524,51 +580,167 @@ fn conversation(record: &Value) -> Value {
     })
 }
 
-async fn respond(
-    req: Request<Incoming>, port: u16, token: &str, mcp: &Mcp, motor: Arc<Motor>,
-) -> Result<Response<Body>, Infallible> {
-    let reply = if !host::allowed_origin(&req, port) {
-        host::full(StatusCode::FORBIDDEN, json!({"error": "ORIGIN_NOT_ALLOWED"}))
-    } else if req.uri().path() == "/health" && req.method() == Method::GET {
-        host::full(StatusCode::OK, json!({"ok":true,"pid":std::process::id(),"port":port}))
-    } else if req.uri().path() != "/mcp" {
-        host::full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"}))
-    } else if !req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| host::same(value.as_bytes(), token.as_bytes()))
-    {
-        host::full(StatusCode::UNAUTHORIZED, json!({"error":"UNAUTHORIZED"}))
-    } else {
-        mcp.handle(req, motor).await
-    };
-    Ok(reply)
+#[derive(Default)]
+struct Layout {
+    motor: Option<PathBuf>,
+    installation: Option<PathBuf>,
+    user_data: Option<PathBuf>,
+}
+
+struct Server {
+    port: u16,
+    connector: Connector,
+    motor: Arc<Motor>,
+    mcp: Mcp,
+    shutdown: Notify,
+}
+
+impl Server {
+    async fn respond(&self, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
+        let reply = if req.headers().contains_key(header::ORIGIN) || !host::allowed_origin(&req, self.port) {
+            host::full(StatusCode::FORBIDDEN, json!({"error": "ORIGIN_NOT_ALLOWED"}))
+        } else if req.uri().path() == "/health" && req.method() == Method::GET {
+            host::full(StatusCode::OK, self.connector.health(req.uri().query(), self.mcp.count().await))
+        } else if !req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|value| host::same(value.as_bytes(), self.connector.token.as_bytes()))
+        {
+            host::full(StatusCode::UNAUTHORIZED, json!({"error":"UNAUTHORIZED"}))
+        } else if req.uri().path() == "/mcp" {
+            self.mcp.handle(req, self.motor.clone()).await
+        } else if req.uri().path() == "/rpc" && req.method() == Method::POST {
+            self.rpc(req).await
+        } else {
+            host::full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"}))
+        };
+        Ok(reply)
+    }
+
+    async fn rpc(&self, req: Request<Incoming>) -> Response<Body> {
+        let parsed = match Limited::new(req.into_body(), crate::MAX_MESSAGE).collect().await {
+            Ok(body) => serde_json::from_slice::<Value>(&body.to_bytes()).ok(),
+            Err(_) => None,
+        };
+        let Some(payload) = parsed.filter(Value::is_object) else {
+            return host::full(StatusCode::BAD_REQUEST, rpc_error(invalid("Petición no válida.")));
+        };
+        let action = payload["accion"].as_str().unwrap_or_default();
+        if action == "apagar" {
+            if (payload["soloSiInactivo"] == true || payload["soloSiQuieto"] == true) && self.mcp.count().await > 0 {
+                return host::full(StatusCode::OK, json!({"ok":true,"busy":true}));
+            }
+            self.shutdown.notify_one();
+            return host::full(StatusCode::OK, json!({"ok":true,"apagando":true}));
+        }
+        if action == "ping" {
+            return host::full(StatusCode::OK, json!({"ok":true,"pid":std::process::id()}));
+        }
+        let motor = self.motor.clone();
+        let result = tokio::task::spawn_blocking(move || motor.rpc_call(&payload)).await;
+        match result {
+            Ok(Ok(value)) => host::full(StatusCode::OK, value),
+            Ok(Err(error)) => host::full(StatusCode::OK, rpc_error(error)),
+            Err(_) => host::full(StatusCode::INTERNAL_SERVER_ERROR, rpc_error(filesystem("ERROR_INTERNO"))),
+        }
+    }
+}
+
+fn rpc_error(error: Fault) -> Value {
+    json!({"ok":false, "error":{"codigo":error.code,"mensaje":error.message}})
+}
+
+impl Motor {
+    fn rpc_call(&self, payload: &Value) -> Result<Value, Fault> {
+        let paths = payload["paths"].as_array().into_iter().flatten().take(64)
+            .filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+        let workspace = if !paths.is_empty() {
+            self.workspace(&paths, true)?
+        } else if let Some(cwd) = payload["cwd"].as_str() {
+            let candidate = self.workspace(&[cwd.to_owned()], true)?;
+            if candidate.has_roots() { candidate } else { self.workspace(&[], false)? }
+        } else {
+            self.workspace(&[], false)?
+        };
+        with_workspace(&workspace, || self.rpc_scoped(payload))
+    }
+
+    fn rpc_scoped(&self, payload: &Value) -> Result<Value, Fault> {
+        let action = payload["accion"].as_str().unwrap_or_default();
+        if action == "inicio" {
+            let state = self.call("estado", json!({}))?;
+            return Ok(json!({"ok":true,"mind":state["mind"],
+                "instrucciones":"Consulta las herramientas y permisos de este Motor Rust.",
+                "destinos":access::destinations(&self.base, None, None)?}));
+        }
+        let (name, args) = match action {
+            "estado" => ("estado", json!({})),
+            "herramienta" => (payload["tool"].as_str().unwrap_or_default(), payload.get("args").cloned().unwrap_or_else(|| json!({}))),
+            _ => return Err(invalid("Operación RPC no disponible en el Motor Rust.")),
+        };
+        let value = match name {
+            "conversacion_leer" => self.call("retomar", args).map(|value| json!({"conversacion":value["conversacion"]})),
+            "conversacion_guardar" if args.get("id").is_some() => self.call("actualizar", args),
+            "conversacion_guardar" => self.call("guardar", args),
+            "solicitar_acceso" => self.call("acceso", args),
+            _ => self.call(name, args),
+        };
+        let (value, is_error) = match value {
+            Ok(value) => (value, false),
+            Err(error) => (json!({"error":{"codigo":error.code,"mensaje":error.message}}), true),
+        };
+        Ok(json!({"ok":true,"text":value.to_string(),"value":value,"isError":is_error}))
+    }
+}
+
+fn boot_args(args: &[String]) -> Result<(PathBuf, bool, Layout), String> {
+    let mut layout = Layout::default();
+    let mut root = None;
+    let mut publish = false;
+    let mut args = args.iter();
+    while let Some(flag) = args.next() {
+        let target = match flag.as_str() {
+            "--base" => &mut root,
+            "--directorio-motor" => &mut layout.motor,
+            "--raiz-instalacion" => &mut layout.installation,
+            "--datos-usuario" => &mut layout.user_data,
+            "--conector" if !publish => { publish = true; continue; }
+            _ => return Err("motor --base ABS [--conector]".into()),
+        };
+        let value = args.next().map(PathBuf::from).filter(|path| path.is_absolute())
+            .ok_or("Indica una ruta absoluta para motor.")?;
+        if target.replace(value).is_some() { return Err("Opción repetida al arrancar el motor.".into()); }
+    }
+    let root = root.ok_or("motor --base ABS")?;
+    Ok((root, publish, layout))
 }
 
 pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     if !cfg!(any(windows, target_os = "linux")) {
         return Err("El arranque autónomo requiere escritura segura en Windows o Linux.".into());
     }
-    let [flag, root] = args else { return Err("motor --base ABS".into()) };
-    if flag != "--base" || !Path::new(root).is_absolute() { return Err("motor --base ABS".into()); }
-    let canonical = Path::new(root).canonicalize().map_err(|error| error.to_string())?;
+    let (root, publish, layout) = boot_args(args)?;
+    let canonical = root.canonicalize().map_err(|error| error.to_string())?;
     let base = canonical.to_str().ok_or("La ruta no es Unicode válido.")?;
     #[cfg(windows)]
     let base = base.strip_prefix("\\\\?\\").unwrap_or(base);
-    let motor = Arc::new(Motor::open(base.to_owned()).map_err(|error| error.to_string())?);
-    let mcp = Arc::new(Mcp::new());
+    let motor = Arc::new(Motor::open(base.to_owned(), layout).map_err(|error| error.to_string())?);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|error| error.to_string())?.port();
-    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    println!("{}", json!({
-        "pid": std::process::id(), "port": port, "url": format!("http://127.0.0.1:{port}/mcp"), "token": token,
-    }));
-    io::stdout().flush().map_err(|error| error.to_string())?;
+    let connector = Connector::open(base, port, &motor.owner, publish)?;
+    if !publish {
+        println!("{}", json!({
+            "pid": std::process::id(), "port": port, "url": connector.url(), "token": connector.token,
+        }));
+        io::stdout().flush().map_err(|error| error.to_string())?;
+    }
+    let server = Arc::new(Server { port, connector, motor, mcp: Mcp::new(), shutdown: Notify::new() });
 
     let shutdown = host::shutdown_signal();
     tokio::pin!(shutdown);
     let mut clients = JoinSet::new();
     loop {
         tokio::select! {
+            _ = server.shutdown.notified() => break,
             signal = &mut shutdown => {
                 signal.map_err(|error| error.to_string())?;
                 break;
@@ -576,11 +748,11 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
             Some(_) = clients.join_next(), if !clients.is_empty() => {}
             accepted = listener.accept() => {
                 let (stream, _) = accepted.map_err(|error| error.to_string())?;
-                let (token, motor, mcp) = (token.clone(), motor.clone(), mcp.clone());
+                let server = server.clone();
                 clients.spawn(async move {
                     let service = hyper::service::service_fn(move |req| {
-                        let (token, motor, mcp) = (token.clone(), motor.clone(), mcp.clone());
-                        async move { respond(req, port, &token, &mcp, motor).await }
+                        let server = server.clone();
+                        async move { server.respond(req).await }
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service).await;

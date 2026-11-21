@@ -262,9 +262,8 @@ arranque y debe tratarse como privada.
 
 Esta entrada prueba estado, guardado y actualización de conversaciones y
 continuidad, retoma por ID, búsqueda por palabras en las conversaciones y
-las operaciones básicas de texto. Las variantes restantes y el arranque
-habitual de la instalación siguen en relevo. La entrada sirve para probarlo
-en Windows y Linux.
+las operaciones básicas de texto. Las demás herramientas siguen en relevo.
+La entrada sirve para probarlo en Windows y Linux.
 
 Con `MIND_NATIVE_EXE` y el Python portable de r3 en
 `MIND_TEST_BUNDLED_PYTHON`, el ensayo extrae el código del tag `v1.0.4-r3`,
@@ -277,6 +276,30 @@ qué recupera r3 después del corte.
 
 ```powershell
 node --test nativo/test/motor-nativo-vuelta-r3.test.mjs
+```
+
+## Arranque habitual con Rust
+
+En desarrollo, usa el iniciador habitual con `MIND_MOTOR_NATIVO=1` y
+`MIND_MOTOR_NATIVO_EXE` como ruta absoluta al ejecutable compilado. Usa una
+Base de prueba ya preparada en el formato 3. Rust publica el conector
+habitual. El lanzador lo verifica y sale.
+Dos conexiones HTTP comparten el mismo proceso y el bloqueo de la Base.
+Un cliente configurado para stdio sigue usando su puente.
+
+El Motor aplica los permisos persistidos y el ámbito abierto que comunica el
+iniciador o el cliente. El acceso nuevo requiere el formulario del cliente o
+queda pendiente para la consola habitual. Para revisar esos pendientes por
+consola, cierra el Motor Rust y usa `mind autorizar` en la misma Base. El modo
+Rust sigue siendo optativo mientras se portan las herramientas y confirmaciones
+restantes.
+
+Para volver a r3, cierra el Motor Rust, quita la selección nativa del iniciador
+y abre la misma Base con r3. Ambos usan el mismo bloqueo y formato de Base. El
+ensayo extrae el tag local de r3 y prueba esa vuelta tras interrumpir Rust.
+
+```powershell
+node --test nativo/test/arranque-rust-vuelta-r3.test.mjs
 ```
 
 ## Compilación reproducible
