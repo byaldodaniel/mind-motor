@@ -800,7 +800,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const relativePath = selected?.path ?? text(args.ruta, 'ruta');
       if (typeof args.contenido !== 'string') throw invalid('contenido debe ser texto.');
       const authorization = await motor.grantTextCreate({ requester, folderId: folder.id, relativePath });
-      const created = await motor.createTextFile({ requester, authorization, content: args.contenido });
+      const created = await motor.createTextFile({
+        requester, authorization, content: args.contenido,
+        confirmAccess: () => requireAccess(folder, 'escribir'),
+      });
       await session.audit('archivo-creado', { carpeta: folder.id, ruta: relativePath, bytes: created.size, cliente: source });
       const registration=selected ? await rememberOutput(motor,args.conversacion,{path:selected.absolute,type:selected.type,bytes:created.size}) : {estado:'sin_conversacion'};
       return {
@@ -818,6 +821,7 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       const authorization = await motor.grantTextModify({ requester, folderId: folder.id, relativePath });
       const modified = await motor.modifyTextFile({
         requester, authorization, expectedVersion: text(args.version, 'version', { max: 80 }), content: args.contenido,
+        confirmAccess: () => requireAccess(folder, 'escribir'),
       });
       await session.audit('archivo-modificado', { carpeta: folder.id, ruta: relativePath, anterior: modified.previousVersion, nueva: modified.version, cliente: source });
       return {
@@ -859,7 +863,10 @@ export function createAgentTools({ session, connection, log = () => {}, extraToo
       if (next === content) return { estado: 'sin-cambios', carpeta: folder.id, ruta: relativePath, version };
       const authorization = await motor.grantTextModify({ requester, folderId: folder.id, relativePath });
       // La versión leída protege frente a cambios entre la lectura y la escritura.
-      const modified = await motor.modifyTextFile({ requester, authorization, expectedVersion: version, content: next });
+      const modified = await motor.modifyTextFile({
+        requester, authorization, expectedVersion: version, content: next,
+        confirmAccess: () => requireAccess(folder, 'leer', 'escribir'),
+      });
       await session.audit('archivo-editado', { carpeta: folder.id, ruta: relativePath, anterior: version, nueva: modified.version, cliente: source });
       return {
         estado: 'modificado', carpeta: folder.id, ruta: relativePath, ruta_absoluta: absolute(folder.path, relativePath),

@@ -8,13 +8,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createAccessPolicy } from '../../src/access-policy.js';
+import { createNativeContinuityStore } from '../../src/continuity-reader.js';
 import { stopCentralMotor } from '../../src/connector.js';
 import { resolveLayout } from '../../src/layout.js';
 import { openSession } from '../../src/session.js';
 import { RUNS } from './runs.mjs';
+import { extractR3 } from './r3-fixture.mjs';
 
 const executable = process.env.MIND_NATIVE_EXE;
-const nativeContinuity = process.env.MIND_TEST_NATIVE_CONTINUITY === '1';
+const nativeSave = process.env.MIND_TEST_NATIVE_SAVE === '1';
+const nativeContinuity = nativeSave || process.env.MIND_TEST_NATIVE_CONTINUITY === '1';
 const motorScript = fileURLToPath(new URL('./real-motor.mjs', import.meta.url));
 const run = promisify(execFile);
 const fixturePrefix = 'mind-nativo-runs-vista-';
@@ -131,7 +134,7 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
   const env = { ...process.env, MIND_AGENT_STARTUP: '0' };
   if (!env.MIND_PYTHON && env.MIND_TEST_BUNDLED_PYTHON) env.MIND_PYTHON = env.MIND_TEST_BUNDLED_PYTHON;
   const local = { env, timeout: 10_000, windowsHide: true };
-  let motor, motorRecord, host;
+  let motor, motorRecord, host, scope;
   t.after(async () => {
     try {
       await host?.stop();
@@ -174,7 +177,8 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
   });
   try {
     await setup.start();
-    const scope = await setup.motor.authorizeFolder(notes);
+    scope = await setup.motor.authorizeFolder(notes);
+    scope = await setup.motor.getAuthorizedFolder(scope.id);
     await setup.policy.set(scope.id, ['encontrar', 'leer', 'escribir', 'organizar'], { channel: 'administracion-local' });
     await setup.policy.setContinuity(['leer', 'registrar'], { channel: 'administracion-local' });
   } finally {
@@ -183,6 +187,7 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
 
   const binary = path.resolve(executable);
   if (nativeContinuity) env.MIND_CLAVE_LECTURA_CONTINUIDAD = randomBytes(32).toString('hex');
+  if (nativeSave) env.MIND_ESCRITURA_NATIVA = '1';
   host = start(binary, ['anfitrion', '--base', base, '--puerto-vistas', '0'], env);
   const control = await host.connector(base, 'anfitrion.json');
   if (nativeContinuity) env.MIND_PUERTO_LECTURA_CONTINUIDAD = String(control.port);
@@ -288,11 +293,55 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
       await fs.unlink(badFile);
     }
 
-    const policy = createAccessPolicy({ baseDirectory: base, getAuthorizedFolder: async () => null });
+    const policy = createAccessPolicy({
+      baseDirectory: base,
+      getAuthorizedFolder: async id => id === scope.id ? scope : null,
+    });
     await policy.setContinuity([], { channel: 'administracion-local' });
     await second.call('retomar', { id: saved.id }, 'ACCESS_NOT_GRANTED');
     await policy.setContinuity(['leer'], { channel: 'administracion-local' });
     assert.deepEqual((await second.call('retomar', { id: saved.id })).conversacion, saved);
+
+    if (nativeSave) {
+      const guard = { channel: 'administracion-local' };
+      const storedPath = path.join(base, 'continuity-' + saved.id + '.json');
+      const [recordBefore, markdownBefore] = await Promise.all([fs.readFile(storedPath), fs.readFile(saved.archivo)]);
+      const update = {
+        en: 'conversacion', id: saved.id, revision: saved.revision, importante: 'Continuación ficticia en el área norte.',
+      };
+      await second.call('actualizar', update, 'ACCESS_NOT_GRANTED');
+      await policy.setContinuity(['leer', 'registrar'], guard);
+      await policy.set(scope.id, ['encontrar', 'leer'], guard);
+      await second.call('actualizar', update, 'ACCESS_NOT_GRANTED');
+      assert.deepEqual(await fs.readFile(storedPath), recordBefore);
+      assert.deepEqual(await fs.readFile(saved.archivo), markdownBefore);
+      await policy.set(scope.id, ['encontrar', 'leer', 'escribir', 'organizar'], guard);
+
+      const privateWrite = await get(new URL('/interno/continuidad/escribir', origin), { method: 'POST', headers: auth });
+      assert.equal(privateWrite.status, 401);
+      await privateWrite.text();
+      const native = createNativeContinuityStore({
+        port: control.port, key: env.MIND_CLAVE_LECTURA_CONTINUIDAD, baseId: control.baseId,
+      });
+      await assert.rejects(native.writeNativeText({
+        root: notes, relativePath: 'Cancelado.md', bytes: Buffer.from('Ensayo de revocación'),
+        confirm: async () => { throw new Error('Permiso retirado después de abrir'); },
+      }), /Permiso retirado después de abrir/u);
+      await assert.rejects(fs.stat(path.join(notes, 'Cancelado.md')), { code: 'ENOENT' });
+
+      const updated = await second.call('actualizar', update);
+      assert.equal(updated.estado, 'actualizada');
+      assert.equal(updated.conversacion.revision, saved.revision + 1);
+      assert.equal(updated.conversacion.id, saved.id);
+      assert.equal(updated.conversacion.archivo, saved.archivo);
+      assert.equal(updated.conversacion.importante, update.importante);
+      await second.call('actualizar', update, 'CONTINUITY_REVISION_CONFLICT');
+      saved = (await second.call('retomar', { id: saved.id })).conversacion;
+      assert.equal(saved.revision, 2);
+      assert.equal(JSON.parse(await fs.readFile(storedPath, 'utf8')).revision, saved.revision);
+      assert.equal(await fs.readFile(saved.archivo, 'utf8'),
+        '<!-- mind-conversation:' + saved.id + ' revision:2 -->\n# ' + saved.titulo + '\n\n' + saved.importante + '\n');
+    }
   } finally {
     await second.close();
   }
@@ -370,8 +419,41 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
     try {
       assert.equal((await client.call('estado', {})).motor_central.pid, motor.pid);
       await client.call('retomar', { id: saved.id }, 'CONTINUITY_READER_UNAVAILABLE');
+      if (nativeSave) {
+        const records = (await fs.readdir(base)).filter(name => name.startsWith('continuity-'));
+        const failed = path.join(notes, 'Sin escritor.md');
+        await client.call('guardar', {
+          en: 'conversacion', titulo: 'Sin anfitrión', importante: 'Nota ficticia', destino: failed,
+        }, 'WRITE_UNAVAILABLE');
+        assert.deepEqual((await fs.readdir(base)).filter(name => name.startsWith('continuity-')), records);
+        await assert.rejects(fs.stat(failed), { code: 'ENOENT' });
+      }
     } finally {
       await client.close();
     }
+  }
+
+  if (nativeSave) {
+    assert.ok(await stopCentralMotor(base, { timeoutMs: 4_000, reason: 'vuelta-r3' }));
+    await motor.stop();
+    const recordPath = path.join(base, 'continuity-' + saved.id + '.json');
+    const [record, markdown] = await Promise.all([fs.readFile(recordPath), fs.readFile(saved.archivo)]);
+    const moduleUrl = await extractR3(root);
+    const source = [
+      'const { openSession } = await import(' + moduleUrl('session.js') + ');',
+      'const { resolveLayout } = await import(' + moduleUrl('layout.js') + ');',
+      'const { createAgentTools } = await import(' + moduleUrl('agent-tools.js') + ');',
+      "const session = await openSession({ layout: await resolveLayout({ base: process.argv[1] }), motorVersion: '1.0.4', observe: false });",
+      'try {',
+      '  await session.start();',
+      "  const result = await createAgentTools({ session }).call('conversacion_leer', { id: process.argv[2] });",
+      '  console.log(JSON.stringify(result.conversacion));',
+      '} finally { await session.close(); }',
+    ].join('\n');
+    const { stdout } = await run(process.execPath, ['--input-type=module', '-e', source, base, saved.id], local);
+    assert.deepEqual(JSON.parse(stdout), saved);
+    assert.deepEqual(await fs.readFile(recordPath), record);
+    assert.deepEqual(await fs.readFile(saved.archivo), markdown);
+    t.diagnostic('r3 recuperó la revisión ' + saved.revision + ' de ' + saved.id);
   }
 });

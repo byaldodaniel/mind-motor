@@ -121,7 +121,7 @@ export function createNative({ root, relativePath, bytes, pythonExecutable, nati
  * grantTextCreate/revokeTextCreate; al agente se le entrega una función ligada a
  * su identidad que llama a createTextFile.
  */
-export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeFilesExecutable }) {
+export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeFilesExecutable, writeNativeText = createNative }) {
   // Distinto del WeakMap de lectura: un permiso de lectura nunca autoriza crear.
   const grants = new WeakMap();
   const denied = () => new MotorError('CREATE_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta creación.');
@@ -160,7 +160,7 @@ export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = pro
      * @returns {Promise<{ folderId: string, relativePath: string, size: number,
      *   indexEntry: import('./index-scan.js').IndexEntry }>}
      */
-    async createTextFile({ requester, authorization, content } = {}) {
+    async createTextFile({ requester, authorization, content, confirmAccess } = {}) {
       const grant = grants.get(authorization);
       if (!grant || grant.requester !== requester || grant.used || grant.revoked) throw denied();
       grant.used = true; // Un solo intento; se consume antes de cualquier await o validación.
@@ -168,12 +168,13 @@ export function createTextCreator({ loadAuthorizedFolder, pythonExecutable = pro
       const folder = await folderFor(grant.folderId);
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
-      const result = await createNative({
+      const result = await writeNativeText({
         root: folder.path, relativePath: grant.relativePath, bytes, pythonExecutable, nativeFilesExecutable, maxBytes: grant.maxBytes,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();
           if (isExcluded(current.exclusions, grant.relativePath)) throw excluded();
+          await confirmAccess?.();
         },
       });
       return {

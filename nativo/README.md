@@ -224,6 +224,26 @@ prueba crea un registro de formato 1 sin sobrescribir archivos. La prueba
 verifica el nuevo registro por ID, su referencia al registro anterior y que la
 lectura de r3 conserva los bytes de ambos registros y de la marca de la Base.
 
+## Guardado normal con el anfitrión Rust (Etapa 6)
+
+Una sesión de desarrollo que ya usa la lectura nativa puede seleccionar al
+mismo anfitrión como escritor de los registros de continuidad y las
+escrituras de texto en Windows y Linux. Activa `MIND_ESCRITURA_NATIVA=1` al arrancar ambos procesos.
+Las herramientas normales conservan permisos, revisiones y destinos. El
+anfitrión abre el archivo de forma segura y espera que el Motor confirme el
+permiso. El JSON y el Markdown se publican en el orden habitual, con una
+operación atómica por archivo y el estado explícito de Markdown pendiente si
+falla ese paso. Una vez elegido Rust, el guardado depende de ese anfitrión.
+
+Para comprobar permisos, creación, actualización y vuelta a r3 con una Base
+ficticia y `MIND_NATIVE_EXE` definido:
+
+```powershell
+$env:MIND_TEST_NATIVE_SAVE = '1'
+node --test nativo/test/vista-compartida.test.mjs
+Remove-Item Env:MIND_TEST_NATIVE_SAVE
+```
+
 ## Compilación reproducible
 
 `build.ps1` quita del ejecutable las rutas locales (`--remap-path-prefix`) y,

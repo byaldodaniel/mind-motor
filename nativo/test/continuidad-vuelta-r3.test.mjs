@@ -3,17 +3,14 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { RUNS } from './runs.mjs';
+import { extractR3, r3Commit } from './r3-fixture.mjs';
 
 const run = promisify(execFile);
 const executable = process.env.MIND_NATIVE_EXE;
-const repo = fileURLToPath(new URL('../../', import.meta.url));
 const prefix = 'mind-nativo-runs-relevo-';
-const r3Tag = 'v1.0.4-r3';
-const r3Commit = 'eabdc3c10ca6e22f3b873b0bbac50a5fe7626f64';
-const options = { cwd: repo, timeout: 15_000, windowsHide: true };
+const options = { timeout: 15_000, windowsHide: true };
 
 test('Rust escribe un registro que r3 recupera por ID al volver a la misma Base', {
   skip: !executable && 'Indica MIND_NATIVE_EXE',
@@ -27,15 +24,7 @@ test('Rust escribe un registro que r3 recupera por ID al volver a la misma Base'
   });
 
   const base = path.join(root, 'Base');
-  const r3 = path.join(root, 'r3');
-  const archive = path.join(root, 'r3.tar');
-  await fs.mkdir(r3);
-  const revision = await run('git', ['rev-parse', r3Tag], options);
-  assert.equal(revision.stdout.trim(), r3Commit);
-  await run('git', ['archive', '--format=tar', '--output=' + archive, r3Commit, '--', 'package.json', 'src'], options);
-  await run('tar', ['-xf', archive, '-C', r3], options);
-
-  const moduleUrl = name => JSON.stringify(pathToFileURL(path.join(r3, 'src', name)).href);
+  const moduleUrl = await extractR3(root);
   const imports = [
     'const { openMotor } = await import(' + moduleUrl('motor.js') + ');',
     'const { ensureBase, readBaseMarker } = await import(' + moduleUrl('base-format.js') + ');',

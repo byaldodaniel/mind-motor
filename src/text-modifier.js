@@ -149,7 +149,7 @@ export function modifyNative({ root, relativePath, expected, bytes, pythonExecut
  * recibe grantTextModify/revokeTextModify; al agente se le entrega una función
  * ligada a su identidad que llama a modifyTextFile.
  */
-export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeFilesExecutable }) {
+export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = process.platform === 'win32' ? 'python' : 'python3', nativeFilesExecutable, writeNativeText = modifyNative }) {
   // Mapa propio: los permisos de lectura o creación nunca autorizan modificar.
   const grants = new WeakMap();
   const denied = () => new MotorError('MODIFY_NOT_AUTHORIZED', 'No existe un permiso vigente para este solicitante y esta modificación.');
@@ -190,7 +190,7 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
      * @returns {Promise<{ folderId: string, relativePath: string, size: number, previousVersion: string,
      *   version: string, indexEntry: import('./index-scan.js').IndexEntry }>}
      */
-    async modifyTextFile({ requester, authorization, expectedVersion, content } = {}) {
+    async modifyTextFile({ requester, authorization, expectedVersion, content, confirmAccess } = {}) {
       const grant = grants.get(authorization);
       if (!grant || grant.requester !== requester || grant.used || grant.revoked) throw denied();
       grant.used = true; // Un solo intento; se consume antes de cualquier await o validación.
@@ -199,12 +199,13 @@ export function createTextModifier({ loadAuthorizedFolder, pythonExecutable = pr
       const folder = await folderFor(grant.folderId);
       if (folder.generation !== grant.generation) throw denied();
       if (isExcluded(folder.exclusions, grant.relativePath)) throw excluded();
-      const result = await modifyNative({
+      const result = await writeNativeText({
         root: folder.path, relativePath: grant.relativePath, expected, bytes, pythonExecutable, nativeFilesExecutable, maxBytes: grant.maxBytes,
         confirm: async () => {
           const current = await folderFor(grant.folderId);
           if (current.generation !== grant.generation) throw denied();
           if (isExcluded(current.exclusions, grant.relativePath)) throw excluded();
+          await confirmAccess?.();
         },
       });
       return {

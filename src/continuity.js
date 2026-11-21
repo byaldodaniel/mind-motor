@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MotorError } from './errors.js';
 import { withIndexLock } from './index-lock.js';
@@ -280,17 +280,20 @@ export function createContinuity(motor) {
     fail('INVALID_BASE', 'Indica una instancia del Motor con una Base absoluta.');
   }
   const base = motor.baseDirectory;
+  if (motor.writeNativeText && !motor.readContinuityText) {
+    fail('INVALID_BASE', 'El escritor de continuidad necesita el lector del mismo anfitrión.');
+  }
 
   function filename(id) {
     validateId(id);
     return path.join(base, `continuity-${id}.json`);
   }
 
-  async function load(id) {
+  async function loadRecord(id) {
     const target = filename(id);
-    let stored;
+    let stored, text;
     if (motor.readContinuityText) {
-      const text = await motor.readContinuityText(id);
+      text = await motor.readContinuityText(id);
       stored = text === null ? null : parseStoredJson(text);
     } else {
       stored = await readJson(target);
@@ -298,13 +301,17 @@ export function createContinuity(motor) {
     if (stored === null) return null;
     const entry = checkEntry(stored.data, 'CONTINUITY_CORRUPT');
     if (entry.id !== id) fail('CONTINUITY_CORRUPT', 'El registro de continuidad no corresponde a su archivo.');
-    return entry;
+    return { entry, text };
   }
 
-  async function loadExisting(id) {
-    const entry = await load(id);
-    if (entry === null) fail('CONTINUITY_NOT_FOUND', 'No existe un registro de continuidad con ese identificador.');
-    return entry;
+  async function load(id) {
+    return (await loadRecord(id))?.entry ?? null;
+  }
+
+  async function loadExistingRecord(id) {
+    const record = await loadRecord(id);
+    if (record === null) fail('CONTINUITY_NOT_FOUND', 'No existe un registro de continuidad con ese identificador.');
+    return record;
   }
 
   async function requireEntryReferences(references, selfId, existingReferences = []) {
@@ -330,8 +337,22 @@ export function createContinuity(motor) {
     }
   }
 
-  async function save(entry) {
-    await writeJson(filename(entry.id), toStored(entry));
+  async function save(entry, previous, confirm) {
+    const target = filename(entry.id);
+    const stored = toStored(entry);
+    if (motor.writeNativeText) {
+      const expected = previous ? createHash('sha256').update(previous.text).digest('hex') : undefined;
+      await motor.writeNativeText({
+        root: base, relativePath: path.basename(target),
+        bytes: Buffer.from(JSON.stringify(stored) + '\n'), expected, maxBytes: 2 * 1024 * 1024,
+        confirm: async () => {
+          requestSignal()?.throwIfAborted();
+          await confirm?.();
+        },
+      });
+    } else {
+      await writeJson(target, stored);
+    }
     return entry;
   }
 
@@ -340,7 +361,7 @@ export function createContinuity(motor) {
      * @param {{ content: JsonValue, kind?: string, source?: string, references?: ContinuityReference[] }} request
      * @returns {Promise<ContinuityEntry>}
      */
-    async recordContinuity(request) {
+    async recordContinuity(request, { confirm } = {}) {
       rejectUnknownFields(request, ['content', 'kind', 'source', 'references']);
       const content = validateContent(request.content);
       const kind = validateLabel(request.kind, 'kind');
@@ -351,7 +372,7 @@ export function createContinuity(motor) {
       // El id aleatorio evita que dos anfitriones elijan el mismo nombre por accidente.
       return save({
         id: randomUUID(), revision: 1, createdAt: now, updatedAt: now, source, kind, content, references,
-      });
+      }, undefined, confirm);
     },
 
     /** @returns {Promise<ContinuityEntry | null>} */
@@ -363,12 +384,13 @@ export function createContinuity(motor) {
      * @param {{ content?: JsonValue, kind?: string | null, source?: string | null, references?: ContinuityReference[] }} changes
      * @param {{ expectedRevision?: number }} [options]
      */
-    async updateContinuity(id, changes, { expectedRevision, preserveExistingReferences = false } = {}) {
+    async updateContinuity(id, changes, { expectedRevision, preserveExistingReferences = false, confirm } = {}) {
       validateId(id);
       return withIndexLock(base, id, async () => {
         rejectUnknownFields(changes, ['content', 'kind', 'source', 'references']);
         if (Object.keys(changes).length === 0) fail('INVALID_CONTINUITY_FIELD', 'Indica al menos un campo a actualizar.');
-        const entry = await loadExisting(id);
+        const previous = await loadExistingRecord(id);
+        const { entry } = previous;
         checkRevision(entry, expectedRevision);
         const next = { ...entry };
         if (Object.hasOwn(changes, 'content')) next.content = validateContent(changes.content);
@@ -380,7 +402,7 @@ export function createContinuity(motor) {
         }
         next.revision = entry.revision + 1;
         next.updatedAt = nextTimestamp(entry.updatedAt);
-        return save(next);
+        return save(next, previous, confirm);
       }, 'continuity-entry', { signal: requestSignal() });
     },
 
@@ -390,14 +412,15 @@ export function createContinuity(motor) {
       return withIndexLock(base, id, async () => {
         const added = validateReferences(references);
         if (added.length === 0) fail('INVALID_CONTINUITY_REFERENCE', 'Indica al menos una referencia.');
-        const entry = await loadExisting(id);
+        const previous = await loadExistingRecord(id);
+        const { entry } = previous;
         checkRevision(entry, expectedRevision);
         await requireEntryReferences(added, id);
         const merged = validateReferences([...entry.references, ...added]);
         if (merged.length === entry.references.length) return entry;
         return save({
           ...entry, references: merged, revision: entry.revision + 1, updatedAt: nextTimestamp(entry.updatedAt),
-        });
+        }, previous);
       }, 'continuity-entry', { signal: requestSignal() });
     },
 
@@ -437,7 +460,7 @@ export function createContinuity(motor) {
       const selected = [...new Set(ids)];
       const entries = new Map();
       const missing = new Set();
-      for (const id of selected) entries.set(id, await loadExisting(id));
+      for (const id of selected) entries.set(id, (await loadExistingRecord(id)).entry);
       const pending = includeReferenced ? [...entries.values()] : [];
       while (pending.length > 0) {
         for (const reference of pending.shift().references) {

@@ -100,6 +100,9 @@ impl Host {
         if let Some(id) = path.strip_prefix(continuity_read::PATH_PREFIX) {
             let response = match &self.continuity_reader {
                 Some(reader) if req.method() == Method::GET => reader.serve(req.headers(), id).await,
+                Some(reader) if req.method() == Method::POST && matches!(id, "escribir" | "confirmar" | "cancelar") => {
+                    reader.write(req, id).await
+                }
                 _ => full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"})),
             };
             return Ok(response);

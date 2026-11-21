@@ -51,7 +51,7 @@ export async function prepareConversationFile({ motor, before, destination, dire
     try { await context.fileTool('crear_carpeta',{carpeta:folder.id,ruta:route}); }
     catch(error) { if (!['ENTRY_EXISTS','FILE_EXISTS','DIRECTORY_EXISTS','DESTINATION_EXISTS','TARGET_EXISTS'].includes(error.code)) throw error; }
   }
-  return { target, async write(value) {
+  return { target, confirmAccess: () => context.requireAccess(folder, 'leer', 'escribir'), async write(value) {
     const args = {carpeta:folder.id,ruta:relative,contenido:conversationMarkdown(value)};
     return previous
       ? context.fileTool('modificar',{...args,version:previous.version})

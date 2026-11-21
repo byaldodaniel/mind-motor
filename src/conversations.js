@@ -134,7 +134,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
     return conversation;
   }
 
-  async function saveConversationUnlocked(input) {
+  async function saveConversationUnlocked(input, { confirm } = {}) {
     const allowed = ['id', 'expectedRevision', 'title', 'important', 'project', 'agent', 'externalId', 'references', 'source', 'preferences', 'explicit', 'file'];
     if (!input || typeof input !== 'object' || Array.isArray(input)
         || Object.keys(input).some(key => !allowed.includes(key))) fail('INVALID_CONVERSATION', 'Campos de conversación no válidos.');
@@ -151,7 +151,7 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
       const entry = await continuity.recordContinuity({
         kind: 'conversacion', content: content(input), source: input.source,
         references: input.references,
-      });
+      }, { confirm });
       return asConversation(entry);
     }
     const before = await getConversation(input.id);
@@ -164,11 +164,11 @@ export function createConversations({ baseDirectory, continuity, semanticEncoder
       .map(key => [key, Object.hasOwn(input, key) ? input[key] : before[key]])));
     const entry = await continuity.updateContinuity(input.id, {
       content: next, ...(input.references !== undefined ? { references: input.references } : {}),
-    }, { expectedRevision: input.expectedRevision });
+    }, { expectedRevision: input.expectedRevision, confirm });
     return asConversation(entry);
   }
 
-  const saveConversation = input => preferences.lock(() => saveConversationUnlocked(input));
+  const saveConversation = (input, options) => preferences.lock(() => saveConversationUnlocked(input, options));
 
   async function openIndex() {
     const filename = path.join(baseDirectory, CONVERSATION_INDEX);

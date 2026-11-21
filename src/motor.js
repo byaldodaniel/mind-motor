@@ -120,7 +120,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, nativeTextReaderExecutable, nativeFilesExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, nativeMeaningExecutable, readContinuityText, userDataDirectory, backgroundGate = null } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, nativeTextReaderExecutable, nativeFilesExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, nativeMeaningExecutable, readContinuityText, writeNativeText, userDataDirectory, backgroundGate = null } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -158,7 +158,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, nativeTextRea
   // setExclusions solo se usa bajo la coordinación del índice (setFolderExclusions).
   const { loadAuthorizedFolder, setExclusions, ...folders } = createFolderRegistry(base, motor, protectedPhysical, userDataDirectory ? await realpath(userDataDirectory) : null);
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
-  const continuity = createContinuity({ baseDirectory: base, readContinuityText });
+  const continuity = createContinuity({ baseDirectory: base, readContinuityText, writeNativeText });
   const continuityAccess = createContinuityAccess(continuity);
   const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder, nativeMeaningExecutable, backgroundGate });
   const indexer = createFolderIndexer({
@@ -188,8 +188,8 @@ export async function openMotor({ baseDirectory, pythonExecutable, nativeTextRea
   const relocation=createConversationRelocation({baseDirectory:base,continuity,conversations,results:resultRegistry,destinations:workDestinations});
   const coordinated=operation=>(...args)=>relocation.withState(()=>operation(...args));
   const resultCopier = createResultCopier({loadAuthorizedFolder,pythonExecutable,nativeFilesExecutable});
-  const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable, nativeFilesExecutable });
-  const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable, nativeFilesExecutable });
+  const creator = createTextCreator({ loadAuthorizedFolder, pythonExecutable, nativeFilesExecutable, writeNativeText });
+  const modifier = createTextModifier({ loadAuthorizedFolder, pythonExecutable, nativeFilesExecutable, writeNativeText });
   /** Observadores abiertos en esta instancia; solo existen si el anfitrión los abre. */
   const observers = new Set();
 

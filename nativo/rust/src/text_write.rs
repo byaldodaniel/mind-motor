@@ -25,13 +25,13 @@ use windows as platform;
 
 const DEFAULT_LIMIT: usize = 1024 * 1024;
 const MAX_LIMIT: usize = 16 * DEFAULT_LIMIT;
-const MAX_REQUEST: u64 = (3 * MAX_LIMIT) as u64;
+pub(crate) const MAX_REQUEST: u64 = (3 * MAX_LIMIT) as u64;
 
 type Result<T> = std::result::Result<T, &'static str>;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Request {
+pub(crate) struct Request {
     root: String,
     relative_path: String,
     content: String,
@@ -41,7 +41,7 @@ struct Request {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Report {
+pub(crate) struct Report {
     size: u64,
     modified_ms: Option<i64>,
     changed_ms: Option<i64>,
@@ -84,6 +84,32 @@ fn run(args: &[String], replace: bool) -> Result<()> {
         return Err(failed);
     }
     let request: Request = serde_json::from_slice(&request).map_err(|_| failed)?;
+    let confirm = || -> Result<()> {
+        {
+            let mut diagnostic = io::stderr().lock();
+            diagnostic.write_all(b"READY\n").map_err(|_| failed)?;
+            diagnostic.flush().map_err(|_| failed)?;
+        }
+        let mut ack = [0];
+        input.read_exact(&mut ack).map_err(|_| failed)?;
+        if ack != *b"W" {
+            return Err(failed);
+        }
+        guard.begin_commit(Duration::from_secs(10))
+    };
+    let report = write(request, replace, confirm)?;
+    serde_json::to_writer(io::stdout().lock(), &report)
+        .map_err(|_| if replace { "MODIFY_UNCONFIRMED" } else { "CREATE_UNCONFIRMED" })
+}
+
+pub(crate) fn prepared_write(request: Request, confirm: impl FnOnce() -> Result<()>) -> Result<Report> {
+    let replace = request.expected.is_some();
+    write(request, replace, confirm)
+}
+
+#[cfg(any(unix, windows))]
+fn write(request: Request, replace: bool, confirm: impl FnOnce() -> Result<()>) -> Result<Report> {
+    let failed = if replace { "MODIFY_FAILED" } else { "CREATE_FAILED" };
     let expected = match (replace, request.expected.as_deref()) {
         (false, None) => None,
         (true, Some(value)) if value.len() == 64
@@ -100,29 +126,18 @@ fn run(args: &[String], replace: bool) -> Result<()> {
     }
     check_text(&data, "INVALID_TEXT")?;
     let (parent, name) = destination(&request.root, &request.relative_path, replace)?;
-    let confirm = || -> Result<()> {
-        {
-            let mut diagnostic = io::stderr().lock();
-            diagnostic.write_all(b"READY\n").map_err(|_| failed)?;
-            diagnostic.flush().map_err(|_| failed)?;
-        }
-        let mut ack = [0];
-        input.read_exact(&mut ack).map_err(|_| failed)?;
-        if ack != *b"W" {
-            return Err(failed);
-        }
-        guard.begin_commit(Duration::from_secs(10))
-    };
-
-    let report = match expected {
+    match expected {
         Some(expected) => platform::modify_text(&parent, name, &data, limit, expected, confirm),
         None => platform::create_stream(&parent, name, confirm, |file| {
             file.write_all(&data).map_err(|error| platform::mapped(error, false))?;
             Ok(data.len() as u64)
         }),
-    }?;
-    serde_json::to_writer(io::stdout().lock(), &report)
-        .map_err(|_| if replace { "MODIFY_UNCONFIRMED" } else { "CREATE_UNCONFIRMED" })
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write(_: Request, _: bool, _: impl FnOnce() -> Result<()>) -> Result<Report> {
+    Err("SAFE_OPEN_UNAVAILABLE")
 }
 
 #[cfg(not(any(unix, windows)))]

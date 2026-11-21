@@ -111,7 +111,11 @@ export function createConversationTools({ session }) {
           ?? policy.global.directory ?? destinations.general.tipos?.memoria ?? destinations.general.carpeta
           ?? session.layout.userDataDirectory,context});
         input.file = file.target;
-        const value = await motor.saveConversation(input);
+        await requireContinuity('leer', 'registrar');
+        const value = await motor.saveConversation(input, { confirm: async () => {
+          await requireContinuity('leer', 'registrar');
+          await file.confirmAccess();
+        } });
         try { await file.write(value); }
         catch(error) { return {estado:'pendiente_archivo',conversacion:output(value),archivo:{estado:'pendiente',ruta:file.target,codigo:error.code ?? 'WRITE_FAILED'},nota:'El elemento quedó en continuidad, pero el archivo no pudo actualizarse. No afirmar guardado completo.'}; }
         return { estado: args.id === undefined ? 'registrada' : 'actualizada', conversacion: output(value) };

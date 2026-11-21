@@ -8,7 +8,7 @@ import { BASE_FORMAT_VERSION, ensureBase, prepareBaseFormat, readBaseMarker } fr
 import { releaseOf } from './package-descriptor.js';
 import { takeUpdateReport } from './update-handoff.js';
 import { openSession } from './session.js';
-import { createNativeContinuityReader } from './continuity-reader.js';
+import { createNativeContinuityStore } from './continuity-reader.js';
 import { createWorkspaceAccess } from './workspace-access.js';
 import { createAgentTools, AGENT_INSTRUCTIONS } from './agent-tools.js';
 import { catalogMode, instructionsFor, withCatalog } from './core-catalog.js';
@@ -205,6 +205,7 @@ export async function startCentralMotor({
   errorFile = null,
   sessionFactory = openSession,
   readContinuityText,
+  writeNativeText,
   log = () => {},
   onShutdown,
   launchMechanism = process.env[LAUNCH_ENV] ?? 'directo',
@@ -370,6 +371,7 @@ export async function startCentralMotor({
     session = await sessionFactory({
       layout, motorVersion, log, observe, backgroundGate: smartQueue,
       ...(readContinuityText === undefined ? {} : { readContinuityText }),
+      ...(writeNativeText === undefined ? {} : { writeNativeText }),
     });
     const baseId = baseIdOf(canonicalBase);
     const token = await readOrCreateSecret(canonicalBase);
@@ -1019,17 +1021,22 @@ export async function startCentralMotor({
 /** Ejecuta el Motor Central como proceso demonio hasta recibir `apagar`, señal o autoapagado por inactividad. */
 export async function runCentralMotorDaemon(options = {}) {
   const port = process.env.MIND_PUERTO_LECTURA_CONTINUIDAD;
-  const readContinuityText = port === undefined ? options.readContinuityText
-    : createNativeContinuityReader({
-      port: Number(port), key: process.env.MIND_CLAVE_LECTURA_CONTINUIDAD,
-      baseId: baseIdOf(await canonicalBaseDirectory(options.layout.baseDirectory)),
-    });
+  const native = port === undefined ? undefined : createNativeContinuityStore({
+    port: Number(port), key: process.env.MIND_CLAVE_LECTURA_CONTINUIDAD,
+    baseId: baseIdOf(await canonicalBaseDirectory(options.layout.baseDirectory)),
+  });
+  const useNativeWriter = process.env.MIND_ESCRITURA_NATIVA === '1';
+  if (useNativeWriter && !['win32', 'linux'].includes(process.platform)) {
+    throw new Error('La actualización segura en Rust está disponible en Windows y Linux.');
+  }
+  if (useNativeWriter && !native) throw new Error('La escritura nativa requiere el anfitrión de continuidad.');
   let shuttingDown = false;
   let motor;
   const finish = new Promise((resolve, reject) => {
     startCentralMotor({
       ...options,
-      readContinuityText,
+      readContinuityText: native?.readContinuityText ?? options.readContinuityText,
+      writeNativeText: useNativeWriter ? native.writeNativeText : options.writeNativeText,
       onShutdown(reason) {
         resolve(reason);
       },
