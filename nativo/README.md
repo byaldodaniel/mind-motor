@@ -179,6 +179,36 @@ node --test nativo/test/significado.test.mjs
 `MIND_TEST_BUNDLED_PYTHON` permite usar el Python portable como referencia.
 La evaluación puede comparar con E5 local al indicar `MIND_TEST_E5_DIRECTORY`.
 
+## Lectura de continuidad por ID (Etapa 6)
+
+La prueba de la vista compartida puede usar el anfitrión Rust para abrir y leer
+el archivo de continuidad por ID. El Motor Node conserva el permiso de lectura,
+la validación del registro y la escritura de la Base y del Markdown. La prueba
+arranca el anfitrión y el Motor con una clave interna de un solo arranque. El
+token de los agentes no da acceso a la lectura de registros en bruto.
+
+Con el binario Rust en `MIND_NATIVE_EXE` y Python portable en
+`MIND_TEST_BUNDLED_PYTHON`, compara los dos modos sobre Bases temporales nuevas:
+
+```powershell
+node --test nativo/test/vista-compartida.test.mjs
+$env:MIND_TEST_NATIVE_CONTINUITY = '1'
+node --test nativo/test/vista-compartida.test.mjs
+Remove-Item Env:MIND_TEST_NATIVE_CONTINUITY
+```
+
+La prueba guarda en Node y retoma desde otra sesión después de cerrar la
+primera. Verifica los archivos y el permiso antes y después de revocarlo.
+Con la lectura Rust activa, parar el anfitrión hace fallar la lectura por ID
+aunque Node siga atendiendo.
+
+Para usar el lector desde un arranque local de desarrollo, inicia el anfitrión
+sobre la misma Base que usará el Motor. Pasa a ambos procesos la misma
+`MIND_CLAVE_LECTURA_CONTINUIDAD` aleatoria de 64 caracteres hexadecimales.
+En el arranque del Motor indica también `MIND_PUERTO_LECTURA_CONTINUIDAD`
+con el puerto que publica el anfitrión en `anfitrion.json`. Sin este puerto,
+el Motor sigue leyendo sus registros directamente.
+
 ## Compilación reproducible
 
 `build.ps1` quita del ejecutable las rutas locales (`--remap-path-prefix`) y,

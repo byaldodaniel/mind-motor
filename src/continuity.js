@@ -4,7 +4,7 @@ import path from 'node:path';
 import { MotorError } from './errors.js';
 import { withIndexLock } from './index-lock.js';
 import { requestSignal } from './request-context.js';
-import { readJson, writeJson, removeJson } from './storage.js';
+import { parseStoredJson, readJson, writeJson, removeJson } from './storage.js';
 
 const ENTRY_FORMAT = 'mind-continuity-entry';
 const EXPORT_FORMAT = 'mind-continuity-export';
@@ -273,7 +273,7 @@ export function formatContinuityMarkdown(input) {
  * Núcleo de continuidad sobre la Base del Motor recibido.
  * Registra solo lo que el anfitrión entrega de forma explícita; no lee historiales
  * de plataformas ni originales, y no decide quién está autorizado a llamarlo.
- * @param {{ baseDirectory: string }} motor
+ * @param {{ baseDirectory: string, readContinuityText?: (id: string) => Promise<string | null> }} motor
  */
 export function createContinuity(motor) {
   if (!motor || typeof motor.baseDirectory !== 'string' || !path.isAbsolute(motor.baseDirectory)) {
@@ -287,7 +287,14 @@ export function createContinuity(motor) {
   }
 
   async function load(id) {
-    const stored = await readJson(filename(id));
+    const target = filename(id);
+    let stored;
+    if (motor.readContinuityText) {
+      const text = await motor.readContinuityText(id);
+      stored = text === null ? null : parseStoredJson(text);
+    } else {
+      stored = await readJson(target);
+    }
     if (stored === null) return null;
     const entry = checkEntry(stored.data, 'CONTINUITY_CORRUPT');
     if (entry.id !== id) fail('CONTINUITY_CORRUPT', 'El registro de continuidad no corresponde a su archivo.');

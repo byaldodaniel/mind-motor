@@ -120,7 +120,7 @@ function validateId(id) {
  * @param {MotorOptions} options
  * @returns {Promise<Motor>}
  */
-export async function openMotor({ baseDirectory, pythonExecutable, nativeTextReaderExecutable, nativeFilesExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, nativeMeaningExecutable, userDataDirectory, backgroundGate = null } = {}) {
+export async function openMotor({ baseDirectory, pythonExecutable, nativeTextReaderExecutable, nativeFilesExecutable, functionExecutors = {}, protectedDirectories = [], signal, resourceSample, semanticEncoder, nativeMeaningExecutable, readContinuityText, userDataDirectory, backgroundGate = null } = {}) {
   if (typeof baseDirectory !== 'string' || !path.isAbsolute(baseDirectory)) {
     throw new MotorError('INVALID_BASE', 'Indica una ruta absoluta a una Base existente.');
   }
@@ -158,7 +158,7 @@ export async function openMotor({ baseDirectory, pythonExecutable, nativeTextRea
   // setExclusions solo se usa bajo la coordinación del índice (setFolderExclusions).
   const { loadAuthorizedFolder, setExclusions, ...folders } = createFolderRegistry(base, motor, protectedPhysical, userDataDirectory ? await realpath(userDataDirectory) : null);
   // Continuidad sobre esta misma Base; los permisos de agentes viven solo en esta instancia.
-  const continuity = createContinuity({ baseDirectory: base });
+  const continuity = createContinuity({ baseDirectory: base, readContinuityText });
   const continuityAccess = createContinuityAccess(continuity);
   const conversations = createConversations({ baseDirectory: base, continuity, semanticEncoder, nativeMeaningExecutable, backgroundGate });
   const indexer = createFolderIndexer({

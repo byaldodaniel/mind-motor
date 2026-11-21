@@ -60,7 +60,7 @@ function createAudit(baseDirectory) {
  * @param {{ layout: object, motorVersion: string, log?: Function, observe?: boolean, functionExecutors?: object }} options
  */
 export async function openSession({ layout, motorVersion, log = () => {}, observe = true, functionExecutors = {},
-  motorFactory = openMotor, backgroundGate = null, installationLeaseHeld = false, nativeTextReaderExecutable, nativeFilesExecutable, nativeMeaningExecutable }) {
+  motorFactory = openMotor, backgroundGate = null, installationLeaseHeld = false, nativeTextReaderExecutable, nativeFilesExecutable, nativeMeaningExecutable, readContinuityText }) {
   const releaseStartup = layout.product && !installationLeaseHeld ? await lockInstallation(layout.root, { pythonExecutable: layout.pythonExecutable }) : async () => {};
   try {
   await ensureUserDataDirectory(layout);
@@ -72,6 +72,7 @@ export async function openSession({ layout, motorVersion, log = () => {}, observ
     ...(nativeTextReaderExecutable === undefined ? {} : { nativeTextReaderExecutable }),
     ...(nativeFilesExecutable === undefined ? {} : { nativeFilesExecutable }),
     ...(nativeMeaningExecutable === undefined ? {} : { nativeMeaningExecutable }),
+    ...(readContinuityText === undefined ? {} : { readContinuityText }),
     protectedDirectories: layout.protectedDirectories,
     userDataDirectory: layout.userDataDirectory,
     functionExecutors,

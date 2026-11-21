@@ -1,17 +1,20 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { createAccessPolicy } from '../../src/access-policy.js';
 import { stopCentralMotor } from '../../src/connector.js';
 import { resolveLayout } from '../../src/layout.js';
 import { openSession } from '../../src/session.js';
 import { RUNS } from './runs.mjs';
 
 const executable = process.env.MIND_NATIVE_EXE;
+const nativeContinuity = process.env.MIND_TEST_NATIVE_CONTINUITY === '1';
 const motorScript = fileURLToPath(new URL('./real-motor.mjs', import.meta.url));
 const run = promisify(execFile);
 const fixturePrefix = 'mind-nativo-runs-vista-';
@@ -96,8 +99,13 @@ async function openMcp(url, auth, name) {
   await post('notifications/initialized', undefined, true);
   return {
     id,
-    async call(tool, args) {
+    async call(tool, args, expectedError) {
       const { result } = await post('tools/call', { name: tool, arguments: args });
+      if (expectedError) {
+        assert.equal(result.isError, true);
+        assert.equal(result.structuredContent?.error?.codigo, expectedError);
+        return;
+      }
       assert.equal(Boolean(result.isError), false, JSON.stringify(result.structuredContent));
       return result.structuredContent;
     },
@@ -173,13 +181,15 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
     await setup.close();
   }
 
+  const binary = path.resolve(executable);
+  if (nativeContinuity) env.MIND_CLAVE_LECTURA_CONTINUIDAD = randomBytes(32).toString('hex');
+  host = start(binary, ['anfitrion', '--base', base, '--puerto-vistas', '0'], env);
+  const control = await host.connector(base, 'anfitrion.json');
+  if (nativeContinuity) env.MIND_PUERTO_LECTURA_CONTINUIDAD = String(control.port);
   motor = start(process.execPath, [motorScript, base], env);
   motorRecord = await motor.connector(base, 'conector.json');
   const { token } = JSON.parse(await fs.readFile(path.join(base, 'conector-secreto.json'), 'utf8'));
   const auth = { Authorization: 'Bearer ' + token };
-  const binary = path.resolve(executable);
-  host = start(binary, ['anfitrion', '--base', base, '--puerto-vistas', '0'], env);
-  const control = await host.connector(base, 'anfitrion.json');
   const origin = new URL(control.url).origin;
   const mcp = new URL('/mcp?catalogo=nucleo', origin);
   const get = (url, options = {}) => fetch(url, { signal: AbortSignal.timeout(5_000), ...options });
@@ -215,7 +225,7 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
   const reference = { ubicacion: published.url, relacion: 'Mapa abierto del Proyecto Atlas' };
   const remembered = {
     id: published.id, url: published.url, proyecto: project, copia: published.copia,
-    git: published.git, huella: published.huella,
+    git: published.git, huella: published.huella, nota: 'Área norte 🗺️',
   };
   try {
     const created = await first.call('guardar', {
@@ -224,6 +234,13 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
     });
     const state = await first.call('retomar', { id: created.conversacion.id });
     saved = state.conversacion;
+    assert.equal(created.estado, 'registrada');
+    const filename = path.join(base, 'continuity-' + saved.id + '.json');
+    const persisted = JSON.parse(await fs.readFile(filename, 'utf8'));
+    assert.equal(persisted.format, 'mind-continuity-entry');
+    assert.equal(persisted.version, 1);
+    assert.equal(persisted.content.important, saved.importante);
+    assert.ok((await fs.readFile(saved.archivo, 'utf8')).includes(saved.importante));
     const page = await get(preview);
     assert.equal(page.status, 200);
     assert.match(page.headers.get('content-type'), /^text\/html/u);
@@ -244,6 +261,38 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
     assert.equal(await (await get(conversacion.referencias[0].ubicacion)).text(), firstMap);
     assert.equal((await health()).pid, host.pid);
     assert.deepEqual(await consulta(published.id), published);
+
+    const raw = await get(new URL('/interno/continuidad/' + saved.id, origin), { headers: auth });
+    assert.equal(raw.status, nativeContinuity ? 401 : 404);
+    assert.ok(!(await raw.text()).includes(saved.importante));
+    if (nativeContinuity) {
+      const nonce = randomBytes(16).toString('hex');
+      const otherBase = control.baseId === '0'.repeat(16) ? '1'.repeat(16) : '0'.repeat(16);
+      const proof = createHmac('sha256', env.MIND_CLAVE_LECTURA_CONTINUIDAD)
+        .update([otherBase, 'read', nonce, saved.id].join('\n')).digest('hex');
+      const crossBase = await get(new URL('/interno/continuidad/' + saved.id, origin), {
+        headers: { Authorization: 'Mind-Internal ' + nonce + '.' + proof },
+      });
+      assert.equal(crossBase.status, 401);
+      await crossBase.text();
+    }
+
+    await second.call('retomar', { id: 'no-es-un-id' }, 'INVALID_CONVERSATION_ID');
+    await second.call('retomar', { id: randomUUID() }, 'CONVERSATION_NOT_FOUND');
+    const badId = randomUUID();
+    const badFile = path.join(base, 'continuity-' + badId + '.json');
+    await fs.writeFile(badFile, '{', { flag: 'wx' });
+    try {
+      await second.call('retomar', { id: badId }, 'RECORD_CORRUPT');
+    } finally {
+      await fs.unlink(badFile);
+    }
+
+    const policy = createAccessPolicy({ baseDirectory: base, getAuthorizedFolder: async () => null });
+    await policy.setContinuity([], { channel: 'administracion-local' });
+    await second.call('retomar', { id: saved.id }, 'ACCESS_NOT_GRANTED');
+    await policy.setContinuity(['leer'], { channel: 'administracion-local' });
+    assert.deepEqual((await second.call('retomar', { id: saved.id })).conversacion, saved);
   } finally {
     await second.close();
   }
@@ -313,4 +362,16 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
   assert.deepEqual(await health().then(({ pid, vistas }) => ({ pid, vistas })), {
     pid: host.pid, vistas: { activas: 0, bytes: 0 },
   });
+
+  if (nativeContinuity) {
+    await host.stop();
+    const direct = new URL('http://127.0.0.1:' + motorRecord.port + '/mcp?catalogo=nucleo');
+    const client = await openMcp(direct, auth, 'vista-motor-sin-anfitrion');
+    try {
+      assert.equal((await client.call('estado', {})).motor_central.pid, motor.pid);
+      await client.call('retomar', { id: saved.id }, 'CONTINUITY_READER_UNAVAILABLE');
+    } finally {
+      await client.close();
+    }
+  }
 });

@@ -23,6 +23,10 @@ export async function readJson(filename) {
     if (error.code === 'ENOENT') return null;
     throw error;
   }
+  return parseStoredJson(text);
+}
+
+export function parseStoredJson(text) {
   try {
     // El envoltorio distingue un archivo que contiene null de uno inexistente.
     return { data: JSON.parse(text) };

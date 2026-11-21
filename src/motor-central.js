@@ -8,6 +8,7 @@ import { BASE_FORMAT_VERSION, ensureBase, prepareBaseFormat, readBaseMarker } fr
 import { releaseOf } from './package-descriptor.js';
 import { takeUpdateReport } from './update-handoff.js';
 import { openSession } from './session.js';
+import { createNativeContinuityReader } from './continuity-reader.js';
 import { createWorkspaceAccess } from './workspace-access.js';
 import { createAgentTools, AGENT_INSTRUCTIONS } from './agent-tools.js';
 import { catalogMode, instructionsFor, withCatalog } from './core-catalog.js';
@@ -203,6 +204,7 @@ export async function startCentralMotor({
   publishConnector = true,
   errorFile = null,
   sessionFactory = openSession,
+  readContinuityText,
   log = () => {},
   onShutdown,
   launchMechanism = process.env[LAUNCH_ENV] ?? 'directo',
@@ -365,7 +367,10 @@ export async function startCentralMotor({
 
   try {
     const smartQueue = createSmartQueue();
-    session = await sessionFactory({ layout, motorVersion, log, observe, backgroundGate: smartQueue });
+    session = await sessionFactory({
+      layout, motorVersion, log, observe, backgroundGate: smartQueue,
+      ...(readContinuityText === undefined ? {} : { readContinuityText }),
+    });
     const baseId = baseIdOf(canonicalBase);
     const token = await readOrCreateSecret(canonicalBase);
     const startedAt = new Date().toISOString();
@@ -1013,11 +1018,18 @@ export async function startCentralMotor({
 
 /** Ejecuta el Motor Central como proceso demonio hasta recibir `apagar`, señal o autoapagado por inactividad. */
 export async function runCentralMotorDaemon(options = {}) {
+  const port = process.env.MIND_PUERTO_LECTURA_CONTINUIDAD;
+  const readContinuityText = port === undefined ? options.readContinuityText
+    : createNativeContinuityReader({
+      port: Number(port), key: process.env.MIND_CLAVE_LECTURA_CONTINUIDAD,
+      baseId: baseIdOf(await canonicalBaseDirectory(options.layout.baseDirectory)),
+    });
   let shuttingDown = false;
   let motor;
   const finish = new Promise((resolve, reject) => {
     startCentralMotor({
       ...options,
+      readContinuityText,
       onShutdown(reason) {
         resolve(reason);
       },

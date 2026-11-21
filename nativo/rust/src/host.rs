@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
-use crate::{bridge::{base_id, regular_json}, services::Services, views::Views, MAX_MESSAGE};
+use crate::{bridge::{base_id, regular_json}, continuity_read, services::Services, views::Views, MAX_MESSAGE};
 
 pub(crate) type Body = BoxBody<Bytes, std::io::Error>;
 
@@ -29,6 +29,7 @@ struct Host {
     client: reqwest::Client,
     motor: Mutex<Option<Motor>>,
     started: String,
+    continuity_reader: Option<continuity_read::Reader>,
     views: Option<Arc<Views>>,
     services: Option<Arc<Services>>,
 }
@@ -95,6 +96,13 @@ impl Host {
         let path = req.uri().path().to_owned();
         if path == "/health" && req.method() == Method::GET {
             return Ok(self.health(req.uri().query()).await);
+        }
+        if let Some(id) = path.strip_prefix(continuity_read::PATH_PREFIX) {
+            let response = match &self.continuity_reader {
+                Some(reader) if req.method() == Method::GET => reader.serve(req.headers(), id).await,
+                _ => full(StatusCode::NOT_FOUND, json!({"error": "NOT_FOUND"})),
+            };
+            return Ok(response);
         }
         if path == "/servicios" || path.starts_with("/servicios/") {
             return Ok(match &self.services {
@@ -218,8 +226,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     if let Some((_, port)) = &preview {
         record["puertoVistas"] = json!(port);
     }
+    let continuity_reader = continuity_read::Reader::from_env(&base, &base_identity)?;
     let host = Arc::new(Host {
-        base: base.clone(), base_id: base_identity, port, client, motor: Mutex::new(None), started, views: views.clone(), services: services.clone(),
+        base: base.clone(), base_id: base_identity, port, client, motor: Mutex::new(None), started, continuity_reader, views: views.clone(), services: services.clone(),
     });
     let path = base.join("anfitrion.json");
     let temporary = base.join(format!(".anfitrion-{}.tmp", Uuid::new_v4().simple()));
