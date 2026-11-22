@@ -777,7 +777,7 @@ fn local_slot_ms(year: i32, month: u32, day_offset: i32, day: u32, hour: u32, mi
 
 #[cfg(unix)]
 fn local_parts(epoch_ms: i64) -> LocalParts {
-    let secs = epoch_ms.div_euclid(1000) as libc::time_t;
+    let secs = epoch_ms.div_euclid(1000) as _;
     let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
     unsafe {
         if libc::localtime_r(&secs, tm.as_mut_ptr()).is_null() {
@@ -1926,9 +1926,13 @@ fn run_executor(
         }
         "indice-csv" => {
             let idx_id = params["indice"].as_str().unwrap_or_default();
-            let _ = read_json(base, &format!("custom-index-{idx_id}.json"))?
+            let result = crate::motor_custom_index::regenerate(base, idx_id, &confirm_owner)?;
+            let stored = read_json(base, &format!("custom-index-{idx_id}.json"))?
                 .ok_or_else(|| Fault::new("CUSTOM_INDEX_NOT_FOUND", "Ese índice personalizado no existe."))?;
-            Err(Fault::new("NOT_YET_PORTED", "La ejecución de indice-csv depende aún del Motor r3."))
+            Ok(json!({
+                "estado": result["estado"], "filas": result["filas"],
+                "archivos": [{"carpeta": stored["destination"]["folderId"], "ruta": stored["destination"]["relativePath"]}],
+            }))
         }
         _ => Err(Fault::new("EXECUTOR_NOT_FOUND", "Ejecutor desconocido.")),
     }
@@ -2506,6 +2510,7 @@ struct OwnWrites {
 }
 
 pub(crate) struct AutomationRuntime {
+    custom_indexes: crate::motor_custom_index::Automatic,
     started_ms: i64,
     bursts: HashMap<String, EventBurst>,
     own_writes: HashMap<String, OwnWrites>,
@@ -2538,6 +2543,7 @@ fn match_event_path(subfolder: Option<&str>, extensions: Option<&[String]>, rela
 impl AutomationRuntime {
     pub(crate) fn new() -> Self {
         Self {
+            custom_indexes: crate::motor_custom_index::Automatic::default(),
             started_ms: now_ms().unwrap_or(0),
             bursts: HashMap::new(),
             own_writes: HashMap::new(),
@@ -2545,6 +2551,7 @@ impl AutomationRuntime {
     }
 
     pub(crate) fn clear_bursts(&mut self, base: &str) {
+        self.custom_indexes.clear();
         self.bursts.clear();
         self.own_writes.clear();
         let _ = motor_files::drain_index_diffs(base);
@@ -2607,7 +2614,10 @@ impl AutomationRuntime {
             let _ = execute_one(base, motor_dir, &id, origin, Some(slot), true, &confirm_owner);
         }
 
+        let indexes = crate::motor_custom_index::watches(base)?;
+        watched_folders.extend(indexes.iter().map(|index| index.folder_id().to_owned()));
         if watched_folders.is_empty() {
+            self.custom_indexes.clear();
             let _ = motor_files::drain_index_diffs(base);
             return Ok(());
         }
@@ -2623,6 +2633,7 @@ impl AutomationRuntime {
         }
 
         let diffs = motor_files::drain_index_diffs(base);
+        self.custom_indexes.poll(base, &indexes, &diffs, &confirm_owner);
         let own_writes = std::mem::take(&mut self.own_writes);
         for (id, folder, subfolder, extensions, wait_seconds) in active_events {
             let min_seq = event_baseline(base, &id);

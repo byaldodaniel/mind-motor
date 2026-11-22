@@ -7,12 +7,14 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { runInNewContext } from 'node:vm';
 import { createAccessPolicy } from '../../src/access-policy.js';
 import { createNativeContinuityStore } from '../../src/continuity-reader.js';
 import { stopCentralMotor } from '../../src/connector.js';
 import { resolveLayout } from '../../src/layout.js';
 import { openSession } from '../../src/session.js';
 import { RUNS } from './runs.mjs';
+import { assertViewHtml } from './vista-html.mjs';
 import { extractR3 } from './r3-fixture.mjs';
 
 const executable = process.env.MIND_NATIVE_EXE;
@@ -131,7 +133,7 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
   const standalone = path.join(root, 'Sin Git');
   const notes = path.join(root, 'Conversaciones ficticias');
   const linked = path.join(root, 'Atlas vinculado');
-  const env = { ...process.env, MIND_AGENT_STARTUP: '0' };
+  const env = { ...process.env, MIND_AGENT_STARTUP: '0', MIND_VISTA_INACTIVA_MS: '999' };
   if (!env.MIND_PYTHON && env.MIND_TEST_BUNDLED_PYTHON) env.MIND_PYTHON = env.MIND_TEST_BUNDLED_PYTHON;
   const local = { env, timeout: 10_000, windowsHide: true };
   let motor, motorRecord, host, scope;
@@ -213,6 +215,8 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
   const cierra = (id) => vista('cerrar', '--id', id);
   const published = await abre(repo, out);
   assert.equal(published.proyecto, project);
+  assert.equal(published.mantener_abierta, false);
+  assert.equal(published.inactividad_ms, 1_800_000);
   assert.deepEqual(published.git, { rama: 'principal', revision: commit, cambios: false });
   assert.match(published.huella, /^(?:sha256:)?[a-f0-9]{64}$/u);
   assert.ok(published.copia);
@@ -251,7 +255,7 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
     assert.match(page.headers.get('content-type'), /^text\/html/u);
     assert.equal(page.headers.get('access-control-allow-origin'), null);
     const html = await page.text();
-    assert.equal(html, firstMap);
+    assertViewHtml(html, firstMap);
     assert.ok(!html.includes(token));
   } finally {
     await first.close();
@@ -263,7 +267,7 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
     assert.deepEqual(conversacion, saved);
     assert.deepEqual(conversacion.referencias, [reference]);
     assert.deepEqual(JSON.parse(conversacion.importante), remembered);
-    assert.equal(await (await get(conversacion.referencias[0].ubicacion)).text(), firstMap);
+    assertViewHtml(await (await get(conversacion.referencias[0].ubicacion)).text(), firstMap);
     assert.equal((await health()).pid, host.pid);
     assert.deepEqual(await consulta(published.id), published);
 
@@ -443,7 +447,7 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
   assert.ok(broken.status >= 400 && broken.status < 500, 'La revisión inválida se rechaza');
   await broken.text();
   assert.deepEqual(await consulta(changed.id), changed);
-  assert.equal(await (await get(preview)).text(), nextMap);
+  assertViewHtml(await (await get(preview)).text(), nextMap);
 
   await cierra(changed.id);
   assert.equal((await get(preview)).status, 404);
@@ -496,4 +500,171 @@ test('vista compartida: retoma entre dos sesiones, copia de trabajo, revisión y
     assert.deepEqual(await fs.readFile(saved.archivo), markdown);
     t.diagnostic('r3 recuperó la revisión ' + saved.revision + ' de ' + saved.id);
   }
+});
+
+
+test('las vistas inactivas liberan la copia en RAM y las páginas visibles o fijadas siguen abiertas', {
+  skip: !executable && 'Indica MIND_NATIVE_EXE',
+  timeout: 45_000,
+}, async t => {
+  const idle = 2000;
+  const root = await fs.realpath(await fs.mkdtemp(path.join(RUNS, 'vista-inactividad-')));
+  const base = path.join(root, 'Base');
+  const notes = path.join(root, 'Sitio');
+  const index = path.join(notes, 'index.html');
+  const env = { ...process.env, MIND_AGENT_STARTUP: '0', MIND_VISTA_INACTIVA_MS: String(idle) };
+  let motor, client;
+  t.after(async () => {
+    try {
+      await client?.close().catch(() => {});
+      await motor?.stop();
+    } finally {
+      assert.equal(path.dirname(root), RUNS);
+      assert.ok(path.basename(root).startsWith('vista-inactividad-'));
+      await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+  await fs.mkdir(notes);
+  await fs.writeFile(index, firstMap);
+  await fs.writeFile(path.join(notes, 'mapa.css'), mapStyle);
+
+  motor = start(path.resolve(executable), ['motor', '--base', base, '--conector'], env);
+  const connector = await motor.connector(base, 'conector.json');
+  const { token } = JSON.parse(await fs.readFile(path.join(base, 'conector-secreto.json'), 'utf8'));
+  client = await openMcp(connector.url, {
+    Authorization: 'Bearer ' + token,
+    'X-Mind-Workspace': Buffer.from(JSON.stringify({ cwd: notes, paths: [] })).toString('base64url'),
+  }, 'Vista inactiva ficticia');
+  const get = (url, options) => fetch(url, { signal: AbortSignal.timeout(5000), ...options });
+  const health = async () => (await (await get(new URL('/health', connector.url))).json()).vistas;
+  const call = (accion, args = {}, error) => client.call('vista', { accion, ...args }, error);
+  const publish = { carpeta: notes, proyecto: project };
+  const bytes = Buffer.byteLength(firstMap) + Buffer.byteLength(mapStyle);
+  const usage = { activas: 1, bytes };
+  const empty = { activas: 0, bytes: 0 };
+
+  async function assertExpired(view) {
+    const deadline = performance.now() + idle * 3;
+    let current;
+    do {
+      current = await health();
+      if (current.activas === 0) break;
+      await delay(75);
+    } while (performance.now() < deadline);
+    assert.deepEqual(current, empty, 'el barrido libera la copia sin peticiones a la vista');
+    assert.equal((await get(view.url)).status, 404);
+    await call('consultar', { id: view.id }, 'VIEW_NOT_FOUND');
+    assert.equal(await fs.readFile(index, 'utf8'), firstMap);
+    assert.equal(await fs.readFile(path.join(notes, 'mapa.css'), 'utf8'), mapStyle);
+  }
+
+  const idleView = await call('abrir', publish);
+  assert.equal(idleView.mantener_abierta, false);
+  assert.equal(idleView.inactividad_ms, idle);
+  assert.deepEqual(await health(), usage);
+  await delay(idle * 0.75);
+  const css = await get(new URL('mapa.css', idleView.url));
+  assert.equal(css.status, 200);
+  assert.equal(await css.text(), mapStyle);
+  await delay(idle * 0.5);
+  assert.deepEqual(await health(), usage, 'la petición de un recurso renueva la actividad');
+  await assertExpired(idleView);
+
+  const visible = await call('abrir', publish);
+  assert.notEqual(visible.id, idleView.id);
+  assert.equal(visible.huella, idleView.huella);
+  const preview = new URL(visible.url);
+  const signalUrl = new URL('_mind/actividad', preview);
+  const page = await get(preview);
+  const html = await page.text();
+  const script = assertViewHtml(html, firstMap);
+  const policy = page.headers.get('content-security-policy');
+  assert.match(policy, /script-src 'self' 'unsafe-inline'/u);
+  assert.match(policy, /connect-src 'self'/u);
+  assert.equal(Number(page.headers.get('content-length')), Buffer.byteLength(html));
+  const head = await get(preview, { method: 'HEAD' });
+  assert.equal(head.headers.get('content-length'), page.headers.get('content-length'));
+  assert.equal(await head.text(), '');
+
+  assert.equal((await get(signalUrl, { method: 'POST' })).status, 403);
+  assert.equal((await get(signalUrl, { method: 'POST', headers: { Origin: 'https://otro.example' } })).status, 403);
+  assert.equal((await get(signalUrl, {
+    method: 'POST', headers: { Origin: preview.origin }, body: 'sin cuerpo',
+  })).status, 413);
+
+  const listeners = {};
+  const document = {
+    visibilityState: 'visible',
+    addEventListener(name, callback) { listeners[name] = callback; },
+  };
+  let callback, interval;
+  const signals = [];
+  runInNewContext(script, {
+    document,
+    window: { addEventListener(name, handler) { listeners[name] = handler; } },
+    setInterval(handler, ms) { callback = handler; interval = ms; },
+    fetch(route, options) {
+      const url = new URL(route, preview);
+      assert.equal(url.href, signalUrl.href);
+      assert.equal(options.method, 'POST');
+      assert.equal(options.body, undefined);
+      const signal = get(url, { method: options.method, headers: { Origin: preview.origin } });
+      signals.push(signal);
+      return signal;
+    },
+  });
+  assert.equal(interval, idle / 4);
+  async function verifySignals() {
+    const requests = signals.splice(0);
+    assert.ok(requests.length > 0);
+    for (const pending of requests) {
+      const response = await pending;
+      assert.equal(response.status, 204);
+      assert.equal(await response.text(), '');
+    }
+  }
+  const started = performance.now();
+  listeners.pageshow();
+  await verifySignals();
+  for (let i = 0; i < Math.ceil(idle / interval) + 1; i++) {
+    await delay(interval);
+    callback();
+    await verifySignals();
+  }
+  assert.ok(performance.now() - started > idle);
+  assert.deepEqual(await call('consultar', { id: visible.id }), visible);
+  assert.deepEqual(await health(), usage);
+  assert.equal(await fs.readFile(index, 'utf8'), firstMap);
+
+  document.visibilityState = 'hidden';
+  listeners.visibilitychange();
+  callback();
+  assert.equal(signals.length, 0);
+  await assertExpired(visible);
+  assert.equal((await get(signalUrl, { method: 'POST', headers: { Origin: preview.origin } })).status, 404);
+
+  const kept = await client.call('vista_abrir', { ...publish, mantener_abierta: true });
+  await delay(idle + interval);
+  assert.deepEqual(await health(), usage);
+  assert.deepEqual(await call('consultar', { id: kept.id }), kept);
+  const updated = await call('abrir', { ...publish, id: kept.id, version: kept.version });
+  assert.equal(updated.mantener_abierta, true);
+  assert.equal(updated.huella, kept.huella);
+  const released = await call('mantener', { id: kept.id, mantener_abierta: false });
+  assert.deepEqual(released, { ...updated, mantener_abierta: false });
+  await assertExpired(released);
+
+  async function cliOpen(...flags) {
+    const { stdout } = await run(path.resolve(executable), [
+      'vista', 'abrir', '--base', base, '--proyecto', project, '--copia', notes, '--contenido', notes, ...flags,
+    ], { env, windowsHide: true, timeout: 10_000 });
+    return JSON.parse(stdout);
+  }
+  const cliKept = await cliOpen('--mantener-abierta');
+  assert.equal(cliKept.mantener_abierta, true);
+  const cliReleased = await cliOpen('--id', cliKept.id, '--version', String(cliKept.version), '--no-mantener-abierta');
+  assert.equal(cliReleased.mantener_abierta, false);
+  assert.equal((await call('mantener', { id: cliKept.id, mantener_abierta: true })).mantener_abierta, true);
+  assert.deepEqual(await call('cerrar', { id: cliKept.id }), { id: cliKept.id, cerrada: true });
+  await assertExpired(cliKept);
 });

@@ -14,6 +14,7 @@ use crate::{
     motor_consent,
     motor_native::Fault,
     motor_owner::timestamp,
+    motor_properties,
     motor_permissions::{self as access, Folder, Scope},
     motor_workspace::relative_parts,
     office_read,
@@ -157,7 +158,7 @@ fn fold_path(text: &str) -> String {
     }
 }
 
-fn absolute_path(root: &str, relative: &str) -> PathBuf {
+pub(crate) fn absolute_path(root: &str, relative: &str) -> PathBuf {
     let mut path = PathBuf::from(root);
     if !relative.is_empty() {
         for component in relative.split('/') {
@@ -280,7 +281,7 @@ fn now_iso() -> Result<String, Fault> {
     timestamp().ok_or_else(|| Fault::new("CLOCK_UNAVAILABLE", "No se pudo consultar la hora del sistema."))
 }
 
-fn write_base_json(
+pub(crate) fn write_base_json(
     base: &str, name: &str, value: &Value, previous: Option<&[u8]>,
     confirm_owner: impl FnOnce() -> Result<(), &'static str>,
 ) -> Result<(), Fault> {
@@ -293,7 +294,7 @@ fn write_base_json(
         .map_err(|code| Fault::new(code, "No se pudo guardar el registro técnico en la Base."))
 }
 
-fn read_base_stored(base: &str, name: &str) -> Result<Option<(Value, Vec<u8>)>, Fault> {
+pub(crate) fn read_base_stored(base: &str, name: &str) -> Result<Option<(Value, Vec<u8>)>, Fault> {
     let Some(bytes) = access::read_file(base, name, MAX_INDEX_BYTES)? else {
         return Ok(None);
     };
@@ -1123,8 +1124,9 @@ fn edit_text(
         verify(base, &scope, &["leer", "escribir"]).map_err(|e| e.code)?;
         confirm_owner()
     };
-    text_write::write_bytes(&scope.root, &scope.relative, next.as_bytes(), MAX_TEXT, Some(expected_hash), confirm)
+    let report = text_write::write_bytes(&scope.root, &scope.relative, next.as_bytes(), MAX_TEXT, Some(expected_hash), confirm)
         .map_err(|code| Fault::new(code, "La publicación segura se detuvo. Revisa permisos, destino y versión."))?;
+    let _ = motor_properties::rebind(base, &scope, &report, &confirm_owner);
     let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
         Ok(_) => "ok",
         Err(_) => "needs-reconciliation",
@@ -1156,7 +1158,7 @@ fn write(
     if creating && ["proyecto", "conversacion", "destino", "tipo"].iter().any(|key| args.contains_key(*key)) {
         return Err(unsupported("La creación por destinos configurados aún depende del Motor r3."));
     }
-    if creating
+    if creating && folder.is_none()
         && access::destinations(base, None, None)?["efectivos"]
             .as_object()
             .is_some_and(|values| !values.is_empty())
@@ -1207,8 +1209,9 @@ fn write(
             .ok_or_else(|| Fault::new("INVALID_VERSION", "Indica la versión leída del archivo."))?;
         Some(original)
     };
-    text_write::write_bytes(&scope.root, &scope.relative, content.as_bytes(), MAX_TEXT, expected, confirm)
+    let report = text_write::write_bytes(&scope.root, &scope.relative, content.as_bytes(), MAX_TEXT, expected, confirm)
         .map_err(filesystem)?;
+    let _ = motor_properties::rebind(base, &scope, &report, &confirm_owner);
     let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
         Ok(_) => "ok",
         Err(_) => "needs-reconciliation",
@@ -1619,11 +1622,15 @@ fn relocation_error() -> Fault {
 // de un archivo distinto que luego haya aparecido en el destino.
 fn finish_move(base: &str, confirm_owner: impl Fn() -> Result<(), &'static str>) -> Result<(), Fault> {
     let Some((journal, _)) = read_base_stored(base, MOVE_JOURNAL)? else { return Ok(()) };
-    if journal["format"] != "mind-conversation-relocation" || journal["version"] != 1
-        || journal["kind"] != "move"
-    {
+    if journal["format"] != "mind-conversation-relocation" || journal["version"] != 1 {
         return Err(relocation_error());
     }
+    if journal["kind"] == "metadata" {
+        crate::motor_conversations::apply_metadata(base, &journal, &confirm_owner)?;
+        motor_consent::remove_base_file(base, MOVE_JOURNAL, confirm_owner)?;
+        return Ok(());
+    }
+    if journal["kind"] != "move" { return Err(relocation_error()); }
     let path = |key: &str| journal[key].as_str().map(Path::new)
         .filter(|path| path.is_absolute()).ok_or_else(relocation_error);
     let from = path("from")?;
@@ -1731,6 +1738,9 @@ fn move_or_rename(
         confirm_owner()
     };
     recover_move(base, &confirm_owner)?;
+    let properties = ensure_folder_index(base, &source, &confirm_owner).and_then(|index| {
+        motor_properties::snapshot(base, &source, &from, index["entries"].as_array().map_or(&[], Vec::as_slice))
+    }).unwrap_or_default();
     let from_abs = absolute_path(&source.root, &from);
     let to_abs = absolute_path(&target.root, &to);
     let ids = relocation_ids(base)?.into_iter().collect::<Vec<_>>();
@@ -1765,10 +1775,13 @@ fn move_or_rename(
         write_base_json(base, MOVE_JOURNAL, &journal, Some(&bytes), &confirm_owner)?;
         finish_move(base, &confirm_owner)
     })();
-    let _ = reconcile_folder_index_inner(base, &source, false, &confirm_owner);
-    if crossing {
-        let _ = reconcile_folder_index_inner(base, &target, false, &confirm_owner);
-    }
+    let source_index = reconcile_folder_index_inner(base, &source, false, &confirm_owner);
+    let target_index = if crossing { reconcile_folder_index_inner(base, &target, false, &confirm_owner) } else { source_index };
+    let transferred = target_index.and_then(|index| {
+        let count = motor_properties::restore(base, &target, &to, &properties, &index, &confirm_owner)?;
+        let _ = motor_properties::forget(base, &source, &from, &properties, &confirm_owner);
+        Ok(count)
+    }).unwrap_or(0);
     let continuity = match finish {
         Ok(()) => json!({"estado": "actualizada"}),
         Err(error) => json!({
@@ -1786,7 +1799,7 @@ fn move_or_rename(
             "hasta": to,
             "ruta_absoluta": absolute_path(&source.root, &to),
             "tipo": kind,
-            "propiedades_trasladadas": 0,
+            "propiedades_trasladadas": transferred,
             "continuidad": continuity,
         }))
     } else {
@@ -1798,7 +1811,7 @@ fn move_or_rename(
             "hasta": to,
             "ruta_absoluta": absolute_path(&target.root, &to),
             "tipo": kind,
-            "propiedades_trasladadas": 0,
+            "propiedades_trasladadas": transferred,
             "continuidad": continuity,
         }))
     }
@@ -1891,7 +1904,12 @@ fn restore_trash(
     let restored_path = format!("{prefix}{chosen_name}");
     let next: Vec<Value> = entries.into_iter().filter(|item| item["id"].as_str() != Some(trash_id)).collect();
     let _ = save_trash_entries(base, &folder, &next, prev_bytes.as_deref(), &confirm_owner);
-    let _ = reconcile_folder_index(base, &folder, &confirm_owner);
+    let properties = stored.get("properties").and_then(|value| {
+        serde_json::from_value::<Vec<motor_properties::Entry>>(value.clone()).ok()
+    }).unwrap_or_default();
+    let restored_count = reconcile_folder_index(base, &folder, &confirm_owner).and_then(|index| {
+        motor_properties::restore(base, &folder, &restored_path, &properties, &index, &confirm_owner)
+    }).unwrap_or(0);
     Ok(json!({
         "estado": "restaurado",
         "carpeta": folder.id,
@@ -1899,7 +1917,7 @@ fn restore_trash(
         "ruta_absoluta": absolute_path(&folder.root, &restored_path),
         "renombrado": restored_path != original_path,
         "ruta_original": original_path,
-        "propiedades_repuestas": 0,
+        "propiedades_repuestas": restored_count,
     }))
 }
 
@@ -2167,11 +2185,12 @@ fn execute_delete(
     };
     let filename = relative_path.rsplit('/').next().ok_or_else(|| organize_error("UNSAFE_PATH"))?;
     let trash_path = format!(".papelera-mind/{trash_id}/{filename}");
+    let properties = motor_properties::snapshot(base, folder, relative_path, &previous_under).unwrap_or_default();
     let mut saved_record = None;
     let mut registration_failure = None;
     let moved = organize::trash_entry(&folder.root, relative_path, &trash_id, expect, |metadata| {
         let kind = metadata["type"].as_str().unwrap_or("file");
-        let record = json!({
+        let mut record = json!({
             "id": trash_id,
             "path": relative_path,
             "type": kind,
@@ -2186,6 +2205,7 @@ fn execute_delete(
                 .then(|| contained.unwrap_or_else(|| previous_under.len().saturating_sub(1))),
             "reason": reason.filter(|r| !r.is_empty()),
         });
+        if !properties.is_empty() { record["properties"] = json!(properties); }
         let mut next_trash = entries;
         next_trash.push(record.clone());
         // Cualquier archivo que llegue a la papelera ya tiene el registro que
@@ -2216,6 +2236,7 @@ fn execute_delete(
     }
     let record = saved_record.ok_or_else(|| organize_error("UNCONFIRMED"))?;
     let kind = record["type"].as_str().unwrap_or("file");
+    let _ = motor_properties::forget(base, folder, relative_path, &properties, &confirm_owner);
     let _ = reconcile_folder_index_inner(base, folder, false, &confirm_owner);
     let removed_to_log = if previous_under.is_empty() {
         vec![json!({
@@ -2464,15 +2485,17 @@ pub(crate) fn search_files(
     base: &str, args: &Map<String, Value>,
     confirm_owner: impl Fn() -> Result<(), &'static str>,
 ) -> Result<Value, Fault> {
-    if args.contains_key("propiedades") {
-        return Err(unsupported("El filtrado por propiedades aún depende del Motor r3."));
-    }
+    let wanted = args.get("propiedades").map(|value| {
+        if !value.is_object() { return Err(invalid("propiedades debe ser un objeto { clave: valor }.")); }
+        crate::motor_properties::parse_map(value, 16, false)
+            .map_err(|error| Fault::new("INVALID_SEARCH", error.message))
+    }).transpose()?;
     only(
         args,
         &[
             "en", "consulta", "carpetas", "carpeta", "modo", "campo", "tipos", "extensiones",
             "dentro_de", "tamano_min", "tamano_max", "modificado_desde", "modificado_hasta",
-            "orden", "limite", "desde",
+            "orden", "limite", "desde", "propiedades",
         ],
     )?;
     let selected = if let Some(list) = args.get("carpetas") {
@@ -2605,12 +2628,28 @@ pub(crate) fn search_files(
                     && index["entries"]
                         .as_array()
                         .is_some_and(|list| list.iter().all(|e| e["state"] == "indexed"));
-                scopes.push(json!({
+                let mut scope = json!({
                     "carpeta": folder.id,
                     "estado": "searched",
                     "indexado": index["updatedAt"],
                     "completo": complete,
-                }));
+                });
+                let properties = match crate::motor_properties::indexed(base, folder, &index) {
+                    Ok(properties) => properties,
+                    Err(error) if matches!(error.code, "PROPERTIES_CORRUPT" | "RECORD_CORRUPT" | "RECORD_LINK" | "UNSAFE_PATH") => {
+                        scope["codigo"] = json!(error.code);
+                        if wanted.is_some() {
+                            scope["estado"] = json!("index-unavailable");
+                            scope["indexado"] = Value::Null;
+                            scope["completo"] = Value::Null;
+                            scopes.push(scope);
+                            continue;
+                        }
+                        BTreeMap::new()
+                    }
+                    Err(error) => return Err(error),
+                };
+                scopes.push(scope);
                 for entry in index["entries"].as_array().into_iter().flatten() {
                     let Some(rel_path) = entry["path"].as_str() else { continue };
                     let parts: Vec<&str> = rel_path.split('/').collect();
@@ -2656,6 +2695,12 @@ pub(crate) fn search_files(
                     }
                     let target = if field == "name" { fold(name) } else { fold(rel_path) };
                     let Some(rank) = rank_query(&target, &query, mode) else { continue };
+                    let metadata = properties.get(rel_path);
+                    if wanted.as_ref().is_some_and(|wanted| !crate::motor_properties::matches(metadata, wanted)) {
+                        continue;
+                    }
+                    let mut output = entry_out(folder, entry);
+                    if let Some(metadata) = metadata { output["propiedades"] = json!(metadata); }
                     hits.push(Hit {
                         rank,
                         key: fold(name),
@@ -2663,7 +2708,7 @@ pub(crate) fn search_files(
                         folder_id: folder.id.clone(),
                         modified_ms: modified_ms.unwrap_or(i64::MIN),
                         size: entry_size.and_then(|s| i64::try_from(s).ok()).unwrap_or(-1),
-                        output: entry_out(folder, entry),
+                        output,
                     });
                 }
             }

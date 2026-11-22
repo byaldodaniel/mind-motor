@@ -20,7 +20,7 @@ use crate::{
     host::{full, Body},
     motor_consent::Prepared,
     motor_files::{OrganizeDecision, OrganizePrepared},
-    motor_native::{unwrap_catalog_call, Fault, Motor},
+    motor_native::{unwrap_catalog_call, Fault, Motor, MAX_CONVERSATION_ALTERNATIVES},
     motor_workspace::{with_workspace, Workspace},
     MAX_MESSAGE,
 };
@@ -37,7 +37,13 @@ const TOOLS: &[&str] = &[
     "crear_carpeta", "editar", "mover", "renombrar", "borrar", "papelera",
     "restaurar", "vaciar_papelera", "explorar", "eliminados",
     "conversacion_leer", "conversacion_guardar", "conversaciones_buscar",
-    "continuidad_registrar", "continuidad_actualizar",
+    "continuidad_registrar", "continuidad_actualizar", "continuidad_consultar",
+    "continuidad_exportar", "continuidad_importar", "conversaciones_preparar",
+    "actualizacion_consultar", "actualizacion_posponer", "actualizacion_aplicar",
+    "destinos_consultar", "destinos_configurar", "destino_resolver", "resultado_registrar", "resultado_importar",
+    "conversacion_preferencias", "conversacion_configurar", "conversacion_trasladar",
+    "propiedades", "asignar_propiedades", "agrupar",
+    "indices_personalizados", "crear_indice", "actualizar_indice", "modificar_indice", "retirar_indice",
     "solicitar_acceso", "retirar_acceso",
     "vista_abrir", "vista_consultar", "vista_cerrar",
     "crear_respaldo",
@@ -54,9 +60,11 @@ struct SessionContext {
     protocol: &'static str,
     form: bool,
     client: Option<Value>,
+    connection: String,
     scope: Mutex<Scope>,
     refresh: Option<tokio::sync::Mutex<()>>,
     live: AtomicBool,
+    last_tool: Mutex<Option<Instant>>,
     pending: Mutex<Pending>,
 }
 
@@ -172,6 +180,7 @@ impl Drop for ReplyGuard<'_> {
 /// El anfitrión valida el origen y el token antes de entregar la petición.
 pub(crate) struct Mcp {
     sessions: tokio::sync::Mutex<HashMap<Uuid, Session>>,
+    quiet_ms: u64,
 }
 
 fn prune(sessions: &mut HashMap<Uuid, Session>) {
@@ -186,7 +195,40 @@ fn prune(sessions: &mut HashMap<Uuid, Session>) {
 
 impl Mcp {
     pub(crate) fn new() -> Self {
-        Self { sessions: tokio::sync::Mutex::new(HashMap::new()) }
+        let quiet_ms = std::env::var("MIND_QUIETUD_MS").ok().and_then(|value| value.parse().ok())
+            .filter(|ms| *ms <= 9_007_199_254_740_991).unwrap_or(30_000);
+        Self { sessions: tokio::sync::Mutex::new(HashMap::new()), quiet_ms }
+    }
+
+    pub(crate) fn quiet_ms(&self) -> u64 { self.quiet_ms }
+
+    pub(crate) async fn blockers(&self, quiet: bool) -> Vec<Value> {
+        let mut sessions = self.sessions.lock().await;
+        prune(&mut sessions);
+        let duration = Duration::from_millis(self.quiet_ms);
+        sessions.iter().filter_map(|(id, session)| {
+            let context = &session.context;
+            let pending = context.pending.lock().unwrap();
+            let client = context.client.as_ref().map(|client| json!({
+                "nombre":client["name"],"version":client["version"],
+            }));
+            let mut details = json!({"conexion":id.to_string(),"cliente":client,"carpeta":null});
+            if !pending.replies.is_empty() {
+                details["actividad"] = json!("esperando-al-usuario");
+            } else if !pending.calls.is_empty() {
+                details["actividad"] = json!("trabajando");
+            } else if !quiet {
+                details["actividad"] = json!("conectada");
+            } else if let Some(remaining) = context.last_tool.lock().unwrap()
+                .and_then(|last| duration.checked_sub(last.elapsed())).filter(|remaining| !remaining.is_zero())
+            {
+                details["actividad"] = json!("activa");
+                details["libre_en_ms"] = json!(remaining.as_millis());
+            } else {
+                return None;
+            }
+            Some(details)
+        }).collect()
     }
 
     pub(crate) async fn count(&self) -> usize {
@@ -270,7 +312,7 @@ impl Mcp {
         let form = params.pointer("/capabilities/elicitation").and_then(Value::as_object)
             .is_some_and(|elicitation| elicitation.is_empty() || elicitation.get("form").is_some_and(Value::is_object));
         let client = params.get("clientInfo").filter(|client| client.is_object()).cloned();
-        let (paths, cwd) = match declared_paths(headers.get("x-mind-workspace")) {
+        let (paths, cwd, connection) = match declared_paths(headers.get("x-mind-workspace")) {
             Ok(declared) => declared,
             Err(()) => return full(StatusCode::BAD_REQUEST, rpc_error(id, -32602, "Carpeta de trabajo no válida.")),
         };
@@ -294,7 +336,8 @@ impl Mcp {
         };
         let session = Uuid::new_v4();
         let context = Arc::new(SessionContext {
-            protocol, form, client, live: AtomicBool::new(true),
+            protocol, form, client, live: AtomicBool::new(true), last_tool: Mutex::new(None),
+            connection: connection.unwrap_or(session).to_string(),
             scope: Mutex::new(Scope { workspace, generation: 0, resolved: !roots }),
             refresh: roots.then(|| tokio::sync::Mutex::new(())),
             pending: Mutex::new(Pending::default()),
@@ -306,14 +349,14 @@ impl Mcp {
             "protocolVersion": protocol,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "Mind", "version": "1.0.5" },
-            "instructions": "Consulta las autorizaciones con estado. Busca conversaciones por texto y usa retomar con el ID o la consulta. Lee archivos de texto antes de modificar una versión. Para actualizar una conversación, usa su ID y revisión vigentes.",
+            "instructions": "Consulta las autorizaciones con estado. Busca conversaciones con consulta o varias alternativas en consultas. Si no hay coincidencias, usa recientes como apoyo. Usa retomar con el ID o la búsqueda por texto. Lee archivos de texto antes de modificar una versión. Para actualizar una conversación, usa su ID y revisión vigentes.",
         });
         with_session(full(StatusCode::OK, rpc_result(id, result)), session)
     }
 }
 
-fn declared_paths(value: Option<&HeaderValue>) -> Result<(Vec<String>, Option<String>), ()> {
-    let Some(value) = value else { return Ok((Vec::new(), None)) };
+fn declared_paths(value: Option<&HeaderValue>) -> Result<(Vec<String>, Option<String>, Option<Uuid>), ()> {
+    let Some(value) = value else { return Ok((Vec::new(), None, None)) };
     let raw = URL_SAFE_NO_PAD.decode(value.as_bytes()).map_err(|_| ())?;
     let workspace: Value = serde_json::from_slice(&raw).map_err(|_| ())?;
     let object = workspace.as_object().ok_or(())?;
@@ -327,7 +370,13 @@ fn declared_paths(value: Option<&HeaderValue>) -> Result<(Vec<String>, Option<St
         }
     }
     let cwd = object.get("cwd").and_then(Value::as_str).filter(|cwd| !cwd.trim().is_empty()).map(str::to_owned);
-    Ok((paths, cwd))
+    let connection = object.get("conexion").and_then(Value::as_str).and_then(|value| Uuid::parse_str(value).ok());
+    Ok((paths, cwd, connection))
+}
+
+pub(crate) fn wants_update_notice(name: &str, args: Option<&Value>) -> bool {
+    name == "destinos_consultar"
+        || (name == "mind" && args.and_then(|args| args["operacion"].as_str()) == Some("destinos_consultar"))
 }
 
 fn is_call(message: &Value) -> bool {
@@ -339,6 +388,7 @@ enum InteractiveKind {
     Access { needs_form: bool },
     Organize,
     Automation,
+    Update,
 }
 
 fn resolve_interactive(message: &Value) -> Option<(InteractiveKind, Value)> {
@@ -360,6 +410,7 @@ fn resolve_interactive(message: &Value) -> Option<(InteractiveKind, Value)> {
             InteractiveKind::Organize
         }
         "activar_funcion" => InteractiveKind::Automation,
+        "actualizacion_aplicar" if eff_args.get("codigo").is_none() => InteractiveKind::Update,
         _ => return Some((InteractiveKind::None, message.clone())),
     };
     let mut normalized = message.clone();
@@ -373,13 +424,16 @@ fn resolve_interactive(message: &Value) -> Option<(InteractiveKind, Value)> {
 async fn dispatch(
     message: &Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, sse: bool,
 ) -> Response<Body> {
+    if is_call(message) || message.as_array().is_some_and(|messages| messages.iter().any(is_call)) {
+        *session.last_tool.lock().unwrap() = Some(Instant::now());
+    }
     let Some(messages) = message.as_array() else {
         if let Some(id) = request_id(message).filter(|_| is_call(message)) {
             let resolved = resolve_interactive(message);
             let roots = !session.scope.lock().unwrap().resolved;
             let needs_form = matches!(
                 resolved.as_ref().map(|(kind, _)| kind),
-                Some(InteractiveKind::Access { needs_form: true } | InteractiveKind::Organize | InteractiveKind::Automation)
+                Some(InteractiveKind::Access { needs_form: true } | InteractiveKind::Organize | InteractiveKind::Automation | InteractiveKind::Update)
             );
             if sse && (roots || (needs_form && session.form)) {
                 return stream_call(message.clone(), id, Arc::clone(motor), Arc::clone(session));
@@ -393,6 +447,9 @@ async fn dispatch(
                 }
                 Some((InteractiveKind::Automation, ref msg)) => {
                     return full(StatusCode::OK, automation_interactive(msg, id, motor, session, None).await);
+                }
+                Some((InteractiveKind::Update, ref msg)) => {
+                    return full(StatusCode::OK, update_interactive(msg, id, motor, session, None).await);
                 }
                 _ => {}
             }
@@ -444,7 +501,7 @@ async fn dispatch_one(message: &Value, motor: &Arc<Motor>, session: &Arc<Session
             };
             let is_interactive = matches!(
                 resolve_interactive(message).map(|(kind, _)| kind),
-                Some(InteractiveKind::Access { .. } | InteractiveKind::Organize | InteractiveKind::Automation)
+                Some(InteractiveKind::Access { .. } | InteractiveKind::Organize | InteractiveKind::Automation | InteractiveKind::Update)
             );
             if name == "acceso" || is_interactive {
                 return Some(rpc_error(id, -32602, "Envía la solicitud que requiere confirmación en una petición individual."));
@@ -458,7 +515,10 @@ async fn dispatch_one(message: &Value, motor: &Arc<Motor>, session: &Arc<Session
             let (name, args) = (name.to_owned(), args.clone());
             let result = tokio::task::spawn_blocking(move || {
                 if !session.live.load(Ordering::Acquire) { return Err(closed()); }
-                with_workspace(&session.workspace(), || motor.call(&name, args))
+                let notice = wants_update_notice(&name, Some(&args));
+                let mut response = with_workspace(&session.workspace(), || motor.call(&name, args))?;
+                motor.add_update_advisories(&mut response, Some(&session.connection), notice);
+                Ok(response)
             }).await.unwrap_or_else(|_| Err(internal()));
             tool_reply(result)
         }
@@ -521,6 +581,9 @@ fn stream_call(message: Value, id: Value, motor: Arc<Motor>, session: Arc<Sessio
                     }
                     Some((InteractiveKind::Automation, ref msg)) => {
                         automation_interactive(msg, id.clone(), &motor, &session, Some(&events)).await
+                    }
+                    Some((InteractiveKind::Update, ref msg)) => {
+                        update_interactive(msg, id.clone(), &motor, &session, Some(&events)).await
                     }
                     _ => dispatch_one(&message, &motor, &session).await
                         .unwrap_or_else(|| rpc_error(id.clone(), -32600, "Mensaje JSON-RPC no válido.")),
@@ -687,6 +750,52 @@ async fn run_organize(
     }).await.map_err(|_| internal())?
 }
 
+async fn update_interactive(
+    message: &Value, id: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Value {
+    let args = message.pointer("/params/arguments").and_then(Value::as_object).cloned().unwrap_or_default();
+    let result = run_update(args, motor, session, events).await;
+    rpc_result(id, tool_reply(result))
+}
+
+async fn run_update(
+    args: serde_json::Map<String, Value>, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
+) -> Result<Value, Fault> {
+    let generation = session.scope.lock().unwrap().generation;
+    let Some(events) = events.filter(|_| session.form) else {
+        let (motor, session) = (Arc::clone(motor), Arc::clone(session));
+        return tokio::task::spawn_blocking(move || {
+            session.ensure_active(None, generation)?;
+            motor.call("actualizacion_aplicar", Value::Object(args))
+        }).await.map_err(|_| internal())?;
+    };
+    let identity = tokio::task::spawn_blocking({
+        let (motor, session, call) = (Arc::clone(motor), Arc::clone(session), Arc::clone(&events.call));
+        move || {
+            session.ensure_active(Some(&call), generation)?;
+            motor.prepare_update(&args)
+        }
+    }).await.map_err(|_| internal())??;
+    let version = identity["release"]["mindVersion"].as_str().ok_or_else(internal)?;
+    let revision = identity["release"]["packageRevision"].as_u64().ok_or_else(internal)?;
+    let mut form = json!({
+        "message": format!("Aplicar Mind {version} (revisión {revision}). Mind preparará el paquete con el Motor vivo y esperará a que terminen el trabajo y los formularios de todos los chats antes de cambiar el programa. Se conservarán la Base, las conversaciones y los destinos. Autoriza solo si pediste aplicar esta versión."),
+        "requestedSchema": {
+            "type":"object",
+            "properties":{"confirmar":{"type":"boolean","title":"Aplicar esta actualización de Mind","default":false}},
+            "required":["confirmar"],
+        },
+    });
+    if session.protocol == "2025-11-25" { form["mode"] = json!("form"); }
+    let answer = events.request("elicitation/create", form, CLIENT_TIMEOUT).await?;
+    let approved = answer["action"] == "accept" && answer["content"]["confirmar"] == true;
+    let (motor, session, call) = (Arc::clone(motor), Arc::clone(session), Arc::clone(&events.call));
+    tokio::task::spawn_blocking(move || {
+        session.ensure_active(Some(&call), generation)?;
+        motor.finish_update(identity, approved, || session.ensure_active(Some(&call), generation).is_ok())
+    }).await.map_err(|_| internal())?
+}
+
 async fn automation_interactive(
     message: &Value, id: Value, motor: &Arc<Motor>, session: &Arc<SessionContext>, events: Option<&ServerEvents<'_>>,
 ) -> Value {
@@ -786,13 +895,21 @@ fn tool_reply(result: Result<Value, Fault>) -> Value {
         Ok(value) => (value, false),
         Err(error) => (json!({"error": {"codigo": error.code, "mensaje": error.message}}), true),
     };
-    let structured = if value.is_object() { value } else { json!({"valor": value}) };
+    let (text, structured) = tool_text(value);
     let mut result = json!({
-        "content": [{"type": "text", "text": structured.to_string()}],
+        "content": [{"type": "text", "text": text}],
         "structuredContent": structured,
     });
     if is_error { result["isError"] = json!(true); }
     result
+}
+
+pub(crate) fn tool_text(value: Value) -> (String, Value) {
+    let mut structured = if value.is_object() { value } else { json!({"valor": value}) };
+    let text = structured.as_object_mut().and_then(|object| object.remove("__mcpText"))
+        .and_then(|value| if let Value::String(text) = value { Some(text) } else { None })
+        .unwrap_or_else(|| structured.to_string());
+    (text, structured)
 }
 
 fn with_session(mut response: Response<Body>, id: Uuid) -> Response<Body> {
@@ -812,6 +929,11 @@ fn missing_session() -> Response<Body> {
 }
 
 fn definitions() -> Value {
+    let alternatives = json!({
+        "type": "array", "minItems": 1, "maxItems": MAX_CONVERSATION_ALTERNATIVES,
+        "items": {"type": "string", "minLength": 1, "maxLength": 256},
+        "description": "Alternativas de búsqueda. Cada texto admite hasta 256 bytes.",
+    });
     let references = json!({"type": "array", "maxItems": 100, "items": {
         "type": "object", "properties": {
             "registro": {"type": "string"}, "ubicacion": {"type": "string"},
@@ -847,19 +969,21 @@ fn definitions() -> Value {
         {
             "name": "retomar",
             "title": "Retomar una conversación",
-            "description": "Recupera una conversación y su destino por ID de Mind. Si desconoces el ID, indica una consulta de texto.",
+            "description": "Recupera una conversación por ID, consulta o varias alternativas en consultas. Si la búsqueda queda vacía, revisa recientes.",
             "inputSchema": {"type": "object", "properties": {
-                "id": {"type": "string"}, "consulta": {"type": "string"}, "proyecto": {"type": "string"},
-            }, "anyOf": [{"required": ["id"]}, {"required": ["consulta"]}], "additionalProperties": false},
+                "id": {"type": "string"}, "consulta": {"type": "string"}, "consultas": alternatives,
+                "proyecto": {"type": "string"},
+                "limite": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Tope para recientes (hasta 10)."},
+            }, "anyOf": [{"required": ["id"]}, {"required": ["consulta"]}, {"required": ["consultas"]}], "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "openWorldHint": false},
         },
         {
             "name": "buscar",
             "title": "Buscar archivos, carpetas, eliminados o conversaciones",
-            "description": "Busca en los índices persistentes de Mind (archivos, carpeta, eliminados) o en conversaciones.",
+            "description": "Busca archivos, carpetas, eliminados o conversaciones. En conversaciones puedes enviar alternativas en consultas y revisar recientes si no hay coincidencias.",
             "inputSchema": {"type": "object", "properties": {
                 "en": {"type": "string", "enum": ["archivos", "carpeta", "eliminados", "conversaciones"], "default": "archivos"},
-                "consulta": {"type": "string"}, "proyecto": {"type": "string"},
+                "consulta": {"type": "string"}, "consultas": alternatives, "proyecto": {"type": "string"},
                 "carpetas": {"type": "array", "items": {"type": "string"}},
                 "carpeta": {"type": "string"}, "ruta": {"type": "string"},
                 "modo": {"type": "string", "enum": ["contiene", "empieza", "exacto"]},
@@ -871,6 +995,7 @@ fn definitions() -> Value {
                 "tamano_max": {"type": "integer", "minimum": 0},
                 "modificado_desde": {"type": "string"},
                 "modificado_hasta": {"type": "string"},
+                "propiedades": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}},
                 "orden": {"type": "string", "enum": ["relevancia", "ruta", "modificado", "tamano"]},
                 "profundidad": {"type": "integer", "minimum": 1, "maximum": 8},
                 "desde": {},
@@ -969,9 +1094,10 @@ fn definitions() -> Value {
         {
             "name": "vista",
             "title": "Vista compartida local",
-            "description": "Publica, consulta o cierra una vista web local de una carpeta con permiso de lectura (por ejemplo un sitio o construcción web con index.html). Sigue accesible en el navegador aunque el agente cierre sesión.",
+            "description": "Publica, consulta o cierra una vista web local de una carpeta con permiso de lectura. Por defecto se cierra tras 30 minutos sin actividad. Usa mantener para cambiar esa opción.",
             "inputSchema": {"type": "object", "properties": {
-                "accion": {"type": "string", "enum": ["abrir", "consultar", "cerrar"]},
+                "accion": {"type": "string", "enum": ["abrir", "consultar", "mantener", "cerrar"]},
+                "mantener_abierta": {"type": "boolean", "description": "Evita el cierre automático si es true. Al abrir es false por defecto; al actualizar se conserva si se omite."},
                 "carpeta": {"type": "string", "description": "ID o ruta absoluta de la carpeta registrada."},
                 "ruta": {"type": "string", "description": "Subcarpeta relativa dentro de la carpeta."},
                 "proyecto": {"type": "string", "description": "Nombre del proyecto."},

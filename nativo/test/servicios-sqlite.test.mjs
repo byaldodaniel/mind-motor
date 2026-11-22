@@ -131,7 +131,8 @@ function fetchView(location, options) {
   return fetch(location, { signal: AbortSignal.timeout(5000), ...options });
 }
 
-test('los servicios comparten SQLite y conservan la aplicación válida en la misma vista', {
+for (const backend of ['anfitrión', 'Motor Rust']) {
+test('los servicios comparten SQLite y conservan la vista con ' + backend, {
   skip: !executable && 'Indica MIND_NATIVE_EXE',
   timeout: 75_000,
 }, async (t) => {
@@ -165,10 +166,20 @@ test('los servicios comparten SQLite y conservan la aplicación válida en la mi
   await fs.mkdir(base);
   await fs.mkdir(copy);
   await fs.writeFile(path.join(copy, 'servicio.mjs'), app);
-  motor = start(process.execPath, [motorScript, base], env);
+  const standalone = backend === 'Motor Rust';
+  motor = standalone
+    ? start(binary, ['motor', '--base', base, '--conector'], env)
+    : start(process.execPath, [motorScript, base], env);
   record = await motor.connector(path.join(base, 'conector.json'));
-  host = start(binary, ['anfitrion', '--base', base, '--puerto-vistas', '0', '--servicios-prueba'], env);
-  const hostRecord = await host.connector(path.join(base, 'anfitrion.json'));
+  if (!standalone) {
+    host = start(binary, ['anfitrion', '--base', base, '--puerto-vistas', '0', '--servicios-prueba'], env);
+  }
+  const hostRecord = standalone ? record : await host.connector(path.join(base, 'anfitrion.json'));
+  if (standalone) {
+    assert.equal(hostRecord.pid, motor.pid);
+    assert.equal(await readJson(path.join(base, 'anfitrion.json')), null);
+  }
+  await assert.rejects(fs.stat(path.join(base, 'servicios-datos')), { code: 'ENOENT' });
 
   const command = (...args) => run(binary, args, { env, timeout: 20000, windowsHide: true }).then(
     ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
@@ -304,3 +315,4 @@ test('los servicios comparten SQLite y conservan la aplicación válida en la mi
   await managed(reopened, 'reabierta', 7);
   await close(reopened, reopenedRecipe.marker);
 });
+}

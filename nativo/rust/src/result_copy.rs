@@ -119,6 +119,61 @@ fn transfer(
     Ok((total, format!("{:x}", digest.finalize())))
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct DigestInfo {
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
+}
+
+pub(crate) fn copy_file(
+    root: &str, path: &str, target_root: &str, target_path: &str,
+    confirm: impl Fn() -> Result<(), &'static str>,
+) -> Result<DigestInfo, &'static str> {
+    let result = execute(root, path, Some((target_root, target_path)), MAX_BYTES, &confirm, &confirm)?;
+    digest_info(&result)
+}
+
+pub(crate) fn verify_file(
+    root: &str, path: &str, confirm: impl Fn() -> Result<(), &'static str>,
+) -> Result<DigestInfo, &'static str> {
+    let result = execute(root, path, None, MAX_BYTES, &confirm, &confirm)?;
+    digest_info(&result)
+}
+
+fn digest_info(value: &Value) -> Result<DigestInfo, &'static str> {
+    Ok(DigestInfo {
+        size: value["size"].as_u64().ok_or("COPY_FAILED")?,
+        sha256: value["sha256"].as_str().ok_or("COPY_FAILED")?.to_owned(),
+    })
+}
+
+fn execute(
+    root: &str, path: &str, target: Option<(&str, &str)>, limit: u64,
+    confirm: impl FnOnce() -> Result<(), &'static str>,
+    confirm_after_read: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<Value, &'static str> {
+    if limit > MAX_BYTES { return Err("FILE_TOO_LARGE"); }
+    let mut source = open_reader_without_writers(root, path)?;
+    let before = fingerprint(&source).map_err(io_code)?;
+    if before.size > limit { return Err("FILE_TOO_LARGE"); }
+    if let Some((target_root, target_path)) = target {
+        let mut hash = None;
+        let mut result = text_write::create_stream(target_root, target_path, confirm, |destination| {
+            let (count, digest) = transfer(&mut source, Some(destination), &before, limit)?;
+            confirm_after_read()?;
+            hash = Some(digest);
+            Ok(count)
+        })?;
+        result["sha256"] = json!(hash.ok_or("COPY_FAILED")?);
+        Ok(result)
+    } else {
+        confirm()?;
+        let (size, digest) = transfer(&mut source, None, &before, limit)?;
+        confirm_after_read()?;
+        Ok(json!({"size": size, "sha256": digest}))
+    }
+}
+
 fn operate(args: &[String]) -> Result<Value, &'static str> {
     let guard = ParentGuard::from_args(args)?;
     let mut input = io::stdin().lock();
@@ -126,16 +181,7 @@ fn operate(args: &[String]) -> Result<Value, &'static str> {
     (&mut input).take(MAX_REQUEST).read_until(b'\n', &mut line).map_err(io_code)?;
     if line.last() != Some(&b'\n') { return Err("COPY_FAILED"); }
     let request: Request = serde_json::from_slice(&line).map_err(|_| "COPY_FAILED")?;
-    let (root, path, limit) = match &request {
-        Request::Copy(copy) => (&copy.source_root, &copy.source_path, copy.max_bytes),
-        Request::Verify(verify) if verify.verify_only => (&verify.source_root, &verify.source_path, verify.max_bytes),
-        Request::Verify(_) => return Err("COPY_FAILED"),
-    };
-    if limit > MAX_BYTES { return Err("FILE_TOO_LARGE"); }
-    let mut source = open_reader_without_writers(root, path)?;
-    let before = fingerprint(&source).map_err(io_code)?;
-    if before.size > limit { return Err("FILE_TOO_LARGE"); }
-    let mut confirm = || {
+    let confirm = || {
         {
             let mut diagnostic = io::stderr().lock();
             diagnostic.write_all(b"READY\n").map_err(io_code)?;
@@ -147,21 +193,13 @@ fn operate(args: &[String]) -> Result<Value, &'static str> {
         guard.begin_commit(Duration::from_secs(120))
     };
     match request {
-        Request::Copy(copy) => {
-            let mut hash = None;
-            let mut result = text_write::create_stream(&copy.target_root, &copy.target_path, confirm, |destination| {
-                let (count, digest) = transfer(&mut source, Some(destination), &before, limit)?;
-                hash = Some(digest);
-                Ok(count)
-            })?;
-            result["sha256"] = json!(hash.ok_or("COPY_FAILED")?);
-            Ok(result)
-        }
-        Request::Verify(_) => {
-            confirm()?;
-            let (size, digest) = transfer(&mut source, None, &before, limit)?;
-            Ok(json!({"size": size, "sha256": digest}))
-        }
+        Request::Copy(copy) => execute(
+            &copy.source_root, &copy.source_path, Some((&copy.target_root, &copy.target_path)), copy.max_bytes, confirm, || Ok(()),
+        ),
+        Request::Verify(verify) if verify.verify_only => execute(
+            &verify.source_root, &verify.source_path, None, verify.max_bytes, confirm, || Ok(()),
+        ),
+        Request::Verify(_) => Err("COPY_FAILED"),
     }
 }
 

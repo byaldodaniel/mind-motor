@@ -1,0 +1,186 @@
+{
+  "fixed": [
+    [
+      "Recuperación de cuenta",
+      "Si olvida su contraseña, solicite un enlace de restablecimiento por correo electrónico.",
+      "¿Cómo vuelvo a entrar si no recuerdo la clave de acceso?",
+      "enlace de restablecimiento",
+      [
+        "recuperación cuenta",
+        "enlace restablecimiento",
+        "contraseña correo"
+      ]
+    ],
+    [
+      "Plantas",
+      "Regar las macetas dos veces por semana y mantenerlas lejos del sol directo.",
+      "¿Con qué frecuencia debo echar agua a las plantas?",
+      "dos veces por semana",
+      [
+        "plantas",
+        "regar macetas",
+        "dos veces semana"
+      ]
+    ],
+    [
+      "Batería",
+      "Conectar el cargador cuando la batería baje del veinte por ciento.",
+      "¿Cuándo debería enchufar el dispositivo para recargarlo?",
+      "veinte por ciento",
+      [
+        "batería",
+        "conectar cargador",
+        "veinte ciento"
+      ]
+    ],
+    [
+      "Comida del encuentro",
+      "La cena del evento debe ofrecer un menú vegetariano sin carne ni pescado.",
+      "¿Qué comida serviremos a quienes no comen animales?",
+      "menú vegetariano",
+      [
+        "comida encuentro",
+        "menú vegetariano",
+        "carne pescado"
+      ]
+    ],
+    [
+      "Atención al cliente",
+      "El servicio de soporte atiende de lunes a viernes entre las nueve y las dieciocho horas.",
+      "¿En qué horario puedo contactar al equipo de ayuda?",
+      "de lunes a viernes entre las nueve y las dieciocho horas",
+      [
+        "atención cliente",
+        "soporte atiende",
+        "nueve dieciocho"
+      ]
+    ],
+    [
+      "Traducción",
+      "Preparar la documentación en español e inglés para los dos grupos de lectores.",
+      "¿En qué idiomas necesitamos escribir las instrucciones?",
+      "en español e inglés",
+      [
+        "traducción",
+        "documentación lectores",
+        "español inglés"
+      ]
+    ],
+    [
+      "Imprenta",
+      "Imprimir el documento en papel A4 y orientación horizontal.",
+      "¿Qué tamaño de hoja y disposición usamos al imprimir?",
+      "papel A4 y orientación horizontal",
+      [
+        "imprenta",
+        "papel A4",
+        "orientación horizontal"
+      ]
+    ],
+    [
+      "Viaje",
+      "El tren sale a las ocho desde la estación central. Llegar quince minutos antes.",
+      "¿A qué hora y desde dónde parte el ferrocarril?",
+      "a las ocho desde la estación central",
+      [
+        "viaje",
+        "tren ocho",
+        "estación central"
+      ]
+    ],
+    [
+      "Video",
+      "La pieza audiovisual tendrá formato panorámico 16:9 y resolución de 1920 por 1080 píxeles.",
+      "¿Qué proporción y calidad tendrá la película que vamos a crear?",
+      "16:9 y resolución de 1920 por 1080",
+      [
+        "video",
+        "panorámico 16:9",
+        "1920 1080"
+      ]
+    ],
+    [
+      "Factura",
+      "Enviar al comprador la factura en PDF adjunta al correo después de confirmar el pago.",
+      "¿Cómo entregamos el comprobante de compra una vez abonado?",
+      "la factura en PDF",
+      [
+        "factura",
+        "comprador PDF",
+        "confirmar pago"
+      ]
+    ]
+  ],
+  "fixedUnanswered": [
+    "¿Cuál es la temperatura de la superficie de Neptuno?",
+    "¿Cómo se reproducen las medusas del Ártico?",
+    "¿Qué estructura tiene el ADN de una mariposa?",
+    "¿Cuántos volcanes activos hay en Venus?"
+  ],
+  "independent": {
+    "humedad": [
+      "humedad_manual",
+      [
+        "humedad",
+        "higrómetro",
+        "casillero verde"
+      ]
+    ],
+    "taller_correccion": [
+      "taller_pago",
+      [
+        "inscripción",
+        "rectificaciones",
+        "miércoles 18:00"
+      ]
+    ],
+    "rampa_decision": [
+      "rampa_idea",
+      [
+        "rampa",
+        "decisión rampa",
+        "festival instalada"
+      ]
+    ],
+    "elevador_averia": [
+      "elevador_reparto",
+      [
+        "interno",
+        "montacargas atasca",
+        "mantenimiento 216"
+      ]
+    ],
+    "trayecto_reembolso": [
+      "trayecto_reserva",
+      [
+        "gasto",
+        "autobús reembolsa",
+        "billete original"
+      ]
+    ],
+    "cocina_decision": [
+      "cocina_idea",
+      [
+        "mesa",
+        "cocina gas",
+        "cartucho butano"
+      ]
+    ],
+    "panel_formas": [
+      "panel_obra",
+      [
+        "cruz",
+        "círculo libre",
+        "cruz ocupado"
+      ]
+    ],
+    "mascota_regla": [
+      "mascota_patio",
+      [
+        "perros",
+        "perros guía",
+        "almacén acompañante"
+      ]
+    ]
+  }
+}

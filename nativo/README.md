@@ -333,6 +333,35 @@ segundo lanzamiento comprueba que el historial conserva un solo turno. Si
 hay otra prueba con una vista activa, compila con
 `-Target x86_64-pc-windows-gnu` y usa ese ejecutable en `MIND_NATIVE_EXE`.
 
+## Búsqueda de conversaciones en Rust (Etapa 4)
+
+Usa `consulta` para una búsqueda o `consultas` para enviar de una a ocho
+alternativas de hasta 256 bytes cada una. Se pueden combinar ambos argumentos.
+`buscar` con `en: "conversaciones"`, `conversaciones_buscar` y `retomar` por
+texto usan los términos literales del título y el resumen, sin distinguir
+mayúsculas ni tildes y sin sinónimos ni E5. Basta que coincidan todos los
+términos de una alternativa. El orden prioriza alternativas cumplidas,
+términos coincidentes y coincidencias en el título, con desempate por fecha e
+ID. El extracto se centra en la primera coincidencia en el resumen.
+
+Si la búsqueda textual no encuentra coincidencias, `recientes` devuelve hasta diez títulos
+y extractos (o menos si `limite` es menor). Se mantienen `total: 0` y
+`conversaciones: []`, o `encontrada: false` y `candidatos: []` en `retomar`.
+Los resultados y `recientes` respetan el proyecto, los permisos de
+continuidad, los permisos de lectura de carpetas y las exclusiones.
+
+Con `MIND_NATIVE_EXE` apuntando al binario Rust local y el tag local
+`v1.0.4-r3` disponible, ejecuta desde la raíz del repositorio:
+
+```powershell
+$env:MIND_AGENT_STARTUP = '0'
+$env:MIND_NATIVO_RUNS = Join-Path $env:TEMP 'mind-nativo-runs'
+node --test nativo/test/busqueda-conversaciones.test.mjs
+```
+
+El ensayo integral usa los dos bancos ficticios, dos sesiones MCP atendidas
+por el mismo PID Rust y la misma Base al volver a r3.
+
 ## Compilación reproducible
 
 `build.ps1` quita del ejecutable las rutas locales (`--remap-path-prefix`) y,

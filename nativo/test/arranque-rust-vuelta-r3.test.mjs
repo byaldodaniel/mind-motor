@@ -17,6 +17,7 @@ import { checkHealthyConnector } from '../../src/connector.js';
 import { probeProcesses } from '../../src/process-identity.js';
 import { main as cliMain } from '../../src/product-cli.js';
 import { RUNS } from './runs.mjs';
+import { assertViewHtml } from './vista-html.mjs';
 import { extractR3, r3Commit } from './r3-fixture.mjs';
 
 const run = promisify(execFile);
@@ -1183,7 +1184,7 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     assert.equal(connector.state.puertoVistas, connector.health.puertoVistas);
     const page = await fetch(viewUrl, { signal: AbortSignal.timeout(5_000) });
     assert.equal(page.status, 200);
-    assert.equal(await page.text(), siteHtml);
+    assertViewHtml(await page.text(), siteHtml);
     const style = await fetch(new URL('estilos.css', viewUrl), { signal: AbortSignal.timeout(5_000) });
     assert.equal(style.status, 200);
     assert.equal(await style.text(), siteCss);
@@ -1196,7 +1197,7 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
   assert.equal((await checkHealthyConnector(base)).health.pid, owner.pid);
   const reloadedPage = await fetch(openedView.url, { signal: AbortSignal.timeout(5_000) });
   assert.equal(reloadedPage.status, 200);
-  assert.equal(await reloadedPage.text(), siteHtml);
+  assertViewHtml(await reloadedPage.text(), siteHtml);
   const reloadedCss = await fetch(new URL('estilos.css', openedView.url), { signal: AbortSignal.timeout(5_000) });
   assert.equal(reloadedCss.status, 200);
   assert.equal(await reloadedCss.text(), siteCss);

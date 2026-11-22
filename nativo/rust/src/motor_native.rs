@@ -5,7 +5,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -23,20 +23,26 @@ use uuid::Uuid;
 use crate::{
     bridge,
     host::{self, Body},
-    motor_automations, motor_backup,
+    motor_automations, motor_backup, motor_conversations, motor_destinations,
     motor_connector::Connector,
     motor_consent::{self as consent, AccessRequest, Prepared},
     motor_mcp::Mcp,
     motor_owner::{self, timestamp, Owner},
+    motor_updates::Updater,
     motor_workspace::{physical_directory, relative_parts, with_workspace, Workspace},
     motor_files, motor_permissions as access, motor_records, organize, scan, text_write,
     view_cli,
     views::Views,
+    services::{Services, MOTOR_SECRET},
 };
 
 const MAX_RECORD: usize = 2 * 1024 * 1024;
 const MAX_MARKDOWN: usize = 1024 * 1024;
 const MAX_REVISION: u64 = (1 << 53) - 1;
+const MAX_CONVERSATION_QUERY_BYTES: usize = 256;
+pub(crate) const MAX_CONVERSATION_ALTERNATIVES: usize = 8;
+const MAX_RECENT_CONVERSATIONS: usize = 10;
+const CONVERSATION_EXCERPT_CHARS: usize = 240;
 
 #[derive(Debug)]
 pub(crate) struct Fault {
@@ -56,7 +62,7 @@ impl std::fmt::Display for Fault {
     }
 }
 
-fn invalid(message: &'static str) -> Fault {
+pub(crate) fn invalid(message: &'static str) -> Fault {
     Fault::new("INVALID_ARGUMENTS", message)
 }
 
@@ -68,7 +74,7 @@ pub(crate) fn is_id(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uuid| uuid.to_string() == value)
 }
 
-fn id(value: &Value) -> Result<&str, Fault> {
+pub(crate) fn id(value: &Value) -> Result<&str, Fault> {
     value.as_str().filter(|id| is_id(id))
         .ok_or_else(|| Fault::new("INVALID_CONVERSATION_ID", "ID de conversación no válido."))
 }
@@ -77,11 +83,11 @@ fn revision(value: &Value) -> Option<u64> {
     value.as_u64().filter(|&value| (1..=MAX_REVISION).contains(&value))
 }
 
-fn valid_text(value: &Value, limit: usize) -> Option<&str> {
+pub(crate) fn valid_text(value: &Value, limit: usize) -> Option<&str> {
     value.as_str().filter(|text| !text.trim().is_empty() && text.len() <= limit && !text.contains('\0'))
 }
 
-fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -98,7 +104,7 @@ fn markdown(record: &Value) -> String {
     format!("<!-- mind-conversation:{id} revision:{revision} -->\n# {title}\n\n{important}\n")
 }
 
-fn matches_markdown(bytes: &[u8], record: &Value) -> bool {
+pub(crate) fn matches_markdown(bytes: &[u8], record: &Value) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else { return false };
     let Some((first, body)) = text.split_once('\n') else { return false };
     let Some(record_id) = record["id"].as_str() else { return false };
@@ -126,6 +132,7 @@ pub(crate) struct Motor {
     work: Mutex<()>,
     layout: Layout,
     views: Arc<Views>,
+    updates: Updater,
     backup_limiter: motor_backup::BackupLimiter,
     automations: Mutex<motor_automations::AutomationRuntime>,
 }
@@ -191,6 +198,7 @@ impl Motor {
             }
             None => return Err(Fault::new("BASE_NOT_FOUND", "Indica una Base preparada por Mind.")),
         };
+        let updates = Updater::new(&base, layout.installation.as_deref(), layout.motor.as_deref());
         Ok(Self {
             base,
             base_id,
@@ -198,6 +206,7 @@ impl Motor {
             work: Mutex::new(()),
             layout,
             views,
+            updates,
             backup_limiter: motor_backup::BackupLimiter::default(),
             automations: Mutex::new(motor_automations::AutomationRuntime::new()),
         })
@@ -284,6 +293,29 @@ impl Motor {
         motor_automations::finish_activation(&self.base, prepared, answer, client, confirm)
     }
 
+    pub(crate) fn add_update_advisories(&self, value: &mut Value, connection: Option<&str>, notice: bool) {
+        if !self.updates.enabled() { return; }
+        let Some(object) = value.as_object_mut() else { return; };
+        let Ok(_work) = self.work.lock() else { return; };
+        if self.owner.check().is_err() { return; }
+        if let Some(Value::Object(advisories)) = self.updates.advisories(connection, notice) {
+            object.extend(advisories);
+        }
+    }
+
+    pub(crate) fn prepare_update(&self, args: &Map<String, Value>) -> Result<Value, Fault> {
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        self.owner.check().map_err(filesystem)?;
+        self.updates.prepare_form(args)
+    }
+
+    pub(crate) fn finish_update(&self, identity: Value, approved: bool, active: impl FnOnce() -> bool) -> Result<Value, Fault> {
+        let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
+        self.owner.check().map_err(filesystem)?;
+        if !active() { return Err(Fault::new("REQUEST_CANCELLED", "La solicitud se canceló.")); }
+        self.updates.finish_form(identity, approved)
+    }
+
     pub(crate) fn poll_automations(&self) -> Result<(), Fault> {
         let _work = self.work.lock().map_err(|_| filesystem("MOTOR_UNAVAILABLE"))?;
         self.owner.check().map_err(filesystem)?;
@@ -322,7 +354,10 @@ impl Motor {
         match name.as_str() {
             "estado" if args.is_empty() => self.state(),
             "retomar" => self.resume(args),
-            "conversacion_leer" => self.resume(args).map(|value| json!({"conversacion": value["conversacion"]})),
+            "conversacion_leer" => {
+                only(args, &["id", "consulta", "proyecto"])?;
+                self.resume(args).map(|value| json!({"conversacion": value["conversacion"]}))
+            }
             "buscar" => self.search(args),
             "conversaciones_buscar" => {
                 if args.contains_key("en") {
@@ -331,6 +366,44 @@ impl Motor {
                 let mut fields = args.clone();
                 fields.insert("en".into(), json!("conversaciones"));
                 self.search(&fields)
+            }
+            "destinos_consultar" | "destinos_configurar" | "destino_resolver" | "resultado_registrar" | "resultado_importar" => {
+                motor_files::recover_move(&self.base, || self.owner.check())?;
+                motor_destinations::call(&self.base, self.layout.user_data.as_deref(), &name, args, || self.owner.check())
+            }
+            "propiedades" | "asignar_propiedades" => {
+                crate::motor_properties::call(&self.base, name == "asignar_propiedades", args, || self.owner.check())
+            }
+            "agrupar" => crate::motor_marks::group(&self.base, args, || self.owner.check()),
+            "indices_personalizados" | "crear_indice" | "actualizar_indice" | "modificar_indice" | "retirar_indice" => {
+                crate::motor_custom_index::call(&self.base, &name, args, || self.owner.check())
+            }
+            "actualizacion_consultar" | "actualizacion_posponer" | "actualizacion_aplicar" =>
+                self.updates.call(&name, args),
+            "continuidad_exportar" => crate::motor_continuity_io::export(&self.base, args),
+            "continuidad_importar" => crate::motor_continuity_io::import(&self.base, args, || self.owner.check()),
+            "conversaciones_preparar" => {
+                only(args, &[])?;
+                access::check_continuity(&self.base, false)?;
+                Ok(json!({
+                    "estado":"no_preparada",
+                    "incidencia":"La búsqueda semántica E5 no aplica en este Motor.",
+                    "semantica":{"estado":"no_disponible"},
+                }))
+            }
+            "continuidad_consultar" => {
+                access::check_continuity(&self.base, false)?;
+                motor_files::recover_move(&self.base, || self.owner.check())?;
+                motor_records::consult(&self.base, args)
+            }
+            "conversacion_preferencias" | "conversacion_configurar" => {
+                motor_files::recover_move(&self.base, || self.owner.check())?;
+                motor_conversations::preferences(&self.base, name == "conversacion_configurar", args, || self.owner.check())
+            }
+            "conversacion_trasladar" => {
+                access::check_continuity(&self.base, true)?;
+                motor_files::recover_move(&self.base, || self.owner.check())?;
+                motor_conversations::transfer(&self.base, args, || self.owner.check())
             }
             "guardar" | "actualizar" if args.get("en").and_then(Value::as_str) == Some("continuidad") => {
                 access::check_continuity(&self.base, true)?;
@@ -374,13 +447,20 @@ impl Motor {
 
     fn call_vista(&self, args: &Map<String, Value>) -> Result<Value, Fault> {
         let action = args.get("accion").and_then(Value::as_str)
-            .ok_or_else(|| invalid("Indica accion abrir, consultar o cerrar para la vista."))?;
+            .ok_or_else(|| invalid("Indica accion abrir, consultar, mantener o cerrar para la vista."))?;
         match action {
-            "consultar" => {
-                only(args, &["accion", "id"])?;
+            "consultar" | "mantener" => {
+                let keep_open = if action == "mantener" {
+                    only(args, &["accion", "id", "mantener_abierta"])?;
+                    Some(parse_keep_open(args)?.ok_or_else(|| invalid("Indica mantener_abierta."))?)
+                } else {
+                    only(args, &["accion", "id"])?;
+                    None
+                };
                 let id = parse_view_uuid(args.get("id"))?.ok_or_else(|| invalid("Indica el ID de la vista."))?;
                 Handle::current()
-                    .block_on(self.views.get_info(id))
+                    .block_on(self.views.access_info(id, keep_open))
+                    .map(|(_, info)| info)
                     .map_err(|(_, code)| view_fault(code))
             }
             "cerrar" => {
@@ -393,7 +473,8 @@ impl Motor {
                 }
             }
             "abrir" => {
-                only(args, &["accion", "carpeta", "ruta", "proyecto", "id", "version"])?;
+                only(args, &["accion", "carpeta", "ruta", "proyecto", "id", "version", "mantener_abierta"])?;
+                let keep_open = parse_keep_open(args)?;
                 let id = parse_view_uuid(args.get("id"))?;
                 let version = match args.get("version") {
                     None => None,
@@ -494,13 +575,13 @@ impl Motor {
                 }
                 let _ = access::resolve_folder(&self.base, Some(&folder.id), &["leer"])?;
                 self.owner.check().map_err(filesystem)?;
-                let publication = view_cli::build_publication(project, copy_id, git_before, assets);
+                let publication = view_cli::build_publication(project, copy_id, git_before, assets, keep_open);
                 Handle::current()
                     .block_on(self.views.publish_input(publication, previous))
                     .map(|(_, _, _, payload)| payload)
                     .map_err(|(_, code)| view_fault(code))
             }
-            _ => Err(invalid("Indica accion abrir, consultar o cerrar para la vista.")),
+            _ => Err(invalid("Indica accion abrir, consultar, mantener o cerrar para la vista.")),
         }
     }
 
@@ -515,36 +596,31 @@ impl Motor {
     }
 
     fn load(&self, id: &str) -> Result<(Value, String), Fault> {
-        let name = record_file(id);
-        let missing = || Fault::new("CONVERSATION_NOT_FOUND", "No existe esa conversación en Mind.");
-        let bytes = access::read_file(&self.base, &name, MAX_RECORD)?.ok_or_else(missing)?;
-        let record: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| Fault::new("RECORD_CORRUPT", "El registro técnico no contiene JSON válido."))?;
-        if record["kind"] != "conversacion" || record["content"]["format"] != "mind-conversation" {
-            return Err(missing());
-        }
-        let content = &record["content"];
-        motor_records::validate_record(&record, id)?;
-        if content["version"] != 1 || valid_text(&content["title"], 200).is_none()
-            || valid_text(&content["important"], 64 * 1024).is_none()
-        {
-            return Err(Fault::new("CONTINUITY_CORRUPT", "El registro de conversación no tiene el formato esperado."));
-        }
+        let (record, bytes) = motor_records::load_conversation(&self.base, id)?;
         Ok((record, digest(&bytes)))
     }
 
     fn resume(&self, args: &Map<String, Value>) -> Result<Value, Fault> {
-        only(args, &["id", "consulta", "proyecto"])?;
+        only(args, &["id", "consulta", "consultas", "proyecto", "limite"])?;
         access::check_continuity(&self.base, false)?;
         motor_files::recover_move(&self.base, || self.owner.check())?;
         let mut candidates = Vec::new();
         let id = match args.get("id") {
             Some(value) => id(value)?.to_owned(),
             None => {
-                if !args.contains_key("consulta") { return Err(invalid("Indica un ID o texto para buscar.")); }
-                candidates = self.hits(args)?.into_iter().take(3).collect();
-                if candidates.is_empty() {
-                    return Ok(json!({"encontrada":false, "consulta":args["consulta"], "candidatos":[]}));
+                if !args.contains_key("consulta") && !args.contains_key("consultas") {
+                    return Err(invalid("Indica un ID o texto para buscar."));
+                }
+                let recent_limit = conversation_limit(args, MAX_RECENT_CONVERSATIONS)?.min(MAX_RECENT_CONVERSATIONS);
+                let found = self.hits(args, 3, recent_limit)?;
+                candidates = found.matches;
+                if let Some(recent) = found.recent {
+                    access::check_continuity(&self.base, false)?;
+                    let mut result = json!({"encontrada": false, "candidatos": [], "recientes": recent});
+                    for key in ["consulta", "consultas"] {
+                        if let Some(query) = args.get(key) { result[key] = query.clone(); }
+                    }
+                    return Ok(result);
                 }
                 candidates.remove(0)["id"].as_str().unwrap_or_default().to_owned()
             }
@@ -582,31 +658,33 @@ impl Motor {
             "carpeta" => motor_files::explore_folder(&self.base, args, || self.owner.check()),
             "eliminados" => motor_files::list_removed(&self.base, args, || self.owner.check()),
             "conversaciones" => {
-                only(args, &["en", "consulta", "proyecto", "limite"])?;
+                only(args, &["en", "consulta", "consultas", "proyecto", "limite"])?;
                 access::check_continuity(&self.base, false)?;
                 motor_files::recover_move(&self.base, || self.owner.check())?;
-                let limit = args.get("limite").map(|limit| limit.as_u64().filter(|limit| (1..=100).contains(limit))
-                    .ok_or_else(|| invalid("limite debe estar entre 1 y 100."))).transpose()?.unwrap_or(20);
-                let hits = self.hits(args)?;
-                let total = hits.len();
-                let visible: Vec<_> = hits.into_iter().take(limit as usize).collect();
+                let limit = conversation_limit(args, 20)?;
+                let found = self.hits(args, limit, limit.min(MAX_RECENT_CONVERSATIONS))?;
                 access::check_continuity(&self.base, false)?;
-                Ok(json!({ "total": total, "mostradas": visible.len(), "conversaciones": visible,
-                    "semantica": { "estado":"no_disponible" } }))
+                let mut result = json!({
+                    "total": found.total, "mostradas": found.matches.len(), "conversaciones": found.matches,
+                    "semantica": { "estado": "no_disponible" }
+                });
+                if let Some(recent) = found.recent { result["recientes"] = json!(recent); }
+                Ok(result)
             }
             _ => Err(invalid("Indica buscar en archivos, carpeta, eliminados o conversaciones.")),
         }
     }
 
-    fn hits(&self, args: &Map<String, Value>) -> Result<Vec<Value>, Fault> {
-        let query = args.get("consulta").map(|value| valid_text(value, 256)
-            .ok_or_else(|| invalid("Indica texto de búsqueda de hasta 256 bytes."))).transpose()?;
+    fn hits(&self, args: &Map<String, Value>, limit: usize, recent_limit: usize) -> Result<ConversationSearch, Fault> {
+        let queries = conversation_queries(args)?;
+        let alternatives: Vec<Vec<&str>> = queries.iter().map(|query| query.split_whitespace().collect()).collect();
+        let has_query = !alternatives.is_empty();
         let project = args.get("proyecto").map(|value| valid_text(value, 200)
             .ok_or_else(|| invalid("Indica un proyecto válido."))).transpose()?.map(fold);
-        let query = query.map(fold).unwrap_or_default();
-        let terms = query.split_whitespace().collect::<Vec<_>>();
+        let visibility = access::FolderVisibility::load(&self.base)?;
         let entries = fs::read_dir(&self.base).map_err(|_| filesystem("READ_FAILED"))?;
         let mut matches = Vec::new();
+        let mut recent: Vec<(String, String, Value)> = Vec::new();
         for item in entries {
             let item = item.map_err(|_| filesystem("READ_FAILED"))?;
             let filename = item.file_name();
@@ -621,21 +699,41 @@ impl Motor {
             if project.as_ref().is_some_and(|wanted| fields["project"].as_str().map(fold).as_ref() != Some(wanted)) {
                 continue;
             }
+            if fields["file"].as_str().is_some_and(|file| !visibility.can_read_file(file)) {
+                continue;
+            }
+            let updated = record["updatedAt"].as_str().unwrap_or_default();
             let title = fields["title"].as_str().unwrap_or_default();
             let important = fields["important"].as_str().unwrap_or_default();
-            let heading = fold(title);
-            let body = fold(important);
-            if !terms.iter().all(|term| heading.contains(*term) || body.contains(*term)) { continue; }
-            let rank = terms.iter().filter(|term| heading.contains(**term)).count();
-            let excerpt: String = important.chars().take(240).collect();
-            let updated = record["updatedAt"].as_str().unwrap_or_default().to_owned();
-            matches.push((rank, updated, candidate.to_owned(), json!({
-                "id": candidate, "revision": record["revision"], "titulo": title, "proyecto": fields["project"],
-                "actualizado": record["updatedAt"], "extracto": excerpt, "coincidencia": "palabras",
-            })));
+            let (rank, body_at) = if has_query {
+                conversation_relevance(&alternatives, &fold(title), &fold(important))
+            } else {
+                ((0, 0, 0), None)
+            };
+            if has_query && rank.0 == 0 {
+                if matches.is_empty() {
+                    let at = recent.partition_point(|(date, id, _)| {
+                        date.as_str() > updated || (date == updated && id.as_str() < candidate)
+                    });
+                    if at < recent_limit {
+                        let summary = conversation_summary(&record, conversation_excerpt(important, None));
+                        recent.insert(at, (updated.to_owned(), candidate.to_owned(), summary));
+                        recent.truncate(recent_limit);
+                    }
+                }
+                continue;
+            }
+            let mut summary = conversation_summary(&record, conversation_excerpt(important, body_at));
+            summary["coincidencia"] = json!("palabras");
+            matches.push((rank, updated.to_owned(), candidate.to_owned(), summary));
         }
         matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
-        Ok(matches.into_iter().map(|(_, _, _, value)| value).collect())
+        let total = matches.len();
+        Ok(ConversationSearch {
+            total,
+            matches: matches.into_iter().take(limit).map(|(_, _, _, value)| value).collect(),
+            recent: (has_query && total == 0).then(|| recent.into_iter().map(|(_, _, value)| value).collect()),
+        })
     }
 
     fn save(&self, args: &Map<String, Value>, updating: bool) -> Result<Value, Fault> {
@@ -665,7 +763,7 @@ impl Motor {
         let prior_content = prior.map(|record| &record["content"]).unwrap_or(&Value::Null);
         let global = access::global_preferences(&self.base)?;
         let current_prefs = prior_content.get("preferences").unwrap_or(&global);
-        let requested_prefs = args.get("preferencias").map(parse_preferences).transpose()?;
+        let requested_prefs = args.get("preferencias").map(motor_conversations::parse_preferences).transpose()?;
         if !explicit && (current_prefs["mode"] == "manual"
             || requested_prefs.as_ref().is_some_and(|prefs| prefs["mode"] == "manual"))
         {
@@ -836,15 +934,105 @@ impl Motor {
     }
 }
 
-fn only(args: &Map<String, Value>, allowed: &[&str]) -> Result<(), Fault> {
+pub(crate) fn only(args: &Map<String, Value>, allowed: &[&str]) -> Result<(), Fault> {
     if args.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(invalid("La llamada incluye argumentos no admitidos."));
     }
     Ok(())
 }
 
-fn fold(text: &str) -> String {
+pub(crate) fn fold(text: &str) -> String {
     text.nfd().filter(|ch| !is_combining_mark(*ch)).flat_map(char::to_lowercase).collect()
+}
+
+struct ConversationSearch {
+    total: usize,
+    matches: Vec<Value>,
+    recent: Option<Vec<Value>>,
+}
+
+fn conversation_limit(args: &Map<String, Value>, default: usize) -> Result<usize, Fault> {
+    match args.get("limite") {
+        None => Ok(default),
+        Some(value) => value.as_u64().filter(|limit| (1..=100).contains(limit)).map(|limit| limit as usize)
+            .ok_or_else(|| invalid("limite debe estar entre 1 y 100.")),
+    }
+}
+
+fn conversation_queries(args: &Map<String, Value>) -> Result<Vec<String>, Fault> {
+    let mut queries = Vec::new();
+    let mut add = |query: &str| {
+        let normalized = fold(query);
+        let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !queries.contains(&normalized) {
+            queries.push(normalized);
+        }
+    };
+    if let Some(value) = args.get("consulta") {
+        let query = valid_text(value, MAX_CONVERSATION_QUERY_BYTES)
+            .ok_or_else(|| invalid("Indica texto de búsqueda de hasta 256 bytes."))?;
+        add(query);
+    }
+    if let Some(value) = args.get("consultas") {
+        let alternatives = value.as_array().filter(|list| (1..=MAX_CONVERSATION_ALTERNATIVES).contains(&list.len()))
+            .ok_or_else(|| invalid("consultas debe ser una lista de 1 a 8 textos."))?;
+        for value in alternatives {
+            let query = valid_text(value, MAX_CONVERSATION_QUERY_BYTES)
+                .ok_or_else(|| invalid("Cada alternativa debe ser texto de búsqueda de hasta 256 bytes."))?;
+            add(query);
+        }
+    }
+    Ok(queries)
+}
+
+fn conversation_relevance(alternatives: &[Vec<&str>], title: &str, body: &str) -> ((usize, usize, usize), Option<usize>) {
+    let mut matched_alternatives = 0;
+    let mut matched_terms = 0;
+    let mut title_terms = 0;
+    let mut first_in_body = usize::MAX;
+    for terms in alternatives {
+        let mut in_title = 0;
+        let mut first = usize::MAX;
+        let matches = terms.iter().all(|&term| {
+            let title_match = title.contains(term);
+            in_title += usize::from(title_match);
+            if let Some(offset) = body.find(term) {
+                first = first.min(offset);
+                true
+            } else {
+                title_match
+            }
+        });
+        if matches {
+            matched_alternatives += 1;
+            matched_terms += terms.len();
+            title_terms += in_title;
+            first_in_body = first_in_body.min(first);
+        }
+    }
+    ((matched_alternatives, matched_terms, title_terms), (first_in_body != usize::MAX).then_some(first_in_body))
+}
+
+fn conversation_excerpt(text: &str, body_at: Option<usize>) -> String {
+    let start = body_at.map_or(0, |offset| {
+        // Translate the folded byte position back to a character in the original text.
+        let mut folded_bytes = 0;
+        let character = text.chars().position(|ch| {
+            folded_bytes += std::iter::once(ch).nfd().filter(|ch| !is_combining_mark(*ch))
+                .flat_map(char::to_lowercase).map(char::len_utf8).sum::<usize>();
+            folded_bytes > offset
+        }).unwrap_or_default();
+        character.saturating_sub(CONVERSATION_EXCERPT_CHARS / 2)
+            .min(text.chars().count().saturating_sub(CONVERSATION_EXCERPT_CHARS))
+    });
+    text.chars().skip(start).take(CONVERSATION_EXCERPT_CHARS).collect()
+}
+
+fn conversation_summary(record: &Value, excerpt: String) -> Value {
+    json!({
+        "id": record["id"], "revision": record["revision"], "titulo": record["content"]["title"],
+        "proyecto": record["content"]["project"], "actualizado": record["updatedAt"], "extracto": excerpt,
+    })
 }
 
 fn record_file(id: &str) -> String {
@@ -857,30 +1045,10 @@ fn label(value: &Value, max: usize) -> Result<&str, Fault> {
         .ok_or_else(|| invalid("La referencia contiene texto no válido."))
 }
 
-fn parse_preferences(value: &Value) -> Result<Value, Fault> {
-    let fields = value.as_object().ok_or_else(|| invalid("Preferencias no válidas."))?;
-    only(fields, &["modo", "reglas", "carpeta_destino"])?;
-    let mode = value["modo"].as_str().filter(|mode| matches!(*mode, "esencial" | "detallado" | "manual" | "personalizado"))
-        .ok_or_else(|| invalid("Modo de conservación no válido."))?;
-    let rules = fields.get("reglas").map(|value| value.as_str().filter(|text| text.len() <= 4096 && !text.contains('\0'))
-        .ok_or_else(|| invalid("Reglas de conservación no válidas."))).transpose()?.unwrap_or("");
-    if mode == "personalizado" && rules.trim().is_empty() { return Err(invalid("El modo personalizado requiere reglas.")); }
-    let mut preferences = json!({ "mode": mode, "rules": rules });
-    if let Some(value) = fields.get("carpeta_destino") {
-        let directory = valid_text(value, 4096).filter(|text| Path::new(text).is_absolute())
-            .ok_or_else(|| invalid("Indica una carpeta de destino absoluta."))?;
-        preferences["directory"] = json!(directory);
-    }
-    Ok(preferences)
-}
-
 fn conversation(record: &Value) -> Value {
     let content = &record["content"];
-    let preferences = content.get("preferences").map(|value| {
-        let mut result = json!({"modo": value["mode"], "reglas": value["rules"]});
-        if let Some(directory) = value.get("directory") { result["carpeta_destino"] = directory.clone(); }
-        result
-    });
+    let preferences = content.get("preferences").filter(|value| !value.is_null())
+        .map(motor_conversations::preference_out);
     let references = record["references"].as_array().into_iter().flatten().map(|reference| {
         let mut value = if let Some(entry) = reference.get("entry") {
             json!({"registro": entry})
@@ -894,6 +1062,12 @@ fn conversation(record: &Value) -> Value {
         "proyecto": content["project"], "agente": content["agent"], "id_externo": content["externalId"],
         "archivo": content["file"], "preferencias": preferences, "referencias": references,
     })
+}
+
+fn parse_keep_open(args: &Map<String, Value>) -> Result<Option<bool>, Fault> {
+    args.get("mantener_abierta").map(|value| {
+        value.as_bool().ok_or_else(|| invalid("mantener_abierta debe ser booleano."))
+    }).transpose()
 }
 
 fn parse_view_uuid(value: Option<&Value>) -> Result<Option<Uuid>, Fault> {
@@ -953,10 +1127,32 @@ const CATALOG_OPS: &[(&str, &str, bool)] = &[
     ("conversacion_guardar", "Guardar o actualizar conversación", false),
     ("continuidad_registrar", "Registrar en continuidad", false),
     ("continuidad_actualizar", "Actualizar registro de continuidad", false),
+    ("actualizacion_consultar", "Consultar la entrega firmada y el estado de su aplicación", true),
+    ("actualizacion_posponer", "Recordar esta entrega dentro de 1, 3 o 7 días", false),
+    ("actualizacion_aplicar", "Solicitar confirmación del usuario para aplicar la entrega exacta", false),
+    ("continuidad_exportar", "Exportar continuidad en JSON o Markdown", true),
+    ("continuidad_importar", "Importar un paquete de continuidad sin sobrescribir registros", false),
+    ("continuidad_consultar", "Consultar registros y referencias de continuidad", true),
+    ("propiedades", "Consultar propiedades de una entrada indexada", true),
+    ("agrupar", "Agrupar marcas, tareas y propiedades por proyecto, carpeta, archivo o etiqueta", true),
+    ("indices_personalizados", "Consultar definiciones y estado de los índices CSV", true),
+    ("asignar_propiedades", "Asignar o quitar propiedades de una entrada", false),
+    ("crear_indice", "Crear y generar un índice CSV", false),
+    ("actualizar_indice", "Regenerar un índice CSV", false),
+    ("modificar_indice", "Cambiar la definición de un índice CSV", false),
+    ("retirar_indice", "Retirar la definición de un índice CSV", false),
+    ("destinos_consultar", "Consultar almacenes físicos y memoria", true),
+    ("destinos_configurar", "Configurar destinos físicos de trabajo", false),
+    ("destino_resolver", "Resolver una ruta de resultado; preparar:true crea directorios", true),
+    ("resultado_registrar", "Registrar un resultado existente", false),
+    ("resultado_importar", "Copiar un resultado con SHA-256", false),
+    ("conversacion_preferencias", "Consultar preferencias de conservación", true),
+    ("conversacion_configurar", "Cambiar preferencias de conservación", false),
+    ("conversacion_trasladar", "Copiar conversación y recursos, y actualizar vínculos", false),
     ("acceso", "Solicitar o retirar acceso", false),
     ("solicitar_acceso", "Solicitar acceso", false),
     ("retirar_acceso", "Retirar permisos", false),
-    ("vista", "Abrir, consultar o cerrar una vista", false),
+    ("vista", "Abrir, consultar, mantener o cerrar una vista", false),
     ("vista_abrir", "Abrir o actualizar una vista", false),
     ("vista_cerrar", "Cerrar una vista", false),
     ("crear_respaldo", "Crear respaldo cifrado de la Base", false),
@@ -992,6 +1188,9 @@ fn normalize_alias(name: &str, args: Value) -> Result<(String, Value), Fault> {
 }
 
 fn operation_read_only(op: &str, inner_args: &Value) -> Option<bool> {
+    if op == "destino_resolver" {
+        return Some(inner_args["preparar"] != true);
+    }
     if op == "vista" {
         let action = inner_args.get("accion").and_then(Value::as_str);
         return Some(action == Some("consultar"));
@@ -1062,16 +1261,18 @@ fn catalog_help(fields: &Map<String, Value>) -> Result<Value, Fault> {
         let Some((op, title, read_only)) = CATALOG_OPS.iter().find(|(n, _, _)| *n == detail).copied() else {
             return Err(Fault::new("UNKNOWN_TOOL", "Operación desconocida."));
         };
-        return Ok(json!({
+        let mut help = json!({
             "operacion": op,
             "herramienta": if read_only { "mind" } else { "mind_cambiar" },
             "titulo": title,
-        }));
+        });
+        if op == "destino_resolver" { help["con_preparar"] = json!("mind_cambiar"); }
+        return Ok(help);
     }
     let list = |wanted: bool| -> Vec<Value> {
         CATALOG_OPS
             .iter()
-            .filter(|(_, _, ro)| *ro == wanted)
+            .filter(|(op, _, ro)| *ro == wanted || *op == "destino_resolver")
             .map(|(op, title, _)| json!({"nombre": op, "titulo": title}))
             .collect()
     };
@@ -1095,15 +1296,54 @@ struct Server {
     motor: Arc<Motor>,
     views: Arc<Views>,
     mcp: Mcp,
+    services: Arc<Services>,
+    active: AtomicUsize,
+    stopping: AtomicBool,
     shutdown: Notify,
 }
 
+struct Active<'a>(&'a AtomicUsize);
+
+impl Drop for Active<'_> {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+}
+
 impl Server {
+    async fn blockers(&self, quiet: bool) -> Vec<Value> {
+        let mut blockers = self.mcp.blockers(quiet).await;
+        if self.active.load(Ordering::Acquire) > 1 || self.motor.work.try_lock().is_err() {
+            blockers.push(json!({"conexion":null,"actividad":"trabajando"}));
+        }
+        if self.services.busy().await {
+            blockers.push(json!({"conexion":null,"actividad":"servicio-local"}));
+        }
+        blockers
+    }
+
     async fn respond(&self, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
-        let reply = if req.headers().contains_key(header::ORIGIN) || !host::allowed_origin(&req, self.port) {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        let _active = Active(&self.active);
+        let reply = if self.stopping.load(Ordering::Acquire) {
+            host::full(StatusCode::SERVICE_UNAVAILABLE, json!({"error":"MOTOR_SHUTTING_DOWN"}))
+        } else if req.headers().contains_key(header::ORIGIN) || !host::allowed_origin(&req, self.port) {
             host::full(StatusCode::FORBIDDEN, json!({"error": "ORIGIN_NOT_ALLOWED"}))
         } else if req.uri().path() == "/health" && req.method() == Method::GET {
-            host::full(StatusCode::OK, self.connector.health(req.uri().query(), self.mcp.count().await, self.views.usage().await))
+            let query = req.uri().query();
+            let mut state = self.connector.health(query, self.mcp.count().await, self.views.usage().await);
+            if query.is_some_and(|q| q.split('&').any(|part| part == "alcance=servicios")) {
+                let nonce = query.and_then(|q| q.split('&').find_map(|part| part.strip_prefix("nonce=")))
+                    .filter(|value| (32..=128).contains(&value.len()) && access::lower_hex(value));
+                if let Some(nonce) = nonce {
+                    state["proof"] = json!(self.services.proof(nonce, &self.connector.base_id, self.port));
+                }
+            }
+            host::full(StatusCode::OK, state)
+        } else if req.uri().path() == "/servicios" || req.uri().path().starts_with("/servicios/") {
+            self.services.control(req).await
+        } else if (req.uri().path() == "/vistas" || req.uri().path().starts_with("/vistas/"))
+            && self.services.authorized(&req)
+        {
+            self.views.control(req).await
         } else if !req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .is_some_and(|value| host::same(value.as_bytes(), self.connector.token.as_bytes()))
@@ -1142,9 +1382,21 @@ impl Server {
                 }
             }));
         }
+        if action == "quietud" {
+            let blockers = self.blockers(true).await;
+            return host::full(StatusCode::OK, json!({"ok":true,"quieto":blockers.is_empty(),"impiden":blockers,"quietMs":self.mcp.quiet_ms()}));
+        }
         if action == "apagar" {
-            if (payload["soloSiInactivo"] == true || payload["soloSiQuieto"] == true) && self.mcp.count().await > 0 {
-                return host::full(StatusCode::OK, json!({"ok":true,"busy":true}));
+            if self.stopping.swap(true, Ordering::AcqRel) {
+                return host::full(StatusCode::SERVICE_UNAVAILABLE, json!({"error":"MOTOR_SHUTTING_DOWN"}));
+            }
+            let quiet = payload["soloSiQuieto"] == true;
+            if quiet || payload["soloSiInactivo"] == true {
+                let blockers = self.blockers(quiet).await;
+                if !blockers.is_empty() {
+                    self.stopping.store(false, Ordering::Release);
+                    return host::full(StatusCode::OK, json!({"ok":false,"busy":true,"impiden":blockers}));
+                }
             }
             self.shutdown.notify_one();
             return host::full(StatusCode::OK, json!({"ok":true,"apagando":true}));
@@ -1198,9 +1450,12 @@ impl Motor {
             self.owner.check().map_err(filesystem)?;
             motor_files::recover_move(&self.base, || self.owner.check())?;
             let state = self.state()?;
-            return Ok(json!({"ok":true,"mind":state["mind"],
+            let mut response = json!({"ok":true,"mind":state["mind"],
                 "instrucciones":"Consulta las herramientas y permisos de este Motor Rust.",
-                "destinos":access::destinations(&self.base, None, None)?}));
+                "destinos":access::destinations(&self.base, None, None)?});
+            drop(_work);
+            self.add_update_advisories(&mut response, None, true);
+            return Ok(response);
         }
         let (name, args) = match action {
             "estado" => ("estado", json!({})),
@@ -1209,10 +1464,14 @@ impl Motor {
         };
         let value = self.call(name, args);
         let (value, is_error) = match value {
-            Ok(value) => (value, false),
+            Ok(mut value) => {
+                self.add_update_advisories(&mut value, None, crate::motor_mcp::wants_update_notice(name, payload.get("args")));
+                (value, false)
+            },
             Err(error) => (json!({"error":{"codigo":error.code,"mensaje":error.message}}), true),
         };
-        Ok(json!({"ok":true,"text":value.to_string(),"value":value,"isError":is_error}))
+        let (text, value) = crate::motor_mcp::tool_text(value);
+        Ok(json!({"ok":true,"text":text,"value":value,"isError":is_error}))
     }
 }
 
@@ -1281,13 +1540,16 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     let base = base.strip_prefix("\\\\?\\").unwrap_or(base);
     let view_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let view_port = view_listener.local_addr().map_err(|error| error.to_string())?.port();
-    let views = Arc::new(Views::new(view_port));
+    let views = Views::new(view_port);
     let motor = Arc::new(Motor::open(base.to_owned(), layout, publish, Arc::clone(&views)).map_err(|error| {
         write_startup_error(&error);
         error.to_string()
     })?);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|error| error.to_string())?.port();
+    let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        .build().map_err(|error| error.to_string())?;
+    let services = Arc::new(Services::new(Path::new(base), port, view_port, client, MOTOR_SECRET)?);
     let connector = Connector::open(base, port, view_port, &motor.owner, publish)?;
     if !publish {
         println!("{}", json!({
@@ -1296,7 +1558,19 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         }));
         io::stdout().flush().map_err(|error| error.to_string())?;
     }
-    let server = Arc::new(Server { port, connector, motor, views, mcp: Mcp::new(), shutdown: Notify::new() });
+    let server = Arc::new(Server {
+        port, connector, motor, views, services, mcp: Mcp::new(), active: AtomicUsize::new(0),
+        stopping: AtomicBool::new(false), shutdown: Notify::new(),
+    });
+    let discovery = server.motor.updates.clone();
+    let discover = (publish && discovery.enabled()).then(|| tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        loop {
+            let updates = discovery.clone();
+            let _ = tokio::task::spawn_blocking(move || updates.discover()).await;
+            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+        }
+    }));
 
     let shutdown = host::shutdown_signal();
     tokio::pin!(shutdown);
@@ -1340,11 +1614,18 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
             }
             accepted = view_listener.accept() => {
                 let (stream, _) = accepted.map_err(|error| error.to_string())?;
-                let views = server.views.clone();
+                let (views, services) = (server.views.clone(), server.services.clone());
                 clients.spawn(async move {
-                    let service = hyper::service::service_fn(move |req| {
-                        let views = views.clone();
-                        async move { Ok::<_, Infallible>(views.serve(req).await) }
+                    let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+                        let (views, services) = (views.clone(), services.clone());
+                        async move {
+                            let response = if req.uri().path().starts_with("/app/") {
+                                services.open_link(req).await
+                            } else {
+                                views.serve(req).await
+                            };
+                            Ok::<_, Infallible>(response)
+                        }
                     });
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service).await;
@@ -1352,6 +1633,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
             }
         }
     }
+    if let Some(discover) = discover { discover.abort(); }
     clients.shutdown().await;
-    Ok(())
+    server.services.shutdown().await
 }

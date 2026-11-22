@@ -5,6 +5,7 @@ use serde_json::json;
 
 use crate::{
     bridge::regular_json,
+    services::{HOST_SECRET, MOTOR_SECRET},
     view_cli::{path_option, small_json, view_id, Host},
 };
 
@@ -13,9 +14,11 @@ const USAGE: &str =
      servicio estado|cerrar --base ABS --id UUID";
 
 fn admin_token(base: &Path, endpoint: &Url) -> Result<String, String> {
-    let secret = regular_json(&base.join("servicios-secreto.json"))
-        .ok_or("Inicia el anfitrión con --servicios-prueba.")?;
     let port = endpoint.port_or_known_default().map(u64::from);
+    let secret = [HOST_SECRET, MOTOR_SECRET].iter()
+        .filter_map(|name| regular_json(&base.join(name)))
+        .find(|secret| secret["port"].as_u64() == port && secret["version"] == 1)
+        .ok_or("Inicia el Motor o el anfitrión con --servicios-prueba.")?;
     if endpoint.scheme() != "http"
         || endpoint.host_str() != Some("127.0.0.1")
         || port.is_none()
@@ -74,10 +77,19 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         return Err(USAGE.into());
     }
 
-    let host = Host::connect(&base).await?;
     let route = id.map_or_else(|| "/servicios".to_owned(), |id| format!("/servicios/{id}"));
-    let endpoint = Url::parse(&host.url(&route)).map_err(|_| "La dirección del anfitrión no es válida.")?;
-    let token = admin_token(&base, &endpoint)?;
+    let host = Host::connect(&base).await?;
+    let endpoint_for = |host: &Host| Url::parse(&host.url(&route)).map_err(|_| "La dirección del servidor local no es válida.");
+    let endpoint = endpoint_for(&host)?;
+    let (host, endpoint, token) = match admin_token(&base, &endpoint) {
+        Ok(token) => (host, endpoint, token),
+        Err(error) => {
+            let native = Host::connect_native(&base).await.map_err(|_| error)?;
+            let endpoint = endpoint_for(&native)?;
+            let token = admin_token(&base, &endpoint)?;
+            (native, endpoint, token)
+        }
+    };
     let mut request = host.client.request(method, endpoint).bearer_auth(token);
     if let Some(body) = payload {
         request = request.timeout(Duration::from_secs(1810)).json(&body);

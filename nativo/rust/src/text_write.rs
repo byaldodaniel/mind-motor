@@ -53,6 +53,10 @@ pub(crate) struct Report {
 }
 
 impl Report {
+    pub(crate) fn replaced_identity(&self) -> Option<(&str, &str)> {
+        Some((self.previous_identity.as_deref()?, self.identity.as_deref()?))
+    }
+
     fn size_only(size: u64) -> Self {
         Self {
             size,

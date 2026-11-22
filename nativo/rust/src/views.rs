@@ -1,13 +1,17 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::{body::Incoming, header, Method, Request, Response, StatusCode};
+use http_body_util::{BodyExt, Full, Limited, StreamBody};
+use hyper::{body::{Body as _, Frame, Incoming}, header, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, MutexGuard, Semaphore};
 use uuid::Uuid;
 
 use crate::{host::{full, Body}, MAX_MESSAGE};
@@ -17,6 +21,10 @@ pub(crate) const MAX_VIEW_FILES: usize = 256;
 pub(crate) const MAX_ASSET_PATH: usize = 4096;
 const MAX_VIEWS: usize = 8;
 const MAX_TOTAL_BYTES: usize = 4 * MAX_VIEW_BYTES;
+const DEFAULT_IDLE_MS: u64 = 1_800_000;
+const MIN_IDLE_MS: u64 = 1_000;
+const ACTIVITY_PATH: &str = "_mind/actividad";
+const HTML_MIME: &str = "text/html; charset=utf-8";
 const VIEW_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 #[derive(Deserialize, serde::Serialize)]
@@ -34,6 +42,7 @@ pub(crate) struct Publication {
     pub(crate) copia: String,
     pub(crate) git: Option<Git>,
     pub(crate) archivos: Vec<AssetInput>,
+    pub(crate) mantener_abierta: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -55,11 +64,14 @@ struct Snapshot {
 struct View {
     snapshot: Snapshot,
     version: u64,
+    last_activity: Instant,
+    mantener_abierta: bool,
 }
 
 pub(crate) struct Views {
     authority: String,
     origin: String,
+    idle: Duration,
     records: Mutex<HashMap<Uuid, View>>,
     publishing: Semaphore,
 }
@@ -176,14 +188,37 @@ impl Snapshot {
 }
 
 impl Views {
-    pub(crate) fn new(port: u16) -> Self {
+    pub(crate) fn new(port: u16) -> Arc<Self> {
         let authority = format!("127.0.0.1:{port}");
-        Self {
+        let idle_ms = std::env::var("MIND_VISTA_INACTIVA_MS").ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&value| value >= MIN_IDLE_MS)
+            .unwrap_or(DEFAULT_IDLE_MS);
+        let idle = Duration::from_millis(idle_ms);
+        let views = Arc::new(Self {
             origin: format!("http://{authority}"),
             authority,
+            idle,
             records: Mutex::new(HashMap::new()),
             publishing: Semaphore::new(2),
-        }
+        });
+        let records = Arc::downgrade(&views);
+        let interval = (idle / 4).min(Duration::from_secs(30));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let Some(views) = records.upgrade() else { break };
+                drop(views.live_records().await);
+            }
+        });
+        views
+    }
+
+    async fn live_records(&self) -> MutexGuard<'_, HashMap<Uuid, View>> {
+        let mut records = self.records.lock().await;
+        let now = Instant::now();
+        records.retain(|_, view| view.mantener_abierta || now.duration_since(view.last_activity) < self.idle);
+        records
     }
 
     pub(crate) async fn usage(&self) -> serde_json::Value {
@@ -201,10 +236,12 @@ impl Views {
             "git": view.snapshot.git,
             "huella": view.snapshot.fingerprint,
             "version": view.version,
+            "mantener_abierta": view.mantener_abierta,
+            "inactividad_ms": self.idle.as_millis() as u64,
         })
     }
 
-    fn metadata(&self, status: StatusCode, _id: Uuid, version: u64, payload: serde_json::Value) -> Response<Body> {
+    fn metadata(&self, status: StatusCode, version: u64, payload: serde_json::Value) -> Response<Body> {
         let mut response = full(status, payload);
         response.headers_mut().insert(
             header::ETAG,
@@ -214,16 +251,20 @@ impl Views {
         response
     }
 
-    pub(crate) async fn get_info(&self, id: Uuid) -> Result<serde_json::Value, PublicationError> {
-        let records = self.records.lock().await;
-        match records.get(&id) {
-            Some(view) => Ok(self.metadata_value(id, view)),
-            None => Err((StatusCode::NOT_FOUND, "VIEW_NOT_FOUND")),
+    pub(crate) async fn access_info(
+        &self, id: Uuid, keep_open: Option<bool>,
+    ) -> Result<(u64, serde_json::Value), PublicationError> {
+        let mut records = self.live_records().await;
+        let view = records.get_mut(&id).ok_or((StatusCode::NOT_FOUND, "VIEW_NOT_FOUND"))?;
+        view.last_activity = Instant::now();
+        if let Some(keep_open) = keep_open {
+            view.mantener_abierta = keep_open;
         }
+        Ok((view.version, self.metadata_value(id, view)))
     }
 
     pub(crate) async fn remove_view(&self, id: Uuid) -> bool {
-        self.records.lock().await.remove(&id).is_some()
+        self.live_records().await.remove(&id).is_some()
     }
 
     pub(crate) async fn publish_input(
@@ -232,9 +273,10 @@ impl Views {
         let Ok(_slot) = self.publishing.try_acquire() else {
             return Err((StatusCode::TOO_MANY_REQUESTS, "VIEW_PUBLISH_BUSY"));
         };
+        let requested_keep_open = input.mantener_abierta;
         let snapshot = Snapshot::parse(input)?;
-        let mut records = self.records.lock().await;
-        let (status, id, base_version, old_size) = match previous {
+        let mut records = self.live_records().await;
+        let (status, id, base_version, old_size, keep_open) = match previous {
             Some((id, expected)) => {
                 let Some(current) = records.get(&id) else {
                     return Err((StatusCode::NOT_FOUND, "VIEW_NOT_FOUND"));
@@ -245,7 +287,7 @@ impl Views {
                 if current.snapshot.project != snapshot.project || current.snapshot.copy != snapshot.copy {
                     return Err((StatusCode::CONFLICT, "VIEW_COPY_CHANGED"));
                 }
-                (StatusCode::OK, id, current.version, current.snapshot.size)
+                (StatusCode::OK, id, current.version, current.snapshot.size, current.mantener_abierta)
             }
             None => {
                 if records.len() == MAX_VIEWS {
@@ -255,7 +297,7 @@ impl Views {
                 while records.contains_key(&id) {
                     id = Uuid::new_v4();
                 }
-                (StatusCode::CREATED, id, 0, 0)
+                (StatusCode::CREATED, id, 0, 0, false)
             }
         };
         let total: usize = records.values().map(|view| view.snapshot.size).sum();
@@ -265,7 +307,10 @@ impl Views {
         let Some(version) = base_version.checked_add(1) else {
             return Err((StatusCode::CONFLICT, "VIEW_VERSION_EXHAUSTED"));
         };
-        let view = View { snapshot, version };
+        let view = View {
+            snapshot, version, last_activity: Instant::now(),
+            mantener_abierta: requested_keep_open.unwrap_or(keep_open),
+        };
         let payload = self.metadata_value(id, &view);
         records.insert(id, view);
         Ok((status, id, version, payload))
@@ -285,9 +330,9 @@ impl Views {
             return error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND");
         };
         match *req.method() {
-            Method::GET => match self.records.lock().await.get(&id) {
-                Some(view) => self.metadata(StatusCode::OK, id, view.version, self.metadata_value(id, view)),
-                None => error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND"),
+            Method::GET => match self.access_info(id, None).await {
+                Ok((version, payload)) => self.metadata(StatusCode::OK, version, payload),
+                Err((status, code)) => error(status, code),
             },
             Method::PUT => {
                 let Some(tag) = req.headers().get(header::IF_MATCH) else {
@@ -322,7 +367,7 @@ impl Views {
             return error(StatusCode::BAD_REQUEST, "INVALID_VIEW");
         };
         match self.publish_input(input, previous).await {
-            Ok((status, id, version, payload)) => self.metadata(status, id, version, payload),
+            Ok((status, _, version, payload)) => self.metadata(status, version, payload),
             Err((status, code)) => error(status, code),
         }
     }
@@ -332,35 +377,90 @@ impl Views {
         let mut origins = req.headers().get_all(header::ORIGIN).iter();
         let host_ok = hosts.next().is_some_and(|value| value.as_bytes() == self.authority.as_bytes())
             && hosts.next().is_none();
-        let origin_ok = origins.next().is_none_or(|value| value.as_bytes() == self.origin.as_bytes())
+        let origin = origins.next();
+        let origin_ok = origin.is_none_or(|value| value.as_bytes() == self.origin.as_bytes())
             && origins.next().is_none();
         if !host_ok || !origin_ok {
             return error(StatusCode::FORBIDDEN, "ORIGIN_NOT_ALLOWED");
+        }
+        let route = req.uri().path().strip_prefix("/vista/")
+            .and_then(|path| path.split_once('/'))
+            .and_then(|(id, relative)| Some((uuid(id)?, relative)));
+        if let Some((id, ACTIVITY_PATH)) = route {
+            if req.method() != Method::POST {
+                return method_not_allowed("POST");
+            }
+            if origin.is_none() {
+                return error(StatusCode::FORBIDDEN, "ORIGIN_NOT_ALLOWED");
+            }
+            if req.body().size_hint().exact() != Some(0) {
+                return error(StatusCode::PAYLOAD_TOO_LARGE, "ACTIVITY_BODY_NOT_ALLOWED");
+            }
+            let mut records = self.live_records().await;
+            let Some(view) = records.get_mut(&id) else {
+                return error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND");
+            };
+            view.last_activity = Instant::now();
+            return Response::builder().status(StatusCode::NO_CONTENT)
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(body(Bytes::new())).unwrap();
         }
         let is_head = req.method() == Method::HEAD;
         if !is_head && req.method() != Method::GET {
             return method_not_allowed("GET, HEAD");
         }
-        let Some((id, asset)) = req.uri().path().strip_prefix("/vista/")
-            .and_then(|path| path.split_once('/'))
-            .and_then(|(id, asset)| Some((uuid(id)?, request_asset(asset)?))) else {
+        let Some((id, relative)) = route else {
             return error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND");
         };
-        let bytes = self.records.lock().await.get(&id)
-            .and_then(|view| view.snapshot.assets.get(&asset)).cloned();
-        let Some(bytes) = bytes else {
+        let asset = request_asset(relative);
+        let bytes = {
+            let mut records = self.live_records().await;
+            records.get_mut(&id).and_then(|view| {
+                view.last_activity = Instant::now();
+                view.snapshot.assets.get(asset.as_deref()?).cloned()
+            })
+        };
+        let (Some(asset), Some(bytes)) = (asset, bytes) else {
             return error(StatusCode::NOT_FOUND, "VIEW_NOT_FOUND");
+        };
+        let content_type = mime(&asset);
+        let script = (content_type == HTML_MIME).then(|| self.activity_script(id));
+        let length = bytes.len() + script.as_ref().map_or(0, String::len);
+        let response_body = match (is_head, script) {
+            (true, _) => body(Bytes::new()),
+            (false, Some(script)) => {
+                let frames = [Ok(Frame::data(bytes)), Ok(Frame::data(Bytes::from(script)))];
+                StreamBody::new(futures_util::stream::iter(frames)).boxed()
+            }
+            (false, None) => body(bytes),
         };
         Response::builder()
-            .header(header::CONTENT_TYPE, mime(&asset))
-            .header(header::CONTENT_LENGTH, bytes.len())
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, length)
             .header(header::CACHE_CONTROL, "no-store")
             .header(header::CONTENT_SECURITY_POLICY, VIEW_POLICY)
             .header(header::REFERRER_POLICY, "no-referrer")
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
             .header("cross-origin-resource-policy", "same-origin")
-            .body(body(if is_head { Bytes::new() } else { bytes }))
+            .body(response_body)
             .unwrap()
+    }
+
+    fn activity_script(&self, id: Uuid) -> String {
+        let interval_ms = (self.idle.as_millis() / 4).min(120_000);
+        format!(r#"
+<script data-mind-actividad>
+(() => {{
+    const ping = () => {{
+        if (document.visibilityState !== 'visible') return;
+        fetch('/vista/{id}/{ACTIVITY_PATH}', {{ method: 'POST', credentials: 'omit' }}).catch(() => {{}});
+    }};
+    setInterval(ping, {interval_ms});
+    document.addEventListener('visibilitychange', ping);
+    window.addEventListener('pageshow', ping);
+}})();
+</script>
+"#)
     }
 }
 
@@ -371,7 +471,7 @@ fn body(bytes: Bytes) -> Body {
 fn mime(name: &str) -> &'static str {
     let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
     match extension.to_ascii_lowercase().as_str() {
-        "html" | "htm" => "text/html; charset=utf-8",
+        "html" | "htm" => HTML_MIME,
         "css" => "text/css; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "json" | "map" => "application/json",

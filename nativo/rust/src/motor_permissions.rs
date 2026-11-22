@@ -6,7 +6,6 @@ use std::{
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::{
     motor_native::Fault,
@@ -16,7 +15,7 @@ use crate::{
 
 const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 const FOLDER_LEVELS: [&str; 4] = ["encontrar", "leer", "escribir", "organizar"];
-const OUTPUT_TYPES: [&str; 7] = [
+pub(crate) const OUTPUT_TYPES: [&str; 7] = [
     "documentos", "imagenes", "videos", "audio", "codigo", "otros", "memoria",
 ];
 const CHANNELS: [&str; 3] = ["formulario-del-cliente", "consola", "administracion-local"];
@@ -294,6 +293,37 @@ pub(crate) fn contains_excluded(folder: &Folder, names: &[&str]) -> bool {
     folder.exclusions.iter().any(|entry| fold(entry).starts_with(&prefix))
 }
 
+pub(crate) struct FolderVisibility {
+    entries: Vec<(Folder, bool)>,
+}
+
+impl FolderVisibility {
+    pub(crate) fn load(base: &str) -> Result<Self, Fault> {
+        let mut entries = Vec::new();
+        for folder in folders(base)? {
+            let readable = folder_access(base, &folder)?.contains(&"leer");
+            entries.push((folder, readable));
+        }
+        Ok(Self { entries })
+    }
+
+    pub(crate) fn can_read_file(&self, file: &str) -> bool {
+        let path = Path::new(file);
+        if !valid_absolute(path) {
+            return false;
+        }
+        let Some(((folder, readable), names)) = self.entries.iter().filter_map(|entry| {
+            let names = relative_parts(Path::new(&entry.0.root), path)?;
+            (!names.is_empty()).then_some((entry, names))
+        }).max_by_key(|((folder, _), _)| folder.root.len()) else {
+            return false;
+        };
+        *readable
+            && names.iter().all(|name| scan::reader_component(name))
+            && !excluded(folder, &names)
+    }
+}
+
 pub(crate) fn resolve_markdown(base: &str, destination: &Path) -> Result<Scope, Fault> {
     if !valid_absolute(destination)
         || !destination.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
@@ -322,9 +352,12 @@ fn valid_destination_layer(value: &Value) -> bool {
 }
 
 fn destination_registry(base: &str) -> Result<Option<Value>, Fault> {
-    let Some(data) = read_json(base, "work-destinations.json")? else {
-        return Ok(None);
-    };
+    let data = read_json(base, "work-destinations.json")?;
+    if let Some(ref data) = data { validate_destination_registry(data)?; }
+    Ok(data)
+}
+
+pub(crate) fn validate_destination_registry(data: &Value) -> Result<(), Fault> {
     let invalid = || fault("INVALID_DESTINATIONS", "La configuración de destinos es incompatible.");
     if data["format"] != "mind-work-destinations" || data["version"] != 1
         || !data["revision"].as_u64().is_some_and(|revision| (1..=9_007_199_254_740_991).contains(&revision))
@@ -337,7 +370,7 @@ fn destination_registry(base: &str) -> Result<Option<Value>, Fault> {
     if !projects.values().chain(conversations.values()).all(valid_destination_layer) {
         return Err(invalid());
     }
-    Ok(Some(data))
+    Ok(())
 }
 
 fn configured_directories(base: &str) -> Result<Vec<PathBuf>, Fault> {
@@ -372,8 +405,7 @@ pub(crate) fn destinations(base: &str, project: Option<&str>, conversation: Opti
         return Ok(json!({"revision": 0, "general": {}, "proyecto": null, "conversacion": null, "efectivos": {}}));
     };
     let project = project.and_then(|project| {
-        let name: String = project.nfd().filter(|character| !is_combining_mark(*character)).collect();
-        data["proyectos"].get(name.to_lowercase())
+        data["proyectos"].get(crate::motor_native::fold(project))
     });
     let conversation = conversation.and_then(|id| data["conversaciones"].get(id));
     let layers = [conversation, project, Some(&data["general"])];
@@ -386,21 +418,32 @@ pub(crate) fn destinations(base: &str, project: Option<&str>, conversation: Opti
 }
 
 pub(crate) fn global_preferences(base: &str) -> Result<Value, Fault> {
+    global_preferences_state(base).map(|(_, preferences)| preferences)
+}
+
+pub(crate) fn global_preferences_state(base: &str) -> Result<(u64, Value), Fault> {
     let Some(data) = read_json(base, "conversation-preferences.json")? else {
-        return Ok(json!({"mode": "esencial", "rules": ""}));
+        return Ok((0, json!({"mode": "esencial", "rules": ""})));
     };
-    let preferences = &data["preferences"];
+    let revision = data["revision"].as_u64().filter(|revision| (1..=9_007_199_254_740_991).contains(revision));
+    if data["format"] != "mind-conversation-preferences" || data["version"] != 1 || revision.is_none() {
+        return Err(fault("INVALID_CONVERSATION_PREFERENCES", "Las preferencias de conversación son incompatibles."));
+    }
+    validate_preferences(&data["preferences"])?;
+    Ok((revision.unwrap_or_default(), data["preferences"].clone()))
+}
+
+pub(crate) fn validate_preferences(preferences: &Value) -> Result<(), Fault> {
     let rules = preferences["rules"].as_str().filter(|rules| rules.len() <= 4096 && !rules.contains('\0'));
     let mode = preferences["mode"].as_str();
-    if data["format"] != "mind-conversation-preferences" || data["version"] != 1
-        || !data["revision"].as_u64().is_some_and(|revision| (1..=9_007_199_254_740_991).contains(&revision))
+    if !preferences.as_object().is_some_and(|fields| fields.keys().all(|key| matches!(key.as_str(), "mode" | "rules" | "directory")))
         || !matches!(mode, Some("esencial" | "detallado" | "manual" | "personalizado"))
         || rules.is_none() || (mode == Some("personalizado") && rules.is_some_and(|rules| rules.trim().is_empty()))
         || preferences.get("directory").is_some_and(|directory| !absolute_directory(directory))
     {
         return Err(fault("INVALID_CONVERSATION_PREFERENCES", "Las preferencias de conversación son incompatibles."));
     }
-    Ok(preferences.clone())
+    Ok(())
 }
 
 fn memory_directory(layer: &Value) -> Option<&str> {

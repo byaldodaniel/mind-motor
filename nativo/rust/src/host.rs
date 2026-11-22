@@ -215,10 +215,10 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     let started = format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
     let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .build().map_err(|e| e.to_string())?;
-    let views = preview.as_ref().map(|(_, port)| Arc::new(Views::new(*port)));
+    let views = preview.as_ref().map(|(_, port)| Views::new(*port));
     let services = if args.iter().any(|arg| arg == "--servicios-prueba") {
         let (_, public_port) = preview.as_ref().ok_or("--servicios-prueba requiere --puerto-vistas")?;
-        Some(Arc::new(Services::new(&base, port, *public_port, client.clone())?))
+        Some(Arc::new(Services::new(&base, port, *public_port, client.clone(), crate::services::HOST_SECRET)?))
     } else {
         None
     };

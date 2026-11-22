@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { stopCentralMotor } from '../../src/connector.js';
 import { RUNS } from './runs.mjs';
+import { assertViewHtml } from './vista-html.mjs';
 
 const executable = process.env.MIND_NATIVE_EXE;
 const python = process.env.MIND_TEST_BUNDLED_PYTHON || process.env.MIND_PYTHON;
@@ -171,7 +172,7 @@ test('compilación aislada con Node y Python conserva la última vista válida',
     assert.deepEqual(JSON.parse(status.stdout), view);
     const response = await fetch(view.url, { signal: AbortSignal.timeout(5000) });
     assert.equal(response.status, 200);
-    assert.equal(await response.text(), contents);
+    assertViewHtml(await response.text(), contents);
   }
 
   const initial = await recipe('inicial-node', '<h1>Primera versión</h1>');

@@ -24,7 +24,7 @@ use crate::{
     views::{AssetInput, Git as ViewGit, Publication as ViewPublication, MAX_VIEW_BYTES, MAX_VIEW_FILES},
 };
 
-const USAGE: &str = "vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS [--id UUID --version N]\nvista consultar|cerrar --base ABS --id UUID\nvista receta --proyecto NOMBRE --copia ABS --receta ABS\nvista construir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]";
+const USAGE: &str = "vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS [--id UUID --version N] [--mantener-abierta | --no-mantener-abierta]\nvista consultar|cerrar --base ABS --id UUID\nvista receta --proyecto NOMBRE --copia ABS --receta ABS\nvista construir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]";
 const MAX_PATH: usize = 1024;
 const MAX_DIRECTORIES: usize = 256;
 
@@ -59,6 +59,8 @@ struct Publication<'a> {
     copia: String,
     git: Option<Git>,
     archivos: Vec<Asset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mantener_abierta: Option<bool>,
 }
 
 struct ViewError {
@@ -78,16 +80,23 @@ impl Host {
     }
 
     pub(crate) async fn connect(base: &Path) -> Result<Self, String> {
+        if let Some(record) = regular_json(&base.join("anfitrion.json")) {
+            if let Ok(host) = Self::verify(base, &record, true, false).await { return Ok(host); }
+        }
+        Self::connect_native(base).await
+    }
+
+    pub(crate) async fn connect_native(base: &Path) -> Result<Self, String> {
+        if let Some(record) = regular_json(&base.join("conector.json")).filter(|record| record["backend"] == "rust") {
+            if let Ok(motor) = Self::verify(base, &record, false, false).await { return Ok(motor); }
+        }
+        let record = regular_json(&base.join(crate::services::MOTOR_SECRET))
+            .ok_or("Primero inicia el Motor o anfitrión con vistas habilitadas.")?;
+        Self::verify(base, &record, false, true).await
+    }
+
+    async fn verify(base: &Path, record: &Value, is_host: bool, private: bool) -> Result<Self, String> {
         let identity = base_id(base).ok_or("La Base indicada no está disponible.")?;
-        let (record, is_host) = match regular_json(&base.join("anfitrion.json")) {
-            Some(record) => (record, true),
-            None => (
-                regular_json(&base.join("conector.json"))
-                    .filter(|record| record["backend"].as_str() == Some("rust"))
-                    .ok_or("Primero inicia el Motor o anfitrión con vistas habilitadas.")?,
-                false,
-            ),
-        };
         let port = port_in(&record, "port").ok_or("Registro de conector inválido.")?;
         let view_port = port_in(&record, "puertoVistas")
             .filter(|candidate| *candidate != port)
@@ -96,12 +105,16 @@ impl Host {
             .as_u64()
             .filter(|pid| *pid > 0)
             .ok_or("Registro de conector inválido.")?;
-        if record["version"].as_u64() != Some(1) || record["baseId"].as_str() != Some(identity.as_str()) {
+        if record["version"].as_u64() != Some(1) || (!private && record["baseId"].as_str() != Some(identity.as_str())) {
             return Err("El registro local no corresponde a esta Base.".into());
         }
-        let secret = regular_json(&base.join("conector-secreto.json"))
-            .filter(|secret| secret["version"].as_u64() == Some(1))
-            .ok_or("El Motor de esta Base no tiene un conector válido.")?;
+        let secret = if private {
+            record.clone()
+        } else {
+            regular_json(&base.join("conector-secreto.json"))
+                .filter(|secret| secret["version"].as_u64() == Some(1))
+                .ok_or("El Motor de esta Base no tiene un conector válido.")?
+        };
         let token = secret["token"]
             .as_str()
             .filter(|token| (32..=256).contains(&token.len()))
@@ -115,7 +128,8 @@ impl Host {
             .map_err(|_| "No se pudo preparar la conexión local.")?;
         let host = Self { client, port, token };
         let nonce = Uuid::new_v4().simple().to_string();
-        let response = host.client.get(host.url(&format!("/health?nonce={nonce}")))
+        let scope = if private { "&alcance=servicios" } else { "" };
+        let response = host.client.get(host.url(&format!("/health?nonce={nonce}{scope}")))
             .timeout(Duration::from_secs(3))
             .send().await.map_err(|_| "El Motor o anfitrión local no responde.")?;
         let status = response.status();
@@ -125,7 +139,8 @@ impl Host {
         } else {
             health["ok"].as_bool() == Some(true) && health["backend"].as_str() == Some("rust")
         };
-        let domain = if is_host { "mind-host-health-v1" } else { "mind-health-v1" };
+        let domain = if private { "mind-services-health-v1" }
+            else if is_host { "mind-host-health-v1" } else { "mind-health-v1" };
         if status != StatusCode::OK
             || !kind_ok
             || health["baseId"].as_str() != Some(identity.as_str())
@@ -327,13 +342,14 @@ pub(crate) fn snapshot_filtered(root: &Path, skip: Option<&dyn Fn(&str) -> bool>
 }
 
 pub(crate) fn build_publication(
-    project: String, copy_id: String, git: Option<Git>, assets: Vec<Asset>,
+    project: String, copy_id: String, git: Option<Git>, assets: Vec<Asset>, mantener_abierta: Option<bool>,
 ) -> ViewPublication {
     ViewPublication {
         proyecto: project,
         copia: copy_id,
         git: git.map(Into::into),
         archivos: assets.into_iter().map(Into::into).collect(),
+        mantener_abierta,
     }
 }
 
@@ -475,17 +491,20 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     }
     let (operation, args) = args.split_first().ok_or(USAGE)?;
     let mut options = BTreeMap::new();
-    let mut pairs = args.chunks_exact(2);
-    for pair in &mut pairs {
-        let key = pair[0].as_str();
+    let mut mantener_abierta = None;
+    let mut args = args.iter().map(String::as_str);
+    while let Some(key) = args.next() {
+        if matches!(key, "--mantener-abierta" | "--no-mantener-abierta") {
+            if operation != "abrir" || mantener_abierta.replace(key == "--mantener-abierta").is_some() {
+                return Err(USAGE.into());
+            }
+            continue;
+        }
         if !matches!(key, "--base" | "--id" | "--version" | "--proyecto" | "--copia" | "--contenido" | "--receta" | "--autorizar")
-            || options.insert(key, pair[1].as_str()).is_some()
+            || options.insert(key, args.next().ok_or(USAGE)?).is_some()
         {
             return Err(USAGE.into());
         }
-    }
-    if !pairs.remainder().is_empty() {
-        return Err(USAGE.into());
     }
     if matches!(operation.as_str(), "receta" | "construir") {
         return run_recipe(operation, options).await;
@@ -519,6 +538,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
             copia: base_id(&copy).ok_or("No se pudo identificar la copia.")?,
             git,
             archivos: assets,
+            mantener_abierta,
         })
     } else if matches!(operation.as_str(), "consultar" | "cerrar")
         && id.is_some() && version.is_none() && options.is_empty()
@@ -583,7 +603,7 @@ async fn run_recipe(operation: &str, mut options: BTreeMap<&str, &str>) -> Resul
     let attempted = prepare_build(&recipe, &copy, &git).await;
     let failure = match attempted {
         Ok(assets) => {
-            let publication = Publication { proyecto: project, copia: copy_id, git, archivos: assets };
+            let publication = Publication { proyecto: project, copia: copy_id, git, archivos: assets, mantener_abierta: None };
             let method = if previous.is_some() { Method::PUT } else { Method::POST };
             match host.request(id, method, previous, Some(&publication)).await {
                 Ok(served) => {

@@ -10,6 +10,7 @@ use http_body_util::{BodyExt, Limited};
 use hyper::{body::Incoming, header, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
@@ -56,7 +57,11 @@ struct Served {
     version: u64,
 }
 
+pub(crate) const HOST_SECRET: &str = "servicios-secreto.json";
+pub(crate) const MOTOR_SECRET: &str = "servicios-motor-secreto.json";
+
 pub(crate) struct Services {
+    credential: PathBuf,
     origin: String,
     authority: String,
     token: String,
@@ -68,19 +73,15 @@ pub(crate) struct Services {
 
 impl Services {
     pub(crate) fn new(
-        base: &Path, control_port: u16, public_port: u16, client: reqwest::Client,
+        base: &Path, control_port: u16, public_port: u16, client: reqwest::Client, secret: &str,
     ) -> Result<Self, String> {
         let databases = directory(base)?.join("servicios-datos");
-        match fs::create_dir(&databases) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("No se pudo preparar el almacén SQLite: {error}")),
-        }
-        let databases = directory(&databases)?;
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        write_secret(base, control_port, &token)?;
+        let credential = base.join(secret);
+        write_secret(base, &credential, control_port, public_port, &token)?;
         let authority = format!("127.0.0.1:{public_port}");
         Ok(Self {
+            credential,
             origin: format!("http://{authority}"),
             authority,
             token,
@@ -89,6 +90,22 @@ impl Services {
             records: Mutex::new(HashMap::new()),
             starting: Semaphore::new(2),
         })
+    }
+
+    pub(crate) fn authorized(&self, req: &Request<Incoming>) -> bool {
+        req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|token| same(token.as_bytes(), self.token.as_bytes()))
+    }
+
+    pub(crate) fn proof(&self, nonce: &str, base_id: &str, port: u16) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.token.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(format!("mind-services-health-v1\n{nonce}\n{base_id}\n{port}").as_bytes());
+        format!("{:x}", mac.finalize().into_bytes())
+    }
+
+    pub(crate) async fn busy(&self) -> bool {
+        self.starting.available_permits() < 2 || !self.records.lock().await.is_empty()
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
@@ -103,7 +120,12 @@ impl Services {
 
     fn database(&self, spec: &Spec) -> Result<PathBuf, String> {
         let digest = Sha256::digest(format!("mind-sqlite-v1\0{}\0{}", spec.project, spec.copy_id));
-        let target = self.databases.join(format!("{digest:x}.sqlite"));
+        match fs::create_dir(&self.databases) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(format!("No se pudo preparar el almacén SQLite: {error}")),
+        }
+        let target = directory(&self.databases)?.join(format!("{digest:x}.sqlite"));
         let mut settings = OpenOptions::new();
         settings.write(true).create_new(true);
         #[cfg(unix)]
@@ -148,9 +170,7 @@ impl Services {
         if req.headers().contains_key(header::ORIGIN) {
             return error(StatusCode::FORBIDDEN, "SERVICE_ORIGIN_NOT_ALLOWED");
         }
-        let token = req.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if !token.is_some_and(|token| same(token.as_bytes(), self.token.as_bytes())) {
+        if !self.authorized(&req) {
             return error(StatusCode::UNAUTHORIZED, "SERVICE_UNAUTHORIZED");
         }
         if req.uri().path() == "/servicios" {
@@ -354,7 +374,15 @@ fn error(status: StatusCode, code: &'static str) -> Response<Body> {
     full(status, json!({"error": code}))
 }
 
-fn write_secret(base: &Path, port: u16, token: &str) -> Result<(), String> {
+impl Drop for Services {
+    fn drop(&mut self) {
+        if crate::bridge::regular_json(&self.credential).is_some_and(|value| value["token"] == self.token) {
+            let _ = fs::remove_file(&self.credential);
+        }
+    }
+}
+
+fn write_secret(base: &Path, target: &Path, port: u16, view_port: u16, token: &str) -> Result<(), String> {
     let temporary = base.join(format!(".servicios-{}.tmp", Uuid::new_v4().simple()));
     let mut settings = OpenOptions::new();
     settings.create_new(true).write(true);
@@ -365,10 +393,10 @@ fn write_secret(base: &Path, port: u16, token: &str) -> Result<(), String> {
     }
     let result = (|| -> io::Result<()> {
         let mut file = settings.open(&temporary)?;
-        let value = json!({"version": 1, "port": port, "token": token});
+        let value = json!({"version":1,"port":port,"puertoVistas":view_port,"pid":std::process::id(),"token":token});
         file.write_all(value.to_string().as_bytes())?;
         drop(file);
-        fs::rename(&temporary, base.join("servicios-secreto.json"))
+        fs::rename(&temporary, target)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

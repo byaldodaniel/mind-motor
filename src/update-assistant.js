@@ -55,7 +55,7 @@ function withDecisions(layout, change) {
 }
 
 /** Entrega disponible y más nueva que la instalada, o null. Nunca lanza. */
-async function availableRelease(layout) {
+async function availableRelease(layout, getOffer) {
   if (!layout?.product || !layout.root) return null;
   let state, installed;
   try {
@@ -64,6 +64,12 @@ async function availableRelease(layout) {
   } catch { return null; }
   if (!state || !NOTICE_PHASES.has(state.phase) || !state.release || !installed) return null;
   try { if (compareReleases(state.release, installed) <= 0) return null; } catch { return null; }
+  if (getOffer) {
+    try {
+      const { feed, selected } = await getOffer();
+      return { state: { ...state, package: selected }, installed, release: releaseOf(feed), novedades: feed.novedades ?? null };
+    } catch { return null; }
+  }
   return { state, installed, release: releaseOf(state.release), novedades: state.novedades ?? null };
 }
 
@@ -79,9 +85,9 @@ export function noticeText(release, novedades) {
  * Devuelve null si no corresponde avisar. Nunca lanza: un fallo aquí no puede
  * estropear la respuesta normal al usuario.
  */
-export async function takeNotice({ layout, conexion = null, now = Date.now } = {}) {
+export async function takeNotice({ layout, conexion = null, now = Date.now, getOffer } = {}) {
   try {
-    const found = await availableRelease(layout);
+    const found = await availableRelease(layout, getOffer);
     if (!found) return null;
     const key = releaseKey(found.release);
     return await withDecisions(layout, (decisions) => {
@@ -116,7 +122,7 @@ async function baseFormat(baseDirectory) {
 }
 
 /** Para `actualizacion_consultar`: lo declarado por la entrega frente a lo comprobado aquí. */
-export async function describeUpdate({ layout, statfs = fs.statfs, now = Date.now } = {}) {
+export async function describeUpdate({ layout, statfs = fs.statfs, now = Date.now, getOffer } = {}) {
   if (!layout?.product || !layout.root) {
     return { estado: 'no-aplica', motivo: 'Esta copia de Mind no es una instalación (desarrollo); no recibe actualizaciones.' };
   }
@@ -131,7 +137,7 @@ export async function describeUpdate({ layout, statfs = fs.statfs, now = Date.no
     disponible: null,
   };
   result.aplicacion = await (await import('./update-handoff.js')).describeHandoff(layout);
-  const found = await availableRelease(layout);
+  const found = await availableRelease(layout, getOffer);
   if (!found) {
     result.resumen = state?.phase === 'al-dia' ? 'Mind está al día.' : 'No hay una entrega nueva disponible ahora.';
     return result;
@@ -172,8 +178,8 @@ export async function describeUpdate({ layout, statfs = fs.statfs, now = Date.no
 }
 
 /** «Recuérdamelo después»: calla el aviso de esta entrega en todas las conversaciones hasta la fecha. */
-export async function postponeUpdate({ layout, dias = 1, now = Date.now } = {}) {
-  const found = await availableRelease(layout);
+export async function postponeUpdate({ layout, dias = 1, now = Date.now, getOffer } = {}) {
+  const found = await availableRelease(layout, getOffer);
   if (!found) throw new MotorError('UPDATE_NOT_AVAILABLE', 'No hay una entrega nueva que posponer.');
   if (!POSTPONE_DAYS.includes(dias)) throw new MotorError('INVALID_ARGUMENTS', `dias debe ser ${POSTPONE_DAYS.join(', ')}.`);
   const security = found.novedades?.importancia === 'seguridad';
