@@ -15,5 +15,11 @@ ubicaciones que hayas autorizado. `Sistema/mind estado` muestra el estado de
 Mind y `Sistema/mind ayuda` lista las órdenes de consola (en Windows,
 `Sistema\mind.cmd`).
 
+Para abrir un sitio estático, usa la herramienta `vista` con `accion: "abrir"`
+y la carpeta que contiene `index.html`. Desde la consola puedes usar
+`Sistema/mind vista abrir --carpeta "RUTA AL SITIO"`. Mind devuelve la URL
+local y el ID que permite consultar o cerrar la vista. `Sistema/mind ayuda vista`
+muestra las opciones.
+
 La Base se conserva en `Sistema/Base`. Guarda la copia anterior hasta
 comprobar tus conversaciones y carpetas con la versión nueva.

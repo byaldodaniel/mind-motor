@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { auxiliaryProcesses } from './process-children.mjs';
 import { execFile, spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -118,28 +119,6 @@ async function listen(port = 0) {
     server.close(error => error ? reject(error) : resolve())) };
 }
 
-async function children(pid) {
-  if (process.platform === 'win32') {
-    assert.ok(Number.isSafeInteger(pid) && pid > 0);
-    const system = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-    const powershell = path.join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const query = [
-      "$owner = Get-CimInstance Win32_Process -Filter 'ProcessId = " + pid + "' -ErrorAction Stop",
-      "if (-not $owner) { throw 'El Motor de prueba no existe' }",
-      "Get-CimInstance Win32_Process -Filter 'ParentProcessId = " + pid + "' -ErrorAction Stop |",
-      '  Where-Object { $_.CreationDate -ge $owner.CreationDate } |',
-      '  Select-Object ProcessId,Name,ExecutablePath | ConvertTo-Json -Compress',
-    ].join('\n');
-    const { stdout } = await run(powershell, ['-NoProfile', '-NonInteractive', '-Command', query], { timeout: 10000, windowsHide: true });
-    const children = stdout.trim() ? [JSON.parse(stdout)].flat() : [];
-    const console = path.join(system, 'conhost.exe').toLowerCase();
-    return children.filter(item => item.ExecutablePath?.toLowerCase() !== console);
-  }
-  const { stdout } = await run('ps', ['-eo', 'pid=,ppid=']);
-  return stdout.trim().split('\n').map(line => line.trim().split(/\s+/u).map(Number))
-    .filter(([, parent]) => parent === pid).map(([child]) => child);
-}
-
 test('6: puerto, token, permisos y dos sesiones HTTP directas en un único Motor Rust', {
   skip: !binary && 'Indica MIND_NATIVE_EXE', timeout: 90000,
 }, async t => {
@@ -155,7 +134,7 @@ test('6: puerto, token, permisos y dos sesiones HTTP directas en un único Motor
     assert.equal((await client.call('estado')).motor_central.pid, before.health.pid);
   }
   assert.equal((await checkHealthyConnector(f.base)).health.sessions, 2);
-  assert.deepEqual(await children(before.health.pid), []);
+  assert.deepEqual(await auxiliaryProcesses(before.health.pid), []);
   await one.call('leer', { ruta: 'nota.txt' }, true);
   assert.equal((await two.call('leer', { ruta: 'nota.txt' })).contenido, 'Nota ficticia.');
   await two.call('leer', { carpeta: f.hidden, ruta: 'nota.txt' }, true);
@@ -168,7 +147,7 @@ test('6: puerto, token, permisos y dos sesiones HTTP directas en un único Motor
   assert.equal(after.token === before.token, true);
   const resumed = await mcp(before, f.cwd);
   assert.equal((await resumed.call('estado')).motor_central.pid, after.health.pid);
-  assert.deepEqual(await children(after.health.pid), []);
+  assert.deepEqual(await auxiliaryProcesses(after.health.pid), []);
   await resumed.close();
   await f.stop();
 
@@ -427,14 +406,14 @@ for (const [client, installed, discover] of [
     const filename = path.join(f.home, relative);
     const config = await fs.readFile(filename, 'utf8');
     assert.deepEqual(await discover(f, env, before, t), tools);
-    assert.deepEqual(await children(before.health.pid), []);
+    assert.deepEqual(await auxiliaryProcesses(before.health.pid), []);
     await f.stop();
     const after = await f.start();
     assert.equal(after.url, before.url);
     assert.equal(after.token === before.token, true);
     assert.equal(await fs.readFile(filename, 'utf8') === config, true);
     assert.deepEqual(await discover(f, env, after, t), tools);
-    assert.deepEqual(await children(after.health.pid), []);
+    assert.deepEqual(await auxiliaryProcesses(after.health.pid), []);
     t.diagnostic(client + ': 13 herramientas, PID Rust ' + before.health.pid + ' → ' + after.health.pid + ' en el mismo puerto y 0 auxiliares.');
   });
 }

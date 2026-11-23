@@ -9,7 +9,7 @@ use crate::{
     view_cli::{path_option, small_json, view_id, Host},
 };
 
-const USAGE: &str =
+pub(crate) const USAGE: &str =
     "servicio abrir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]\n\
      servicio estado|cerrar --base ABS --id UUID";
 

@@ -1,45 +1,21 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { auxiliaryProcesses } from './process-children.mjs';
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
-import { promisify } from 'node:util';
 import { extractR3, r3Commit } from './r3-fixture.mjs';
 import { RUNS } from './runs.mjs';
 
 const executable = process.env.MIND_NATIVE_EXE;
-const run = promisify(execFile);
 const project = 'Proyecto Órbita';
 const createdAt = '2026-01-01T00:00:00.000Z';
 const updatedAt = day => new Date(Date.UTC(2026, 0, day)).toISOString();
 const idFor = number => '00000000-0000-4000-8000-' + String(number).padStart(12, '0');
 const channel = 'administracion-local';
-
-async function childProcesses(pid) {
-  assert.ok(Number.isSafeInteger(pid) && pid > 0);
-  const options = { windowsHide: true, timeout: 10_000 };
-  if (process.platform === 'win32') {
-    const system = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-    const powershell = path.join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const command = [
-      "$owner = Get-CimInstance Win32_Process -Filter 'ProcessId = " + pid + "' -ErrorAction Stop",
-      "if (-not $owner) { throw 'El Motor de prueba no está activo.' }",
-      "Get-CimInstance Win32_Process -Filter 'ParentProcessId = " + pid + "' -ErrorAction Stop |",
-      '  Where-Object { $_.CreationDate -ge $owner.CreationDate } |',
-      '  Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress',
-    ].join('\n');
-    const { stdout } = await run(powershell, ['-NoProfile', '-NonInteractive', '-Command', command], options);
-    const children = stdout.trim() ? [JSON.parse(stdout)].flat() : [];
-    const consolePath = path.join(system, 'conhost.exe').toLowerCase();
-    return children.filter(item => item.ExecutablePath?.toLowerCase() !== consolePath);
-  }
-  const { stdout } = await run('ps', ['-eo', 'pid=,ppid='], options);
-  return stdout.trim().split('\n').map(line => line.trim().split(/\s+/u).map(Number))
-    .filter(([, parent]) => parent === pid).map(([child]) => child);
-}
 
 async function fixture(t, { writeAccess = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(RUNS, 'buscar-conversaciones-')));
@@ -287,7 +263,7 @@ test('Etapa 4: dos bancos por MCP en un Motor Rust y vuelta a r3 con la misma Ba
     for (const client of clients) {
       assert.equal((await client.call('estado', {})).motor_central.pid, f.pid);
     }
-    assert.deepEqual(await childProcesses(f.pid), []);
+    assert.deepEqual(await auxiliaryProcesses(f.pid), []);
     await assert.rejects(fs.stat(path.join(f.base, 'conversation-index.sqlite')), { code: 'ENOENT' });
   }
   await assertSingleMotor();

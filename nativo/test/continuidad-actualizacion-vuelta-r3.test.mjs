@@ -305,6 +305,69 @@ async function fakePython(pythonRuntime) {
       .filter(Boolean).join('\n') + '\n');
 }
 
+test('5C: la consulta conserva actas históricas y solo anuncia el éxito de la entrega instalada', {
+  skip: !binary && 'Indica MIND_NATIVE_EXE', timeout: 30_000,
+}, async t => {
+  const root = await scratch(t);
+  const product = await fakeProduct(root);
+  const base = product.baseDirectory;
+  await fs.mkdir(base, { recursive: true });
+  await fs.writeFile(path.join(base, 'mind-base.json'), JSON.stringify({
+    format: 'mind-base', version: 3, baseId: randomUUID(), createdAt: stamp,
+  }));
+  const motor = await startNative(root, base, [
+    '--raiz-instalacion', product.installation, '--directorio-motor', product.motorDirectory,
+  ]);
+  const client = await connect(motor);
+  const directory = updateStatePaths(product.installation).directory;
+  await fs.mkdir(directory, { recursive: true });
+  const file = path.join(directory, 'relevo.json');
+  const job = { format: 'mind-update-handoff', version: 1, id: randomUUID(), phase: 'completada',
+    release: releaseOf({ ...product.manifest, packageRevision: 2 }), reported: {} };
+  await fs.writeFile(file, JSON.stringify(job));
+  const historic = await client.call('actualizacion_consultar');
+  assert.equal(historic.aplicacion.entrega.packageRevision, 2);
+  assert.equal(historic.instalada.packageRevision, 3);
+  assert.equal(historic.aplicacion.corresponde_a_instalada, false);
+  assert.equal(historic.acta_actualizacion, undefined);
+  assert.deepEqual(await readJson(file), job);
+  job.release = releaseOf(product.manifest);
+  job.expectedManifestSha256 = 'a'.repeat(64);
+  await fs.writeFile(file, JSON.stringify(job));
+  const differentBuild = await client.call('actualizacion_consultar');
+  assert.equal(differentBuild.aplicacion.corresponde_a_instalada, false);
+  assert.equal(differentBuild.acta_actualizacion, undefined);
+  job.expectedManifestSha256 = sha256(await fs.readFile(product.manifestFile));
+  delete job.release.packageRevision;
+  await fs.writeFile(file, JSON.stringify(job));
+  const unknownRevision = await client.call('actualizacion_consultar');
+  assert.equal(unknownRevision.aplicacion.corresponde_a_instalada, null);
+  assert.equal(unknownRevision.acta_actualizacion, undefined);
+  job.release = releaseOf(product.manifest);
+  await fs.writeFile(file, JSON.stringify(job));
+  const current = await client.call('actualizacion_consultar');
+  assert.equal(current.aplicacion.corresponde_a_instalada, true);
+  assert.equal(current.acta_actualizacion.id, job.id);
+  assert.equal((await client.call('actualizacion_consultar')).acta_actualizacion, undefined);
+  job.phase = 'fallida';
+  job.release = releaseOf({ ...product.manifest, mindVersion: '1.0.5' });
+  await fs.writeFile(file, JSON.stringify(job));
+  assert.equal((await client.call('actualizacion_consultar')).acta_actualizacion.estado, 'fallida');
+
+  await writeUpdateState(product.installation, { phase: 'al-dia', nextCheckAt: '2099-01-01T00:00:00.000Z',
+    lastError: { code: 'UPDATE_CONNECTION_FAILED', kind: 'conexion', message: 'Sin conexión de ensayo' } });
+  const offline = await client.call('actualizacion_consultar');
+  assert.equal(offline.ultimo_error.codigo, 'UPDATE_CONNECTION_FAILED');
+  assert.match(offline.resumen, /No se pudo verificar/u);
+  await fs.writeFile(updateStatePaths(product.installation).file, '{}');
+  const damagedState = await client.call('actualizacion_consultar');
+  assert.equal(damagedState.fase, 'estado-no-verificable');
+  assert.equal(damagedState.ultimo_error.codigo, 'UPDATE_STATE_INVALID');
+  assert.match(damagedState.resumen, /No se pudo verificar/u);
+  await client.close();
+  await motor.stop();
+});
+
 test('5C: actualización firmada local, consentimiento MCP, código y fallo seguro del paquete', {
   skip: (!binary || !python) && 'Indica MIND_NATIVE_EXE y MIND_PYTHON', timeout: 120_000,
 }, async t => {

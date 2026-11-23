@@ -87,11 +87,33 @@ const IN_FLIGHT = ['descargando', 'descargada', 'instalando', 'espera-sesiones',
 const SHA = /^[a-f0-9]{64}$/u;
 const LOCK_CODES = ['LOCK_BUSY', 'LOCK_TIMEOUT', 'LOCK_HELD', 'UPDATE_IN_PROGRESS', 'INSTALLATION_BUSY'];
 
-async function removeDownload(paths, sha256) {
+function packagePath(paths, selected) {
+  const tar = /\.(?:tar\.gz|tgz)$/iu.test(new URL(selected.url).pathname);
+  return path.join(paths.downloads, selected.sha256 + (tar ? '.tar.gz' : '.zip'));
+}
+
+// Las versiones anteriores guardaban también los TAR en la caché con sufijo .zip.
+async function resumePackagePath(paths, selected) {
+  const file = packagePath(paths, selected);
+  if (file.endsWith('.tar.gz')) {
+    for (const suffix of ['', '.parcial']) {
+      const destination = file + suffix;
+      try { await fs.lstat(destination); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        try { await fs.rename(path.join(paths.downloads, selected.sha256 + '.zip' + suffix), destination); }
+        catch (missing) { if (missing.code !== 'ENOENT') throw missing; }
+      }
+    }
+  }
+  return file;
+}
+
+export async function removeDownload(paths, sha256) {
   if (!SHA.test(sha256 ?? '')) return;
-  const file = path.join(paths.downloads, `${sha256}.zip`);
-  await fs.rm(file, { force: true });
-  await fs.rm(file + '.parcial', { force: true });
+  for (const suffix of ['.zip', '.zip.parcial', '.tar.gz', '.tar.gz.parcial']) {
+    await fs.rm(path.join(paths.downloads, sha256 + suffix), { force: true });
+  }
 }
 
 /**
@@ -198,7 +220,7 @@ export async function downloadUpdate({ root, fetcher = fetch, now = Date.now, ra
     const { paths, save } = ctx, state = ctx.state;
     if (!['disponible', 'descargada', 'descargando', 'espera-sesiones', 'espera-verificacion', 'instalando', 'fallida'].includes(state.phase)) return { status: 'fase-incorrecta', phase: state.phase ?? null };
     const { feed, selected } = offerFrom(state, ctx);
-    const source = path.join(paths.downloads, `${selected.sha256}.zip`), partial = `${source}.parcial`;
+    const source = await resumePackagePath(paths, selected), partial = `${source}.parcial`;
     await fs.mkdir(paths.downloads, { recursive: true });
     try {
       const info = await fs.lstat(source);
@@ -259,7 +281,7 @@ export async function installDownloaded({ root, install = installPackage, baseDi
     const { paths, save } = ctx, state = ctx.state;
     if (!['descargada', 'espera-sesiones', 'espera-verificacion', 'instalando'].includes(state.phase)) return { status: 'fase-incorrecta', phase: state.phase ?? null };
     const { feed, selected } = offerFrom(state, ctx);
-    const source = path.join(paths.downloads, `${selected.sha256}.zip`);
+    const source = await resumePackagePath(paths, selected);
     let intact = false;
     try { const info = await fs.lstat(source); intact = info.isFile() && info.size === selected.bytes && await hashFile(source) === selected.sha256; }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -400,7 +422,7 @@ export async function getVerifiedOffer({ root } = {}) {
   const { feed, selected } = offerFrom(state, { current, channel });
   if (compareReleases(feed, current) <= 0) throw fail('UPDATE_NOT_AVAILABLE', 'La entrega ya está instalada.');
   if ((current.updateProtocolVersion ?? 1) >= 2 && feed.version !== 2) throw fail('UPDATE_PROTOCOL_INVALID', 'Esta copia requiere el canal v2.');
-  return { feed, selected, current, source: path.join(updateStatePaths(root).downloads, `${selected.sha256}.zip`) };
+  return { feed, selected, current, source: packagePath(updateStatePaths(root), selected) };
 }
 
 /** Reabre una consola/puente que empezó a cargar justo antes de la sustitución. */

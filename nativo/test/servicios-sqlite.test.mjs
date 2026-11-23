@@ -109,7 +109,7 @@ function alive(pid) {
 
 async function assertStopped(marker) {
   const data = await readJson(marker);
-  assert.ok(data?.pid > 0 && data?.hijo > 0, 'Falta el registro del proceso y su hijo');
+  assert.ok(data?.pid > 0 && data?.hijo > 0, 'Falta el registro del proceso y su hijo en ' + path.basename(marker));
   for (let attempt = 0; attempt < 50; attempt++) {
     if (!alive(data.pid) && !alive(data.hijo)) return;
     await delay(100);
@@ -194,7 +194,8 @@ test('los servicios comparten SQLite y conservan la vista con ' + backend, {
     await fs.writeFile(file, JSON.stringify({
       programa: process.execPath,
       argumentos: ['servicio.mjs', version, mode, marker, fallback, gate],
-      plazo_ms: mode === 'salud-falsa' ? 1500 : 10000,
+      // El servicio de salud falsa también debe tener tiempo de arrancar y registrar a su hijo.
+      plazo_ms: 10000,
     }));
     const review = await command('vista', 'receta', ...selected, '--receta', file);
     assert.equal(review.code, 0, review.stderr);
@@ -213,7 +214,8 @@ test('los servicios comparten SQLite y conservan la vista con ' + backend, {
   }
   async function close(view, marker) {
     const response = await command('servicio', 'cerrar', '--base', base, '--id', view.id);
-    assert.equal(response.code, 0, response.stderr);
+    // The CLI emits the service's structured failure on stdout, including the OS error.
+    assert.equal(response.code, 0, [path.basename(marker), response.stderr.trim(), response.stdout.trim()].filter(Boolean).join('\n'));
     const body = JSON.parse(response.stdout);
     assert.equal(body.id, view.id);
     assert.equal(body.cerrada, true);

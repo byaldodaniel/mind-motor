@@ -71,6 +71,17 @@ npm test
 `%TEMP%\mind-nativo-runs` (o `MIND_NATIVO_RUNS`), fuera del Motor: r3 rechaza
 una Base dentro de su programa. Nunca usar una Base personal.
 
+Al indicar `MIND_NATIVE_EXE`, tanto la prueba local como el flujo de paquete
+ejecutan todos los archivos `nativo/test/*.test.mjs`. Las pruebas que dependen
+de un cliente instalado, un modelo opcional o un volumen externo indican su
+omisión cuando ese recurso no está configurado.
+
+`buscar` con `en: "carpeta"` enumera los niveles solicitados desde `ruta`
+y devuelve las entradas en orden con el total y la fecha de observación.
+Se puede explorar una subcarpeta antes de construir el índice completo.
+La búsqueda global de archivos y el seguimiento de eliminados siguen usando
+el índice de la raíz autorizada.
+
 Para probar archivos y papelera con el Motor autónomo, ejecuta
 `node --test nativo/test/archivos-volumen.test.mjs` con `MIND_NATIVE_EXE`.
 En macOS cubre el rechazo de ACL, flags y atributos extendidos que se perderían
@@ -207,6 +218,15 @@ dirección. Para reemplazar el contenido de la vista, pasa `--id UUID --version 
 a `vista abrir`. La URL conserva la última versión válida y `vista consultar`
 permite comprobar su versión actual. `vista cerrar` retira la página y libera
 su contenido en memoria. Las vistas duran lo que dura el anfitrión.
+
+En el producto instalado, `mind vista abrir --carpeta ABS` y la herramienta
+`vista` de MCP abren la misma carpeta autorizada. El directorio debe contener
+`index.html`. Mind omite las entradas que empiezan por punto y las exclusiones
+de la carpeta. Una vista local admite hasta 8.192 archivos, 2.048 directorios
+y 512 MiB. Para sitios de más de 8 MiB, Mind conserva la revisión en un
+archivo temporal privado y entrega los recursos por bloques. Los videos
+admiten peticiones HTTP por intervalos. Cerrar la vista, dejarla caducar o
+salir del motor libera la copia cuando termina la última descarga activa.
 
 La prueba local usa el binario Rust y dos sesiones de Mind con datos ficticios.
 

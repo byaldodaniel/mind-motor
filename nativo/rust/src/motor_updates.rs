@@ -175,15 +175,29 @@ impl Updater {
         let installed = Release::read(&installed(root)?)?;
         let state = state(root).unwrap_or_else(|error| json!({"phase":"estado-no-verificable","lastError":{"code":error.code,"message":error.message}}));
         let job = runner::handoff(root)?.map(|job| json!({"id":job["id"],"fase":job["phase"],"entrega":job["release"],
+            "corresponde_a_instalada":matches_installation(root, &job),
             "error":job["error"],"verificacion":job["verification"]}));
         let mut result = json!({"instalada":installed,"fase":state["phase"].as_str().unwrap_or("sin-comprobar"),
             "ultima_comprobacion":state["lastCheckedAt"],"disponible":null,"aplicacion":job,
             "ultimo_error":if state["lastError"].is_null() {Value::Null} else {
                 json!({"codigo":state["lastError"]["code"],"tipo":state["lastError"]["kind"],"mensaje":state["lastError"]["message"]})
             }});
-        let Ok(offer) = offer(root) else {
-            result["resumen"] = json!(if state["phase"] == "al-dia" { "Mind está al día." } else { "No hay una entrega nueva disponible ahora." });
-            return Ok(result);
+        let offer = match offer(root) {
+            Ok(offer) => offer,
+            Err(error) => {
+                if error.code != "UPDATE_NOT_AVAILABLE" {
+                    result["fase"] = json!("estado-no-verificable");
+                    result["ultimo_error"] = json!({"codigo":error.code,"mensaje":error.message});
+                }
+                result["resumen"] = json!(if !result["ultimo_error"].is_null() {
+                    "No se pudo verificar si hay una entrega nueva."
+                } else if state["phase"] == "al-dia" {
+                    "Mind está al día."
+                } else {
+                    "No hay una entrega nueva disponible ahora."
+                });
+                return Ok(result);
+            }
         };
         let notes = &offer.feed["novedades"];
         let base_format = read_json(&self.base, "mind-base.json").ok().flatten().map(|record| record["version"].clone());
@@ -217,7 +231,8 @@ impl Updater {
             let slot = connection.unwrap_or("sin-conexion");
             let mut result = Map::new();
             if let Some(mut job) = runner::handoff(root)?.filter(|job| matches!(job["phase"].as_str(), Some("completada" | "fallida"))) {
-                if job["reported"].get(slot).is_none() {
+                if job["reported"].get(slot).is_none() && (job["phase"] == "fallida"
+                    || matches_installation(root, &job) == Some(true)) {
                     let notices = job["reported"].as_object().cloned().unwrap_or_default();
                     let mut latest: Vec<_> = notices.into_iter().collect();
                     latest.sort_by_key(|(_, value)| millis(value).unwrap_or_default());
@@ -239,6 +254,18 @@ impl Updater {
             Ok(Value::Object(result))
         }).ok().filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
     }
+}
+
+fn matches_installation(root: &str, job: &Value) -> Option<bool> {
+    let bytes = read(root, MANIFEST, MAX_DOCUMENT).ok()??;
+    let manifest: Value = serde_json::from_slice(&bytes).ok()?;
+    let release = &job["release"];
+    if release["mindVersion"].as_str()? != manifest["mindVersion"].as_str()?
+        || release["packageRevision"].as_u64()? != manifest["packageRevision"].as_u64()? {
+        return Some(false);
+    }
+    let expected = job["expectedManifestSha256"].as_str().filter(|value| hash(value))?;
+    Some(sha(&bytes) == expected)
 }
 
 fn state(root: &str) -> Result<Value> {

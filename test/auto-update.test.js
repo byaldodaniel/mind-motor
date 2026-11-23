@@ -345,10 +345,19 @@ test('bin directo espera antes de leer Programa o manifiesto y abre la entrega a
   await handoff.writeHandoff(root, record);
   const aside = path.join(root, 'Programa-apartado');
   await fs.rename(path.join(root, 'Sistema/Programa'), aside);
-  let finished = false;
-  const launch = implementation.launch([output, 'mcp']).then(value => { finished = true; return value; });
-  await new Promise(resolve => setTimeout(resolve, 80));
-  assert.equal(finished, false);
+  // Esperar a que el iniciador haya leído la fase bloqueante, incluso con el disco ocupado.
+  const observed = Promise.withResolvers();
+  const readFile = fs.readFile.bind(fs);
+  const reader = t.mock.method(fs, 'readFile', async (file, ...options) => {
+    const contents = await readFile(file, ...options);
+    if (typeof file === 'string' && path.basename(file) === 'relevo.json' && JSON.parse(contents).id === record.id) {
+      observed.resolve();
+    }
+    return contents;
+  });
+  const launch = implementation.launch([output, 'mcp']);
+  assert.equal(await Promise.race([observed.promise.then(() => true), launch.then(() => false)]), true);
+  reader.mock.restore();
   await fs.rename(aside, path.join(root, 'Sistema/Programa'));
   await fs.writeFile(path.join(root, 'Sistema/mind-producto.json'), JSON.stringify(manifest));
   await handoff.writeHandoff(root, { ...record, phase: 'completada' });

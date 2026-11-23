@@ -142,8 +142,20 @@ for (const variant of ['disco local', 'DriveFS']) {
         await fs.mkdir(base);
         await fs.writeFile(path.join(folder, 'Semilla.txt'), 'Texto inicial ficticio.\n');
         const call = await nativeClient({ after: fn => cleanup.push(fn) }, base, folder);
+        // Index the seed first: browsing must see newly added files without rewriting that index.
         const search = consulta => call('buscar', { en: 'archivos', consulta });
         assert.deepEqual((await search('Semilla')).resultados.map(item => item.ruta), ['Semilla.txt'], 'indexar y buscar');
+        const indexes = (await fs.readdir(base)).filter(name => /^folder-index-[a-f0-9]{64}\.json$/u.test(name));
+        assert.equal(indexes.length, 1);
+        const indexFile = path.join(base, indexes[0]);
+        const indexBefore = await fs.readFile(indexFile);
+        await fs.mkdir(path.join(folder, 'Visible', 'Segundo'), { recursive: true });
+        await fs.writeFile(path.join(folder, 'Visible', 'Segundo', 'Interior.txt'), 'Prueba');
+        const explore = profundidad => call('buscar', { en: 'carpeta', ruta: 'Visible', profundidad });
+        const shallow = await explore(1);
+        assert.deepEqual(shallow.entradas.map(entry => entry.ruta), ['Visible/Segundo']);
+        assert.deepEqual((await explore(2)).entradas.map(entry => entry.ruta), ['Visible/Segundo', 'Visible/Segundo/Interior.txt']);
+        assert.deepEqual(await fs.readFile(indexFile), indexBefore, 'explorar conserva el índice anterior');
         assert.equal((await call('leer', { ruta: 'Semilla.txt' })).contenido, 'Texto inicial ficticio.\n');
         assert.equal((await call('crear', { ruta: 'Nueva.txt', contenido: 'Uno.\n' })).estado, 'creado');
         const first = await call('leer', { ruta: 'Nueva.txt' });

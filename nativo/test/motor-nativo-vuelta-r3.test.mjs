@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { directChildren } from './process-children.mjs';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
@@ -142,31 +143,6 @@ function startRust(base) {
       await closed;
     },
   };
-}
-
-async function directChildren(pid) {
-  assert.ok(Number.isInteger(pid) && pid > 0);
-  if (process.platform === 'win32') {
-    const system = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-    const powershell = path.join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    // Windows conserva el ParentProcessId aunque ese PID vuelva a asignarse.
-    const command = [
-      "$mindFixtureParent = Get-CimInstance Win32_Process -Filter 'ProcessId = " + pid + "' -ErrorAction Stop",
-      "if (-not $mindFixtureParent) { throw 'Falta el proceso de prueba' }",
-      "Get-CimInstance Win32_Process -Filter 'ParentProcessId = " + pid + "' -ErrorAction Stop |",
-      "  Where-Object { $_.CreationDate -ge $mindFixtureParent.CreationDate } |",
-      "  Select-Object ProcessId,Name,ExecutablePath | ConvertTo-Json -Compress",
-    ].join('\n');
-    const { stdout } = await run(powershell, ['-NoProfile', '-NonInteractive', '-Command', command], options);
-    const children = stdout.trim() ? [JSON.parse(stdout)].flat() : [];
-    const console = path.join(system, 'conhost.exe').toLowerCase();
-    const auxiliaries = children.filter(child => child.ExecutablePath?.toLowerCase() !== console);
-    return { auxiliaries, systemConsoles: children.length - auxiliaries.length };
-  }
-  const { stdout } = await run('ps', ['-eo', 'pid=,ppid='], options);
-  const auxiliaries = stdout.trim().split('\n').map(line => line.trim().split(/\s+/u).map(Number))
-    .filter(([, parent]) => parent === pid).map(([child]) => child);
-  return { auxiliaries, systemConsoles: 0 };
 }
 
 function fields(value) {

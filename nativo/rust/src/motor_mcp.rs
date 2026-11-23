@@ -928,6 +928,10 @@ fn missing_session() -> Response<Body> {
     full(StatusCode::NOT_FOUND, rpc_error(Value::Null, -32001, "Sesión MCP no encontrada."))
 }
 
+pub(crate) fn definition(name: &str) -> Option<Value> {
+    definitions().as_array_mut()?.iter_mut().find(|tool| tool["name"] == name).map(Value::take)
+}
+
 fn definitions() -> Value {
     let alternatives = json!({
         "type": "array", "minItems": 1, "maxItems": MAX_CONVERSATION_ALTERNATIVES,
@@ -1094,14 +1098,14 @@ fn definitions() -> Value {
         {
             "name": "vista",
             "title": "Vista compartida local",
-            "description": "Publica, consulta o cierra una vista web local de una carpeta con permiso de lectura. Por defecto se cierra tras 30 minutos sin actividad. Usa mantener para cambiar esa opción.",
+            "description": "Abrir una carpeta con permiso de lectura devuelve la URL y el id de la vista. Consultar, mantener y cerrar requieren ese id. Por defecto se cierra tras 30 minutos sin actividad.",
             "inputSchema": {"type": "object", "properties": {
                 "accion": {"type": "string", "enum": ["abrir", "consultar", "mantener", "cerrar"]},
                 "mantener_abierta": {"type": "boolean", "description": "Evita el cierre automático si es true. Al abrir es false por defecto; al actualizar se conserva si se omite."},
-                "carpeta": {"type": "string", "description": "ID o ruta absoluta de la carpeta registrada."},
-                "ruta": {"type": "string", "description": "Subcarpeta relativa dentro de la carpeta."},
+                "carpeta": {"type": "string", "description": "ID o ruta de carpeta autorizada. También admite la ruta absoluta a un sitio dentro de ella."},
+                "ruta": {"type": "string", "description": "Subcarpeta relativa con el index.html del sitio."},
                 "proyecto": {"type": "string", "description": "Nombre del proyecto."},
-                "id": {"type": "string", "description": "Identificador UUID de la vista."},
+                "id": {"type": "string", "format": "uuid", "description": "ID devuelto al abrir. Indícalo junto con version para actualizar."},
                 "version": {"type": "integer", "minimum": 1, "description": "Versión leída al actualizar una vista."}
             }, "required": ["accion"], "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false},

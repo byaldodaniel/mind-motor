@@ -17,9 +17,11 @@ import { openSession } from '../src/session.js';
 const motorDirectory = fileURLToPath(new URL('..', import.meta.url));
 
 test('canal firmado: descarga, instalador en proceso separado, arranque nuevo y Base intacta', t => updateThroughSignedChannel(t));
+test('canal firmado: recupera un TAR.GZ anterior de la caché y lo instala sin redescargar', t =>
+  updateThroughSignedChannel(t, false, true));
 test('canal firmado universal: instala el mismo ZIP en el destino local y conserva la Base', t => updateThroughSignedChannel(t, true));
 
-async function updateThroughSignedChannel(t, universal = false) {
+async function updateThroughSignedChannel(t, universal = false, cachedTar = false) {
   const f = await agentFixture(t, { prefix: '.mind-auto-product-' });
   await packageAt(f.mind, '1.0.0', { real: true });
   const source = path.join(f.root, 'Nuevo');
@@ -30,16 +32,22 @@ async function updateThroughSignedChannel(t, universal = false) {
   const before = await snapshot(f.layout.baseDirectory);
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   await fs.writeFile(path.join(f.mind, 'Motor', 'src', 'update-channel.json'), JSON.stringify({ repository: 'owner/mind', url: 'https://github.com/owner/mind/releases/latest/download/stable.json', publicKey: publicKey.export({ type: 'spki', format: 'pem' }) }));
-  const zip = universal || process.platform === 'win32';
+  const zip = universal || (!cachedTar && process.platform === 'win32');
   const archive = path.join(f.root, zip ? 'Mind.zip' : 'Mind.tar.gz');
   const entries = (await scanTree(source)).map(e => ({ ...e, source: { file: path.join(source, e.path) } }));
   await (zip ? writeZip : writeTarGz)(archive, entries, { root: 'Mind', mtime: 1700000000 });
   const target = universal ? { platform: 'win32', arch: 'x64', targets: UNIVERSAL_TARGETS } : { platform: process.platform, arch: process.arch };
   const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 1, mindVersion: '1.1.0', packages: [{ ...target,
-    url: 'https://github.com/owner/mind/releases/download/v1.1.0/Mind.zip', sha256: await hashFile(archive), bytes: (await fs.stat(archive)).size }] }));
+    url: 'https://github.com/owner/mind/releases/download/v1.1.0/' + path.basename(archive), sha256: await hashFile(archive), bytes: (await fs.stat(archive)).size }] }));
+  if (cachedTar) {
+    const downloads = path.join(f.mind, 'Sistema', 'Actualizaciones', 'descargas');
+    await fs.mkdir(downloads, { recursive: true });
+    await fs.copyFile(archive, path.join(downloads, await hashFile(archive) + '.zip'));
+  }
   let first = true;
   const result = await checkForUpdate({ root: f.mind, fetcher: async () => {
     if (first) { first = false; return new Response(JSON.stringify({ payload: payload.toString('base64'), signature: sign(null, payload, privateKey).toString('base64') })); }
+    assert.equal(cachedTar, false, 'El paquete completo conservado en caché se verifica y reutiliza.');
     return new Response(await fs.readFile(archive));
   } });
   assert.equal(result.status, 'actualizada', result.reason);

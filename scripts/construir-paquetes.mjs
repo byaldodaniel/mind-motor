@@ -519,7 +519,7 @@ async function nativeMain(argv) {
   const key = get('--clave-publicacion')[0];
   const artifacts = get('--binarios')[0];
   const version = get('--version-paquete')[0] ?? publication.mindVersion;
-  const packageRevision = Number(get('--revision-paquete')[0] ?? 1);
+  const packageRevision = Number(get('--revision-paquete')[0] ?? publication.packageRevision);
   const mtime = Number(process.env.SOURCE_DATE_EPOCH ?? git(['log','-1','--format=%ct']).trim());
   if (!key || !artifacts || !/^\d+\.\d+\.\d+$/u.test(version) || !Number.isSafeInteger(packageRevision) || packageRevision < 1
       || !Number.isSafeInteger(mtime) || mtime < 1) fail('Indica --binarios ARTEFACTOS y --clave-publicacion CLAVE con una versión y revisión válidas.');

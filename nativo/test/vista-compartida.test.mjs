@@ -668,3 +668,102 @@ test('las vistas inactivas liberan la copia en RAM y las páginas visibles o fij
   assert.deepEqual(await call('cerrar', { id: cliKept.id }), { id: cliKept.id, cerrada: true });
   await assertExpired(cliKept);
 });
+
+
+test('un sitio grande conserva una copia estable y sirve el video por tramos', {
+  skip: !executable && 'Indica MIND_NATIVE_EXE',
+  timeout: 60_000,
+}, async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(RUNS, 'vista-grande-')));
+  const base = path.join(root, 'Base');
+  const site = path.join(root, 'Sitio ficticio');
+  const temp = path.join(root, 'Temporal');
+  const media = 'recursos/demostración grande.mp4';
+  let motor, client;
+  t.after(async () => {
+    try {
+      await client?.close().catch(() => {});
+      await motor?.stop();
+    } finally {
+      assert.equal(path.dirname(root), RUNS);
+      assert.ok(path.basename(root).startsWith('vista-grande-'));
+      await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+
+  await fs.mkdir(path.join(site, 'recursos'), { recursive: true });
+  await fs.mkdir(path.join(site, 'recursos', '.cache'));
+  await fs.mkdir(path.join(site, 'recursos', 'node_modules'));
+  await fs.mkdir(temp);
+  const original = Buffer.alloc(9 * 1024 * 1024 + 15);
+  original.write('marca de video', 140_000);
+  await fs.writeFile(path.join(site, media), original);
+  await fs.writeFile(path.join(site, '.gitignore'), 'generado/');
+  await fs.writeFile(path.join(site, 'recursos', '.cache', 'nota.txt'), 'dato ficticio');
+  await fs.writeFile(path.join(site, 'recursos', 'node_modules', 'interno.js'), 'void 0');
+  await fs.writeFile(path.join(site, 'index.html'), firstMap);
+  await fs.writeFile(path.join(site, 'mapa.css'), mapStyle);
+  for (let n = 0; n < 258; n++) {
+    await fs.writeFile(path.join(site, 'recursos', n + '.glb'), String(n));
+  }
+
+  motor = start(path.resolve(executable), ['motor', '--base', base, '--conector'], {
+    ...process.env, MIND_AGENT_STARTUP: '0', TEMP: temp, TMP: temp, TMPDIR: temp,
+  });
+  const connector = await motor.connector(base, 'conector.json');
+  const { token } = JSON.parse(await fs.readFile(path.join(base, 'conector-secreto.json'), 'utf8'));
+  client = await openMcp(connector.url, {
+    Authorization: 'Bearer ' + token,
+    'X-Mind-Workspace': Buffer.from(JSON.stringify({ cwd: site, paths: [] })).toString('base64url'),
+  }, 'Vista local grande ficticia');
+  const open = { accion: 'abrir', carpeta: site, proyecto: project };
+  const view = await client.call('vista', open);
+  const get = (asset, options) => fetch(new URL(asset, view.url), { signal: AbortSignal.timeout(5000), ...options });
+  const homepage = await get('');
+  const csp = homepage.headers.get('content-security-policy');
+  assert.match(csp, /img-src 'self' data: blob:;/u);
+  assert.match(csp, /connect-src 'self' blob:;/u);
+  assertViewHtml(await homepage.text(), firstMap);
+  assert.equal(await (await get('mapa.css')).text(), mapStyle);
+  for (const hidden of ['.gitignore', 'recursos/.cache/nota.txt', 'recursos/node_modules/interno.js']) {
+    const res = await get(hidden);
+    assert.equal(res.status, 404);
+    await res.arrayBuffer();
+  }
+  assert.equal(await fs.readFile(path.join(site, '.gitignore'), 'utf8'), 'generado/');
+  const model = await get('recursos/257.glb');
+  assert.equal(model.headers.get('content-type'), 'model/gltf-binary');
+  assert.equal(await model.text(), '257');
+
+  // Each read belongs to the published revision even if the source changes.
+  await fs.writeFile(path.join(site, media), 'otra revisión');
+  const head = await get(media, { method: 'HEAD' });
+  assert.equal(head.headers.get('content-type'), 'video/mp4');
+  assert.equal(Number(head.headers.get('content-length')), original.length);
+  const [slice, suffix] = await Promise.all([
+    get(media, { headers: { Range: 'bytes=139999-140025' } }),
+    get(media, { headers: { Range: 'bytes=-19' } }),
+  ]);
+  assert.equal(slice.status, 206);
+  assert.equal(slice.headers.get('content-range'), 'bytes 139999-140025/' + original.length);
+  assert.deepEqual(Buffer.from(await slice.arrayBuffer()), original.subarray(139999, 140026));
+  assert.equal(suffix.status, 206);
+  assert.deepEqual(Buffer.from(await suffix.arrayBuffer()), original.subarray(-19));
+  const missing = await get(media, { headers: { Range: 'bytes=' + original.length + '-' } });
+  assert.equal(missing.status, 416);
+  assert.equal(missing.headers.get('content-range'), 'bytes */' + original.length);
+  assert.deepEqual(Buffer.from(await (await get(media)).arrayBuffer()), original);
+
+  const update = { ...open, id: view.id, version: view.version };
+  const index = path.join(site, 'index.html');
+  await fs.rename(index, path.join(site, 'otro.html'));
+  await client.call('vista', update, 'INVALID_VIEW');
+  assertViewHtml(await (await get('')).text(), firstMap);
+  await fs.rename(path.join(site, 'otro.html'), index);
+  const next = await client.call('vista', update);
+  assert.equal(next.url, view.url);
+  assert.notEqual(next.huella, view.huella);
+  assert.equal(await (await get(media)).text(), 'otra revisión');
+  await client.call('vista', { accion: 'cerrar', id: next.id });
+  assert.deepEqual((await fs.readdir(temp)).filter(n => n.startsWith('mind-vista-')), []);
+});

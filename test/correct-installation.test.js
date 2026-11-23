@@ -43,9 +43,17 @@ test('corregir verifica confianza existente, migra copia real, conserva configur
  await fs.copyFile(path.join(repository,'packaging','iniciadores','arranque.cjs'),path.join(source,'Sistema','arranque.cjs'));
  await write(source,'Sistema/Programa/Motor/src/update-channel.json',JSON.stringify({repository:'fixture/mind',url:'https://github.com/fixture/mind/releases/latest/download/stable.json',publicKey:trusted}));
  await fs.mkdir(path.dirname(runtime.nodeExecutable),{recursive:true});await fs.copyFile(process.execPath,runtime.nodeExecutable,constants.COPYFILE_FICLONE);await fs.chmod(runtime.nodeExecutable,0o755);
- const pythonCommand=process.env.MIND_PYTHON??process.env.MIND_TEST_PYTHON??(process.platform==='win32'?'python':'python3');
- const pythonHome=(await run(pythonCommand,['-I','-B','-c','import sys;print(sys.base_prefix)'])).stdout.trim();
- await fs.cp(pythonHome,runtime.pythonDirectory,{recursive:true,filter:entry=>entry===pythonHome||keepPythonPath(path.relative(pythonHome,entry).split(path.sep).join('/'))});
+ const pythonCommand=process.env.MIND_TEST_BUNDLED_PYTHON??process.env.MIND_PYTHON??process.env.MIND_TEST_PYTHON??(process.platform==='win32'?'python':'python3');
+ if (process.platform === 'win32') {
+  const pythonHome=(await run(pythonCommand,['-I','-B','-c','import sys;print(sys.base_prefix)'])).stdout.trim();
+  await fs.cp(pythonHome,runtime.pythonDirectory,{recursive:true,filter:entry=>entry===pythonHome||keepPythonPath(path.relative(pythonHome,entry).split(path.sep).join('/'))});
+ } else {
+  // El prefijo del Python del anfitrión puede ser /usr y contiene enlaces ajenos a la entrega.
+  const exe=(await run(pythonCommand,['-I','-B','-c','import sys;print(sys.executable)'])).stdout.trim();
+  await fs.mkdir(path.dirname(runtime.pythonExecutable),{recursive:true});
+  const quoted = "'" + exe.replaceAll("'", "'\\''") + "'";
+  await fs.writeFile(runtime.pythonExecutable, '#!/bin/sh\nexec ' + quoted + ' "$@"\n', {mode:0o755});
+ }
  const signed=await manifestAt(source,{modern:true,revision:1});const envelope=createSignedPackageDescriptor({manifest:signed.manifest,manifestBytes:signed.bytes,privateKey});
  await write(source,'Sistema/entrega-firmada.json',JSON.stringify(envelope));
  const profileFiles=[path.join(process.env.CODEX_HOME??path.join(os.homedir(),'.codex'),'AGENTS.md'),path.join(os.homedir(),'.claude','CLAUDE.md'),path.join(os.homedir(),'.gemini','GEMINI.md')];

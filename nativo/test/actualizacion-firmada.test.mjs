@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { auxiliaryProcesses } from './process-children.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -90,6 +91,12 @@ test('1.0.4-r3 → 1.0.5 con Ed25519, quietud, Base intacta y vuelta a r3', {
     const response=await f.command(f.env.ComSpec||'cmd.exe',['/d','/c','call',launcher,'version']);
     assert.equal(JSON.parse(response.stdout).mind,'1.0.5');
   }
+  for (const topic of ['vista', 'servicio']) {
+    const help = (await cli('ayuda', topic)).stdout;
+    assert.match(help, new RegExp(topic + ' abrir', 'u'));
+    assert.equal((await cli(topic, '--help')).stdout, help);
+    assert.equal((await cli(topic, 'abrir', '-h')).stdout, help);
+  }
   const startup = performance.now();
   const awakened = await f.command(f.installed,['producto','despertar'],{timeout:15000});
   assert.equal(JSON.parse(awakened.stdout).estado,'listo');
@@ -98,13 +105,7 @@ test('1.0.4-r3 → 1.0.5 con Ed25519, quietud, Base intacta y vuelta a r3', {
   assert.equal(native.health.backend,'rust');
   assert.equal(native.health.packageRevision,1);
   assert.notEqual(native.health.pid,old.health.pid);
-  if(process.platform==='win32'){
-    const ps=path.join(f.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
-    const children=await f.command(ps,['-NoProfile','-NonInteractive','-Command',
-      'Get-CimInstance Win32_Process -Filter "ParentProcessId = '+native.health.pid+
-      '" | Where-Object Name -ne "conhost.exe" | Select-Object -ExpandProperty Name']);
-    assert.equal(children.stdout.trim(),'');
-  }
+  if (process.platform === 'win32') assert.deepEqual(await auxiliaryProcesses(native.health.pid), []);
   const client=await connect(native);
   assert.equal((await client.list()).tools.length,13);
   assert.equal((await client.call('retomar',{id})).conversacion.id,id);
@@ -127,6 +128,22 @@ test('1.0.4-r3 → 1.0.5 con Ed25519, quietud, Base intacta y vuelta a r3', {
   assert.equal((await fetch(view.url)).status,200);
   await delay(view.inactividad_ms+500);
   assert.equal((await fetch(view.url)).status,404);
+  const scoped = JSON.parse((await cli('vista','abrir','--carpeta',f.seeded.scope,'--proyecto','Órbita','--mantener-abierta')).stdout);
+  assert.equal((await fetch(scoped.url)).status,200);
+  assert.equal((await client.call('vista',{accion:'consultar',id:scoped.id})).id,scoped.id);
+  const kept = JSON.parse((await cli('vista','mantener','--id',scoped.id,'--mantener-abierta')).stdout);
+  assert.equal(kept.mantener_abierta, true);
+  await cli('vista','cerrar','--id',scoped.id);
+  assert.equal((await fetch(scoped.url)).status,404);
+  const help = detalle => client.call('mind', {operacion:'ayuda',detalle});
+  const queryHelp = await help('vista_consultar');
+  assert.deepEqual(queryHelp.parametros.required,['id']);
+  assert.deepEqual(Object.keys(queryHelp.parametros.properties),['id']);
+  const openHelp = await help('vista_abrir');
+  assert.ok(openHelp.parametros.properties.carpeta);
+  assert.equal(openHelp.parametros.properties.accion,undefined);
+  const readHelp = await help('leer');
+  assert.deepEqual(readHelp.parametros.required,['ruta']);
   await client.close();
 
   const profile=path.join(f.home,'.codex','config.toml');

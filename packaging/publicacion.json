@@ -2,6 +2,7 @@
   "version": 1,
   "paquete": "universal",
   "mindVersion": "1.0.5",
+  "packageRevision": 2,
   "plataformas": [
     "win32-x64",
     "win32-arm64",

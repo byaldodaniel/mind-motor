@@ -523,12 +523,15 @@ impl Motor {
                     }
                     Err(err) => return Err(err),
                 };
+                scan::open_directory(&folder.root, "")
+                    .map_err(|code| Fault::new(code, "No se pudo abrir la carpeta autorizada de la vista."))?;
                 let folder_dir = view_cli::directory(Path::new(&folder.root))
                     .map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
                 let (output_dir, rel_prefix): (PathBuf, Vec<String>) = if let Some(rel) = ruta_eff.as_deref() {
                     let scope = access::resolve_file(&self.base, Some(&folder.id), rel, &["leer"])?;
-                    let sub = view_cli::directory(&folder_dir.join(scope.relative.replace('/', std::path::MAIN_SEPARATOR_STR)))
-                        .map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
+                    scan::open_directory(&folder.root, &scope.relative)
+                        .map_err(|code| Fault::new(code, "No se pudo abrir la subcarpeta de la vista."))?;
+                    let sub = folder_dir.join(scope.relative.replace('/', std::path::MAIN_SEPARATOR_STR));
                     (sub, scope.relative.split('/').map(str::to_owned).collect())
                 } else {
                     (folder_dir.clone(), Vec::new())
@@ -563,8 +566,10 @@ impl Motor {
                     parts.extend(child_rel.split('/'));
                     access::excluded(&folder, &parts)
                 };
-                let assets = view_cli::snapshot_filtered(&output_dir, Some(&skip))
-                    .map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
+                let _slot = self.views.reserve().map_err(|(_, code)| view_fault(code))?;
+                let snapshot = crate::views::Snapshot::directory(
+                    &folder.root, &rel_prefix.join("/"), &skip, project, copy_id, git_before.as_ref().map(Into::into),
+                ).map_err(|msg| Fault::new("INVALID_VIEW", msg))?;
                 if has_git {
                     let git_after = Handle::current()
                         .block_on(view_cli::git_info(&folder_dir))
@@ -573,11 +578,12 @@ impl Motor {
                         return Err(Fault::new("INVALID_VIEW", "La copia de Git cambió al preparar la vista. Vuelve a intentarlo."));
                     }
                 }
-                let _ = access::resolve_folder(&self.base, Some(&folder.id), &["leer"])?;
+                if access::resolve_folder(&self.base, Some(&folder.id), &["leer"])? != folder {
+                    return Err(Fault::new("ACCESS_CHANGED", "La autorización o las exclusiones cambiaron al preparar la vista."));
+                }
                 self.owner.check().map_err(filesystem)?;
-                let publication = view_cli::build_publication(project, copy_id, git_before, assets, keep_open);
                 Handle::current()
-                    .block_on(self.views.publish_input(publication, previous))
+                    .block_on(self.views.publish_snapshot(snapshot, previous, keep_open))
                     .map(|(_, _, _, payload)| payload)
                     .map_err(|(_, code)| view_fault(code))
             }
@@ -1266,13 +1272,33 @@ fn catalog_help(fields: &Map<String, Value>) -> Result<Value, Fault> {
             "herramienta": if read_only { "mind" } else { "mind_cambiar" },
             "titulo": title,
         });
+        let base_op = match op {
+            "vista_abrir" | "vista_consultar" | "vista_cerrar" => "vista",
+            _ => op,
+        };
+        if let Some(mut definition) = crate::motor_mcp::definition(base_op) {
+            let mut schema = definition["inputSchema"].take();
+            if base_op != op {
+                let fields = schema["properties"].as_object_mut().expect("vista declares object properties");
+                fields.remove("accion");
+                if op == "vista_abrir" {
+                    schema.as_object_mut().unwrap().remove("required");
+                } else {
+                    fields.retain(|key, _| key == "id");
+                    schema["required"] = json!(["id"]);
+                }
+            }
+            help["descripcion"] = definition["description"].take();
+            help["parametros"] = schema;
+        }
+        if op == "vista" { help["con_consultar"] = json!("mind"); }
         if op == "destino_resolver" { help["con_preparar"] = json!("mind_cambiar"); }
         return Ok(help);
     }
     let list = |wanted: bool| -> Vec<Value> {
         CATALOG_OPS
             .iter()
-            .filter(|(op, _, ro)| *ro == wanted || *op == "destino_resolver")
+            .filter(|(op, _, ro)| *ro == wanted || matches!(*op, "destino_resolver" | "vista"))
             .map(|(op, title, _)| json!({"nombre": op, "titulo": title}))
             .collect()
     };

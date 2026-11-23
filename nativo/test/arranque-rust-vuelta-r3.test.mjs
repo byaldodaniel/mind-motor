@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { auxiliaryProcesses } from './process-children.mjs';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs/promises';
@@ -258,28 +259,6 @@ function sameExecutable(actual, expected) {
   if (typeof actual !== 'string') return false;
   const normalize = value => process.platform === 'win32' ? path.normalize(value).toLowerCase() : path.normalize(value);
   return normalize(actual) === normalize(expected);
-}
-
-async function auxiliaryProcesses(pid) {
-  assert.ok(Number.isSafeInteger(pid) && pid > 0);
-  if (process.platform === 'win32') {
-    const system = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-    const powershell = path.join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const command = [
-      "$mindTestOwner = Get-CimInstance Win32_Process -Filter 'ProcessId = " + pid + "' -ErrorAction Stop",
-      "if (-not $mindTestOwner) { throw 'El Motor de prueba no existe' }",
-      "Get-CimInstance Win32_Process -Filter 'ParentProcessId = " + pid + "' -ErrorAction Stop |",
-      '  Where-Object { $_.CreationDate -ge $mindTestOwner.CreationDate } |',
-      '  Select-Object ProcessId,Name,ExecutablePath | ConvertTo-Json -Compress',
-    ].join('\n');
-    const { stdout } = await run(powershell, ['-NoProfile', '-NonInteractive', '-Command', command], options);
-    const children = stdout.trim() ? [JSON.parse(stdout)].flat() : [];
-    const console = path.join(system, 'conhost.exe').toLowerCase();
-    return children.filter(item => item.ExecutablePath?.toLowerCase() !== console);
-  }
-  const { stdout } = await run('ps', ['-eo', 'pid=,ppid='], options);
-  return stdout.trim().split('\n').map(line => line.trim().split(/\s+/u).map(Number))
-    .filter(([, parent]) => parent === pid).map(([child]) => child);
 }
 
 function fields(value) {

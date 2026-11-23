@@ -403,11 +403,15 @@ pub(crate) fn index_summary(base: &str, folder: &Folder) -> Value {
     }
 }
 
-fn scan_folder_tree(folder: &Folder) -> Result<(Vec<Value>, Vec<Value>), Fault> {
+fn scan_folder_tree(folder: &Folder, prefix: &str, depth: usize) -> Result<(Vec<Value>, Vec<Value>), Fault> {
     let mut entries = Vec::new();
     let mut issues = Vec::new();
-    let mut queue = VecDeque::from([String::new()]);
-    while let Some(rel) = queue.pop_front() {
+    // Walk only the named ancestors until the requested directory is reached.
+    // Use the names returned by the scanner so aliases cannot bypass exclusions.
+    let mut reached = prefix.is_empty();
+    let mut queue = VecDeque::from([(String::new(), 0usize)]);
+    while let Some((rel, level)) = queue.pop_front() {
+        let inside = reached;
         let remaining = MAX_INDEX_ENTRIES.saturating_sub(entries.len()).max(1);
         match scan::scan_directory(&folder.root, &rel, remaining + 1) {
             Ok((items, complete)) => {
@@ -428,13 +432,20 @@ fn scan_folder_tree(folder: &Folder) -> Result<(Vec<Value>, Vec<Value>), Fault> 
                     if access::excluded(folder, &parts) {
                         continue;
                     }
+                    let kind = item["type"].as_str().unwrap_or("other");
+                    if !inside {
+                        if kind == "directory" && (path == prefix || prefix.strip_prefix(&path).is_some_and(|tail| tail.starts_with('/'))) {
+                            reached = path == prefix;
+                            queue.push_back((path, 0));
+                        }
+                        continue;
+                    }
                     if entries.len() >= MAX_INDEX_ENTRIES {
                         return Err(Fault::new(
                             "INDEX_LIMIT_EXCEEDED",
                             "La carpeta supera el límite de entradas indexables.",
                         ));
                     }
-                    let kind = item["type"].as_str().unwrap_or("other");
                     let size = if kind == "file" {
                         json!(item["size"].as_u64().unwrap_or(0))
                     } else {
@@ -459,14 +470,14 @@ fn scan_folder_tree(folder: &Folder) -> Result<(Vec<Value>, Vec<Value>), Fault> 
                         "state": "indexed",
                         "type": kind,
                     }));
-                    if kind == "directory" {
-                        queue.push_back(path);
+                    if kind == "directory" && level + 1 < depth {
+                        queue.push_back((path, level + 1));
                     }
                 }
             }
             Err(scan::ScanError(code, _)) => {
-                if rel.is_empty() {
-                    return Err(Fault::new(code, "La carpeta autorizada no existe o no es accesible."));
+                if rel.is_empty() || !inside || rel == prefix {
+                    return Err(Fault::new(code, "La carpeta solicitada no existe o no es accesible."));
                 }
                 if let Some(dir_entry) = entries.iter_mut().find(|e| e["path"].as_str() == Some(rel.as_str())) {
                     dir_entry["state"] = json!("not-listed");
@@ -475,6 +486,9 @@ fn scan_folder_tree(folder: &Folder) -> Result<(Vec<Value>, Vec<Value>), Fault> 
                 issues.push(json!({"code": code, "path": rel}));
             }
         }
+    }
+    if !reached {
+        return Err(Fault::new("PATH_NOT_INDEXED", "La subcarpeta no figura como carpeta accesible."));
     }
     entries.sort_by(|left, right| {
         let a = left["path"].as_str().unwrap_or_default();
@@ -609,7 +623,7 @@ fn reconcile_index_detailed(
         .as_ref()
         .filter(|(data, _)| valid_persisted_index(data, folder))
         .map(|(data, _)| data);
-    let (mut entries, issues) = scan_folder_tree(folder)?;
+    let (mut entries, issues) = scan_folder_tree(folder, "", usize::MAX)?;
     let (stats, pending_diff) = if let Some(prev_data) = same_gen_prev {
         let (carried, disappeared) = missing_index_entries(folder, prev_data, &entries, &issues);
         if !carried.is_empty() {
@@ -2757,49 +2771,27 @@ pub(crate) fn explore_folder(
     let prefix = optional(args, "ruta")?.unwrap_or("").trim_matches('/').to_owned();
     let depth = limit(args, "profundidad", 1, 8)?.unwrap_or(1) as usize;
     let max_entries = limit(args, "limite", 1, 1000)?.unwrap_or(200) as usize;
-    let index = match ensure_folder_index(base, &folder, confirm_owner) {
-        Ok(index) => index,
+    let (entries, _) = match scan_folder_tree(&folder, &prefix, depth) {
+        Ok(result) => result,
+        Err(error) if error.code == "PATH_NOT_INDEXED" => return Err(error),
         Err(error) => {
             return Ok(json!({
-                "carpeta": folder.id,
-                "estado": "no-disponible",
-                "codigo": error.code,
-                "entradas": [],
+                "carpeta": folder.id, "estado": "no-disponible",
+                "codigo": error.code, "entradas": [],
             }));
         }
     };
-    let entries = index["entries"].as_array().cloned().unwrap_or_default();
-    let base_depth = if prefix.is_empty() { 0 } else { prefix.split('/').count() };
-    if !prefix.is_empty()
-        && !entries
-            .iter()
-            .any(|e| e["path"].as_str() == Some(prefix.as_str()) && e["type"] == "directory")
-    {
-        return Err(Fault::new(
-            "PATH_NOT_INDEXED",
-            "La subcarpeta no figura en el índice como carpeta.",
-        ));
+    confirm_owner().map_err(|code| Fault::new(code, "Cambió el propietario de la Base."))?;
+    if access::resolve_folder(base, Some(&folder.id), &["encontrar"])? != folder {
+        return Err(Fault::new("ACCESS_NOT_GRANTED", "La autorización de la carpeta cambió durante la consulta."));
     }
-    let prefix_slash = format!("{prefix}/");
-    let matching: Vec<Value> = entries
-        .iter()
-        .filter(|entry| {
-            let Some(path) = entry["path"].as_str() else { return false };
-            let parts: Vec<&str> = path.split('/').collect();
-            if access::excluded(&folder, &parts) {
-                return false;
-            }
-            (prefix.is_empty() || path.starts_with(&prefix_slash)) && parts.len().saturating_sub(base_depth) <= depth
-        })
-        .map(|entry| entry_out(&folder, entry))
-        .collect();
-    let total = matching.len();
-    let shown: Vec<Value> = matching.into_iter().take(max_entries).collect();
+    let total = entries.len();
+    let shown: Vec<Value> = entries.iter().take(max_entries).map(|entry| entry_out(&folder, entry)).collect();
     Ok(json!({
         "carpeta": folder.id,
         "ruta": prefix,
         "ruta_absoluta": absolute_path(&folder.root, &prefix),
-        "indexado": index["updatedAt"],
+        "indexado": now_iso()?,
         "total": total,
         "truncado": total > max_entries,
         "entradas": shown,

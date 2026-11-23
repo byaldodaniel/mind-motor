@@ -189,11 +189,18 @@ pub(crate) fn loopback() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(5)).build().map_err(|error| fs_error("UPDATE_CONNECTION_FAILED", error))
 }
 pub(crate) async fn rpc(client: &reqwest::Client, connection: &bridge::Connector, value: &Value) -> Result<Value> {
-    let reply = client.post(format!("http://127.0.0.1:{}/rpc", connection.port)).bearer_auth(&connection.token)
-        .json(value).send().await.and_then(reqwest::Response::error_for_status)
-        .map_err(|error| fs_error("UPDATE_CONNECTION_FAILED", error))?;
+    let mut request = client.post(format!("http://127.0.0.1:{}/rpc", connection.port)).bearer_auth(&connection.token);
+    // Capturar archivos o leer una unidad sincronizada puede tardar más que una consulta de quietud.
+    let connection_error = if value["accion"] == "herramienta" {
+        request = request.timeout(Duration::from_secs(600));
+        "MOTOR_UNAVAILABLE"
+    } else {
+        "UPDATE_CONNECTION_FAILED"
+    };
+    let reply = request.json(value).send().await.and_then(reqwest::Response::error_for_status)
+        .map_err(|error| fs_error(connection_error, error))?;
     let body = bounded(reply, 16 * 1024 * 1024).await?;
-    serde_json::from_slice(&body).map_err(|error| fs_error("UPDATE_CONNECTION_FAILED", error))
+    serde_json::from_slice(&body).map_err(|error| fs_error(connection_error, error))
 }
 
 pub(crate) fn internet(timeout: Duration) -> Result<reqwest::Client> {

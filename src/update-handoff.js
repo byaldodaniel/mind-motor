@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { getVerifiedOffer, downloadUpdate, installDownloaded } from './auto-update.js';
+import { getVerifiedOffer, downloadUpdate, installDownloaded, removeDownload } from './auto-update.js';
 import { releaseOf, compareReleases } from './package-descriptor.js';
 import { productPaths, productRuntime } from './layout.js';
 import { readManifestFile, hashFile } from './product-files.js';
@@ -54,10 +54,8 @@ async function reconcileUpdateState(root, record, committed, pythonExecutable) {
     const state = await readUpdateState(root) ?? {};
     let cleanupError = null;
     if (committed) {
-      for (const suffix of ['', '.parcial']) {
-        try { await fs.rm(path.join(paths.downloads, record.expectedPackageSha256 + '.zip' + suffix), { force: true }); }
-        catch (error) { cleanupError = error; }
-      }
+      try { await removeDownload(paths, record.expectedPackageSha256); }
+      catch (error) { cleanupError = error; }
     }
     const error = cleanupError ?? record.error;
     const details = error ? classifyUpdateError(error) : null;

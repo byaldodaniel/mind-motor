@@ -44,13 +44,63 @@ fn cwd() -> Option<String> { std::env::current_dir().ok().and_then(|path| physic
 pub(crate) async fn run(args: &[String]) -> std::result::Result<(), String> {
     dispatch(args).await.map_err(|error| error.to_string())
 }
+const REGISTERED_VIEW: &str = "vista abrir --carpeta RUTA_O_ID [--ruta SUBCARPETA] [--proyecto NOMBRE] [--id UUID --version N] [--mantener-abierta | --no-mantener-abierta]";
+
+fn command_help(command: &str) -> Result<()> {
+    match command {
+        "vista" => {
+            println!("{REGISTERED_VIEW}\nvista mantener --id UUID --mantener-abierta | --no-mantener-abierta");
+            println!("{}", crate::view_cli::USAGE.replace("--base ABS ", ""));
+            println!("Abrir devuelve la URL y el ID. Usa ese ID para consultar, mantener o cerrar.");
+        }
+        "servicio" => println!("{}", crate::service_cli::USAGE.replace("--base ABS ", "")),
+        "" => println!("Mind 1.0.5\ninicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autorizar, vista, servicio y version.\nUsa mind ayuda vista o mind ayuda servicio para ver sus opciones."),
+        _ => return Err(fail("INVALID_ARGUMENTS", "Consulta mind ayuda para ver las órdenes disponibles.")),
+    }
+    Ok(())
+}
+
+fn registered_view(args: &[String]) -> Result<Option<Value>> {
+    let Some((action, options)) = args.split_first() else { return Ok(None) };
+    if !(action == "mantener" || (action == "abrir" && options.iter().any(|arg| arg == "--carpeta"))) {
+        return Ok(None);
+    }
+    let mut fields = json!({"accion": action});
+    let mut options = options.iter();
+    while let Some(flag) = options.next() {
+        let (key, value) = match flag.as_str() {
+            "--mantener-abierta" | "--no-mantener-abierta" => ("mantener_abierta", json!(flag == "--mantener-abierta")),
+            "--carpeta" | "--ruta" | "--proyecto" | "--id" | "--version" => {
+                let raw = options.next().ok_or_else(|| fail("INVALID_ARGUMENTS", format!("Falta el valor de {flag}.")))?;
+                let value = if flag == "--version" {
+                    json!(raw.parse::<u64>().map_err(|_| fail("INVALID_ARGUMENTS", "Indica una versión numérica de vista."))?)
+                } else { json!(raw) };
+                (&flag[2..], value)
+            }
+            _ => return Err(fail("INVALID_ARGUMENTS", "Opción desconocida. Consulta mind ayuda vista.")),
+        };
+        if fields.get(key).is_some() { return Err(fail("INVALID_ARGUMENTS", format!("Opción repetida: {flag}."))); }
+        fields[key] = value;
+    }
+    Ok(Some(fields))
+}
+
 async fn dispatch(args: &[String]) -> Result<()> {
     let operation = args.first().map(String::as_str).unwrap_or("inicio");
-    if matches!(operation, "ayuda" | "--help") {
-        println!("Mind 1.0.5
-Inicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autorizar, vista, servicio y version.");
-        return Ok(());
+    let tail = args.get(1..).unwrap_or_default();
+    if matches!(operation, "ayuda" | "--help" | "-h") {
+        return match tail {
+            [] => command_help(""),
+            [topic] => command_help(topic),
+            _ => Err(fail("INVALID_ARGUMENTS", "Usa mind ayuda [vista|servicio].")),
+        };
     }
+    if matches!(operation, "vista" | "servicio")
+        && (tail.is_empty() || matches!(tail, [help] | [_, help] if matches!(help.as_str(), "ayuda" | "--help" | "-h")))
+    {
+        return command_help(operation);
+    }
+    let view = if operation == "vista" { registered_view(tail)? } else { None };
     let product = Product::open()?;
     if operation == "version" {
         println!("{}", json!({"mind":product.release.mind_version,"revision":product.release.package_revision,"motor":"rust","destino":target()}));
@@ -92,7 +142,7 @@ Inicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autor
         println!("{answer}");
         return Ok(());
     }
-    if matches!(operation, "vista" | "servicio") {
+    if matches!(operation, "vista" | "servicio") && view.is_none() {
         let mut routed = args[1..].to_vec();
         if !matches!(routed.first().map(String::as_str), Some("receta")) {
             product.connect(&client).await?;
@@ -101,11 +151,11 @@ Inicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autor
         return if operation == "vista" { crate::view_cli::run(&routed).await } else { crate::service_cli::run(&routed).await }
             .map_err(|error| fs_error("PRODUCT_COMMAND_FAILED", error));
     }
-    let tail = args.get(1..).unwrap_or_default();
     let connection = product.connect(&client).await?;
     let answer = match (operation, tail) {
         ("despertar", []) => json!({"estado":"listo","pid":connection.health["pid"],"puerto":connection.port}),
         ("estado" | "inicio", []) => update::rpc(&client, &connection, &json!({"accion":operation,"cwd":cwd()})).await?,
+        ("vista", _) => update::rpc(&client, &connection, &json!({"accion":"herramienta","tool":"vista","args":view,"cwd":cwd()})).await?,
         ("herramienta", [tool, raw]) => {
             let args: Value = serde_json::from_str(raw).map_err(|error| fs_error("INVALID_ARGUMENTS", error))?;
             update::rpc(&client, &connection, &json!({"accion":"herramienta","tool":tool,"args":args,"cwd":cwd()})).await?
@@ -118,7 +168,7 @@ Inicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autor
     if answer["isError"] == true || answer["ok"] == false {
         return Err(fail("PRODUCT_COMMAND_FAILED", answer.get("value").unwrap_or(&answer).to_string()));
     }
-    println!("{}", if matches!(operation, "herramienta" | "estado") { answer.get("value").unwrap_or(&answer) } else { &answer });
+    println!("{}", if matches!(operation, "herramienta" | "estado" | "vista") { answer.get("value").unwrap_or(&answer) } else { &answer });
     Ok(())
 }
 

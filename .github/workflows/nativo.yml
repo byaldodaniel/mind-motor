@@ -109,14 +109,12 @@ jobs:
             export MIND_PYTHON="$(command -v python3)"
           fi
           export MIND_NATIVE_EXE="$(node -p 'require("node:path").resolve(process.argv[1])' "salida/${{ matrix.destino }}/${{ matrix.exe }}")"
-          node --test --test-concurrency=1 nativo/test/contrato-r3.test.mjs nativo/test/bridge-contract.test.mjs nativo/test/bridge-boundary.test.mjs nativo/test/invalid-mcp.test.mjs nativo/test/scan.test.mjs \
-            nativo/test/archivos-volumen.test.mjs nativo/test/clientes-conexion.test.mjs \
-            nativo/test/arranque-rust-vuelta-r3.test.mjs nativo/test/servicios-sqlite.test.mjs \
-            nativo/test/actualizacion-firmada.test.mjs
+          node --test --test-concurrency=1 nativo/test/*.test.mjs
           node -e "const f='salida/${{ matrix.destino }}/resultado.json';const j=JSON.parse(require('fs').readFileSync(f));j.ejecutado=true;require('fs').writeFileSync(f,JSON.stringify(j,null,2))"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: nativo-${{ matrix.destino }}
-          path: salida/${{ matrix.destino }}
+          # El ZIP del artefacto conserva el directorio del destino al fusionar las seis descargas.
+          path: salida/
           if-no-files-found: warn

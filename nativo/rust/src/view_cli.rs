@@ -21,10 +21,10 @@ use uuid::Uuid;
 use crate::{
     bridge::{base_id, regular_json},
     build_recipe::{BuildError, Recipe},
-    views::{AssetInput, Git as ViewGit, Publication as ViewPublication, MAX_VIEW_BYTES, MAX_VIEW_FILES},
+    views::{Git as ViewGit, MAX_VIEW_BYTES, MAX_VIEW_FILES},
 };
 
-const USAGE: &str = "vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS [--id UUID --version N] [--mantener-abierta | --no-mantener-abierta]\nvista consultar|cerrar --base ABS --id UUID\nvista receta --proyecto NOMBRE --copia ABS --receta ABS\nvista construir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]";
+pub(crate) const USAGE: &str = "vista abrir --base ABS --proyecto NOMBRE --copia ABS --contenido ABS [--id UUID --version N] [--mantener-abierta | --no-mantener-abierta]\nvista consultar|cerrar --base ABS --id UUID\nvista receta --proyecto NOMBRE --copia ABS --receta ABS\nvista construir --base ABS --proyecto NOMBRE --copia ABS --receta ABS --autorizar SHA256 [--id UUID]";
 const MAX_PATH: usize = 1024;
 const MAX_DIRECTORIES: usize = 256;
 
@@ -35,9 +35,9 @@ pub(crate) struct Git {
     cambios: bool,
 }
 
-impl From<Git> for ViewGit {
-    fn from(value: Git) -> Self {
-        Self { rama: value.rama, revision: value.revision, cambios: value.cambios }
+impl From<&Git> for ViewGit {
+    fn from(value: &Git) -> Self {
+        Self { rama: value.rama.clone(), revision: value.revision.clone(), cambios: value.cambios }
     }
 }
 
@@ -45,12 +45,6 @@ impl From<Git> for ViewGit {
 pub(crate) struct Asset {
     pub(crate) ruta: String,
     pub(crate) base64: String,
-}
-
-impl From<Asset> for AssetInput {
-    fn from(value: Asset) -> Self {
-        Self { ruta: value.ruta, base64: value.base64 }
-    }
 }
 
 #[derive(Serialize)]
@@ -260,7 +254,7 @@ pub(crate) fn directory(path: &Path) -> Result<PathBuf, String> {
     path.canonicalize().map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn route_name(name: &str) -> bool {
+pub(crate) fn route_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
     !name.starts_with('.')
         && !name.ends_with(['.', ' '])
@@ -271,10 +265,6 @@ fn route_name(name: &str) -> bool {
 }
 
 fn snapshot(root: &Path) -> Result<Vec<Asset>, String> {
-    snapshot_filtered(root, None)
-}
-
-pub(crate) fn snapshot_filtered(root: &Path, skip: Option<&dyn Fn(&str) -> bool>) -> Result<Vec<Asset>, String> {
     let mut directories = vec![String::new()];
     let mut found_directories = 1;
     let mut assets = Vec::new();
@@ -285,7 +275,7 @@ pub(crate) fn snapshot_filtered(root: &Path, skip: Option<&dyn Fn(&str) -> bool>
             let entry = entry.map_err(|error| format!("No se pudo enumerar el contenido: {error}"))?;
             let filename = entry.file_name().into_string().map_err(|_| "El contenido debe tener nombres Unicode.")?;
             let child_relative = if relative.is_empty() { filename.clone() } else { format!("{relative}/{filename}") };
-            if skip.is_some_and(|pred| pred(&child_relative)) {
+            if filename.starts_with('.') {
                 continue;
             }
             if !route_name(&filename) {
@@ -341,16 +331,29 @@ pub(crate) fn snapshot_filtered(root: &Path, skip: Option<&dyn Fn(&str) -> bool>
     Ok(assets)
 }
 
-pub(crate) fn build_publication(
-    project: String, copy_id: String, git: Option<Git>, assets: Vec<Asset>, mantener_abierta: Option<bool>,
-) -> ViewPublication {
-    ViewPublication {
-        proyecto: project,
-        copia: copy_id,
-        git: git.map(Into::into),
-        archivos: assets.into_iter().map(Into::into).collect(),
-        mantener_abierta,
+pub(crate) fn read_asset(
+    mut file: File, name: &str, size: usize, buffer: &mut [u8],
+    mut accept: impl FnMut(&[u8]) -> io::Result<()>,
+) -> Result<(), String> {
+    let error = |err: io::Error| format!("{name}: {err}");
+    let changed = || format!("{name} cambió durante la lectura. Vuelve a intentarlo.");
+    let initial = file.metadata().map_err(error)?;
+    if !initial.is_file() || is_link(&initial) || initial.len() != size as u64 {
+        return Err(changed());
     }
+    let mut remaining = size;
+    while remaining > 0 {
+        let wanted = remaining.min(buffer.len());
+        let n = file.read(&mut buffer[..wanted]).map_err(error)?;
+        if n == 0 { return Err(changed()); }
+        accept(&buffer[..n]).map_err(error)?;
+        remaining -= n;
+    }
+    let final_state = file.metadata().map_err(error)?;
+    if final_state.len() != initial.len() || final_state.modified().ok() != initial.modified().ok() {
+        return Err(changed());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

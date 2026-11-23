@@ -6,8 +6,8 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited, StreamBody};
-use hyper::{body::{Body as _, Frame, Incoming}, header, Method, Request, Response, StatusCode};
+use http_body_util::{BodyExt, Full, Limited};
+use hyper::{body::{Body as _, Incoming}, header, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -15,6 +15,10 @@ use tokio::sync::{Mutex, MutexGuard, Semaphore};
 use uuid::Uuid;
 
 use crate::{host::{full, Body}, MAX_MESSAGE};
+
+#[path = "view_storage.rs"]
+mod storage;
+use storage::AssetBytes;
 
 pub(crate) const MAX_VIEW_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_VIEW_FILES: usize = 256;
@@ -25,7 +29,7 @@ const DEFAULT_IDLE_MS: u64 = 1_800_000;
 const MIN_IDLE_MS: u64 = 1_000;
 const ACTIVITY_PATH: &str = "_mind/actividad";
 const HTML_MIME: &str = "text/html; charset=utf-8";
-const VIEW_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const VIEW_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self'; connect-src 'self' blob:; object-src 'none'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -52,11 +56,12 @@ pub(crate) struct AssetInput {
     pub(crate) base64: String,
 }
 
-struct Snapshot {
+pub(crate) struct Snapshot {
     project: String,
     copy: String,
     git: Option<Git>,
-    assets: BTreeMap<String, Bytes>,
+    assets: BTreeMap<String, AssetBytes>,
+    on_disk: bool,
     fingerprint: String,
     size: usize,
 }
@@ -163,7 +168,7 @@ impl Snapshot {
                 return Err(too_large);
             }
             size += bytes.len();
-            assets.insert(file.ruta, Bytes::from(bytes));
+            assets.insert(file.ruta, bytes);
         }
         if !assets.contains_key("index.html") {
             return Err(invalid);
@@ -180,7 +185,8 @@ impl Snapshot {
             project: input.proyecto,
             copy: input.copia,
             git: input.git,
-            assets,
+            assets: assets.into_iter().map(|(path, bytes)| (path, AssetBytes::Memory(Bytes::from(bytes)))).collect(),
+            on_disk: false,
             fingerprint: format!("{:x}", digest.finalize()),
             size,
         })
@@ -267,16 +273,15 @@ impl Views {
         self.live_records().await.remove(&id).is_some()
     }
 
-    pub(crate) async fn publish_input(
-        &self, input: Publication, previous: Option<(Uuid, u64)>,
+    pub(crate) fn reserve(&self) -> Result<tokio::sync::SemaphorePermit<'_>, PublicationError> {
+        self.publishing.try_acquire().map_err(|_| (StatusCode::TOO_MANY_REQUESTS, "VIEW_PUBLISH_BUSY"))
+    }
+
+    pub(crate) async fn publish_snapshot(
+        &self, snapshot: Snapshot, previous: Option<(Uuid, u64)>, requested_keep_open: Option<bool>,
     ) -> Result<(StatusCode, Uuid, u64, serde_json::Value), PublicationError> {
-        let Ok(_slot) = self.publishing.try_acquire() else {
-            return Err((StatusCode::TOO_MANY_REQUESTS, "VIEW_PUBLISH_BUSY"));
-        };
-        let requested_keep_open = input.mantener_abierta;
-        let snapshot = Snapshot::parse(input)?;
         let mut records = self.live_records().await;
-        let (status, id, base_version, old_size, keep_open) = match previous {
+        let (status, id, base_version, keep_open) = match previous {
             Some((id, expected)) => {
                 let Some(current) = records.get(&id) else {
                     return Err((StatusCode::NOT_FOUND, "VIEW_NOT_FOUND"));
@@ -287,7 +292,7 @@ impl Views {
                 if current.snapshot.project != snapshot.project || current.snapshot.copy != snapshot.copy {
                     return Err((StatusCode::CONFLICT, "VIEW_COPY_CHANGED"));
                 }
-                (StatusCode::OK, id, current.version, current.snapshot.size, current.mantener_abierta)
+                (StatusCode::OK, id, current.version, current.mantener_abierta)
             }
             None => {
                 if records.len() == MAX_VIEWS {
@@ -297,11 +302,14 @@ impl Views {
                 while records.contains_key(&id) {
                     id = Uuid::new_v4();
                 }
-                (StatusCode::CREATED, id, 0, 0, false)
+                (StatusCode::CREATED, id, 0, false)
             }
         };
-        let total: usize = records.values().map(|view| view.snapshot.size).sum();
-        if total - old_size + snapshot.size > MAX_TOTAL_BYTES {
+        let total: usize = records.iter()
+            .filter(|(existing, view)| **existing != id && view.snapshot.on_disk == snapshot.on_disk)
+            .map(|(_, view)| view.snapshot.size).sum();
+        let budget = if snapshot.on_disk { 2 * storage::LOCAL_BYTES } else { MAX_TOTAL_BYTES };
+        if total + snapshot.size > budget {
             return Err((StatusCode::SERVICE_UNAVAILABLE, "VIEW_CAPACITY_REACHED"));
         }
         let Some(version) = base_version.checked_add(1) else {
@@ -360,13 +368,22 @@ impl Views {
     }
 
     async fn publish(&self, req: Request<Incoming>, previous: Option<(Uuid, u64)>) -> Response<Body> {
+        let _slot = match self.reserve() {
+            Ok(slot) => slot,
+            Err((status, code)) => return error(status, code),
+        };
         let Ok(body) = Limited::new(req.into_body(), MAX_MESSAGE).collect().await else {
             return error(StatusCode::PAYLOAD_TOO_LARGE, "VIEW_TOO_LARGE");
         };
-        let Ok(input) = serde_json::from_slice(&body.to_bytes()) else {
+        let Ok(input) = serde_json::from_slice::<Publication>(&body.to_bytes()) else {
             return error(StatusCode::BAD_REQUEST, "INVALID_VIEW");
         };
-        match self.publish_input(input, previous).await {
+        let keep_open = input.mantener_abierta;
+        let snapshot = match Snapshot::parse(input) {
+            Ok(snapshot) => snapshot,
+            Err((status, code)) => return error(status, code),
+        };
+        match self.publish_snapshot(snapshot, previous, keep_open).await {
             Ok((status, _, version, payload)) => self.metadata(status, version, payload),
             Err((status, code)) => error(status, code),
         }
@@ -425,16 +442,32 @@ impl Views {
         };
         let content_type = mime(&asset);
         let script = (content_type == HTML_MIME).then(|| self.activity_script(id));
-        let length = bytes.len() + script.as_ref().map_or(0, String::len);
-        let response_body = match (is_head, script) {
-            (true, _) => body(Bytes::new()),
-            (false, Some(script)) => {
-                let frames = [Ok(Frame::data(bytes)), Ok(Frame::data(Bytes::from(script)))];
-                StreamBody::new(futures_util::stream::iter(frames)).boxed()
+        let total = bytes.len();
+        let mut start = 0;
+        let mut size = total;
+        let mut response = Response::builder();
+        if script.is_none() {
+            response = response.header(header::ACCEPT_RANGES, "bytes");
+            if !is_head && !req.headers().contains_key(header::IF_RANGE) {
+                if let Some(range) = req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()) {
+                    match byte_range(range, total) {
+                        Ok(Some((first, last))) => {
+                            start = first;
+                            size = last - first + 1;
+                            response = response.status(StatusCode::PARTIAL_CONTENT)
+                                .header(header::CONTENT_RANGE, format!("bytes {first}-{last}/{total}"));
+                        }
+                        Err(()) => return Response::builder().status(StatusCode::RANGE_NOT_SATISFIABLE)
+                            .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                            .body(body(Bytes::new())).unwrap(),
+                        Ok(None) => {}
+                    }
+                }
             }
-            (false, None) => body(bytes),
-        };
-        Response::builder()
+        }
+        let length = size + script.as_ref().map_or(0, String::len);
+        let response_body = if is_head { body(Bytes::new()) } else { bytes.body(start, size, script) };
+        response
             .header(header::CONTENT_TYPE, content_type)
             .header(header::CONTENT_LENGTH, length)
             .header(header::CACHE_CONTROL, "no-store")
@@ -462,6 +495,23 @@ impl Views {
 </script>
 "#)
     }
+}
+
+// Unknown or multipart range formats fall back to the entire representation.
+fn byte_range(value: &str, size: usize) -> Result<Option<(usize, usize)>, ()> {
+    let Some((first, last)) = value.strip_prefix("bytes=").and_then(|v| v.split_once('-')) else { return Ok(None) };
+    let number = |s: &str| (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()))
+        .then(|| s.parse::<usize>().unwrap_or(usize::MAX));
+    if first.is_empty() {
+        let Some(count) = number(last) else { return Ok(None) };
+        if size == 0 || count == 0 { return Err(()); }
+        return Ok(Some((size.saturating_sub(count), size - 1)));
+    }
+    let Some(start) = number(first) else { return Ok(None) };
+    let end = if last.is_empty() { usize::MAX } else if let Some(end) = number(last) { end } else { return Ok(None) };
+    if end < start { return Ok(None); }
+    if start >= size { return Err(()); }
+    Ok(Some((start, end.min(size - 1))))
 }
 
 fn body(bytes: Bytes) -> Body {
