@@ -276,8 +276,9 @@ pub(crate) fn file_hash(file: &mut File, limit: u64) -> Result<(String, u64)> {
 }
 
 fn incoming_path(path: &str) -> bool {
-    matches!(path, "LEEME.md" | CHANNEL | "Sistema/mind" | "Sistema/mind.cmd"
-        | "Sistema/Autorizar Mind.cmd" | "Sistema/Autorizar Mind.command")
+    matches!(path, "LEEME.md" | "AGENTS.md" | "CLAUDE.md" | "GEMINI.md" | CHANNEL | "Sistema/mind" | "Sistema/mind.cmd"
+        | "Sistema/Autorizar Mind.cmd" | "Sistema/Autorizar Mind.command"
+        | "Sistema/Conectar Mind.cmd" | "Sistema/Conectar Mind.command")
         || path.starts_with("Sistema/Licencias/")
         || TARGETS.into_iter().any(|target| path == executable(target))
 }

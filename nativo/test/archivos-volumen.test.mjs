@@ -177,9 +177,9 @@ for (const variant of ['disco local', 'DriveFS']) {
           await run('/usr/bin/xattr', ['-w', 'com.mind.laboratorio', 'ficticio', filename]);
           await call('modificar', update, 'METADATA_NOT_PRESERVABLE');
           await run('/usr/bin/xattr', ['-d', 'com.mind.laboratorio', filename]);
-          await run('/bin/chflags', ['hidden', filename]);
+          await run('/usr/bin/chflags', ['hidden', filename]);
           await call('modificar', update, 'METADATA_NOT_PRESERVABLE');
-          await run('/bin/chflags', ['nohidden', filename]);
+          await run('/usr/bin/chflags', ['nohidden', filename]);
           await run('/bin/chmod', ['+a', 'everyone allow read', filename]);
           await call('modificar', update, 'METADATA_NOT_PRESERVABLE');
           await run('/bin/chmod', ['-N', filename]);

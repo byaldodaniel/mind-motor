@@ -17,6 +17,8 @@ export async function extractR3(root) {
   const revision = await run('git', ['rev-parse', 'v1.0.4-r3'], options);
   assert.equal(revision.stdout.trim(), r3Commit);
   await run('git', ['archive', '--format=tar', '--output=' + archive, r3Commit, '--', 'package.json', 'src'], options);
-  await run('tar', ['-xf', archive, '-C', r3], options);
+  // En Windows, el tar de Git interpreta «C:» como un equipo remoto: se usa el del sistema.
+  const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
+  await run(tar, ['-xf', archive, '-C', r3], options);
   return name => JSON.stringify(pathToFileURL(path.join(r3, 'src', name)).href);
 }

@@ -106,7 +106,8 @@ export async function lab(t, { baselineZip = false } = {}) {
   assert.equal((await command('git',['rev-parse','v1.0.4-r3'],{cwd:repo})).stdout.trim(),r3Commit);
   const tar=path.join(root,'r3.tar');
   await command('git',['archive','--format=tar','--output='+tar,r3Commit,'--','bin','src','package.json','packaging/iniciadores'],{cwd:repo});
-  await command('tar',['-xf',tar,'-C',motor]);
+  // En Windows, el tar de Git interpreta «C:» como un equipo remoto: se usa el del sistema.
+  await command(process.platform==='win32'?path.join(process.env.SystemRoot??'C:\\Windows','System32','tar.exe'):'tar',['-xf',tar,'-C',motor]);
   await fs.rename(path.join(motor,'packaging','iniciadores'),path.join(root,'iniciadores-r3'));
   await fs.rmdir(path.join(motor,'packaging'));
   for (const name of await fs.readdir(path.join(root,'iniciadores-r3'))) {
