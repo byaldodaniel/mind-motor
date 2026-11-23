@@ -10,6 +10,15 @@ import { scanTree } from '../../src/product-files.js';
 import { checkHealthyConnector } from '../../src/connector.js';
 import { binary, connect, eventually, lab, python, readJson } from '../medicion/etapa7-fixture.mjs';
 
+async function readReportDuringUpdate(file) {
+  try {
+    return await readJson(file);
+  } catch (error) {
+    if (error.code === 'EBUSY') return null;
+    throw error;
+  }
+}
+
 test('1.0.4-r3 → 1.0.5 con Ed25519, quietud, Base intacta y vuelta a r3', {
   skip: (!binary || !python) && 'Indica MIND_NATIVE_EXE y MIND_PYTHON',
   timeout: 200000,
@@ -54,8 +63,8 @@ test('1.0.4-r3 → 1.0.5 con Ed25519, quietud, Base intacta y vuelta a r3', {
   try {
     const migration=f.migrate();
     await eventually(async()=>{
-      const state=await readJson(f.reportFile);
-      if (state.id===previousId) return false;
+      const state=await readReportDuringUpdate(f.reportFile);
+      if (!state || state.id===previousId) return false;
       if (state.phase==='fallida') assert.fail(JSON.stringify(state.error));
       if (migration.child.exitCode !== null) assert.fail((await migration.finished).stderr);
       return state.phase==='espera-quietud';
@@ -192,7 +201,8 @@ test('Windows espera un descriptor temporal en Componentes y revierte si permane
 
   const retry = f.migrate();
   await eventually(async () => {
-    const state = await readJson(f.reportFile);
+    const state = await readReportDuringUpdate(f.reportFile);
+    if (!state) return false;
     if (state.id !== previous.id && state.phase === 'fallida') assert.fail(JSON.stringify(state.error));
     return state.id !== previous.id && state.phase === 'aplicando';
   });
