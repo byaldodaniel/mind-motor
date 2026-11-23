@@ -46,7 +46,7 @@ test('corregir verifica confianza existente, migra copia real, conserva configur
  const pythonCommand=process.env.MIND_TEST_BUNDLED_PYTHON??process.env.MIND_PYTHON??process.env.MIND_TEST_PYTHON??(process.platform==='win32'?'python':'python3');
  if (process.platform === 'win32') {
   const pythonHome=(await run(pythonCommand,['-I','-B','-c','import sys;print(sys.base_prefix)'])).stdout.trim();
-  await fs.cp(pythonHome,runtime.pythonDirectory,{recursive:true,filter:entry=>entry===pythonHome||keepPythonPath(path.relative(pythonHome,entry).split(path.sep).join('/'))});
+  await fs.cp(pythonHome,runtime.pythonDirectory,{recursive:true,filter:entry=>!['site-packages','__pycache__','test','tests'].includes(path.basename(entry)) && (entry===pythonHome||keepPythonPath(path.relative(pythonHome,entry).split(path.sep).join('/')))});
  } else {
   // El prefijo del Python del anfitrión puede ser /usr y contiene enlaces ajenos a la entrega.
   const exe=(await run(pythonCommand,['-I','-B','-c','import sys;print(sys.executable)'])).stdout.trim();

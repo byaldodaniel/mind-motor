@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { copyPosixTestPython } from './helpers/posix-test-python.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -28,6 +29,10 @@ async function linkRuntime(source, destination) {
       try { await fs.link(from, to); } catch (e) { if (e.code !== 'EXDEV') throw e; await fs.copyFile(from, to); }
     } else throw Error('El ensayo nativo requiere runtime de archivos regulares');
   }
+}
+async function prepareRuntime(destination) {
+  if (process.platform === 'win32') return linkRuntime(path.dirname(python), destination);
+  return copyPosixTestPython(python, destination);
 }
 async function nativeWorker(t) {
   const helper = new URL('../src/process-identity.js', import.meta.url).href;
@@ -87,8 +92,7 @@ test('worker nativo vivo bloquea; desconocido no recupera; al morir se recupera 
   { skip: skipNative, timeout: 60_000 }, async t => {
     const root = await rootFixture(t), id = randomUUID(), worker = await nativeWorker(t);
     const directory = handoffDirectory(root, id);
-    const sourceRuntime = process.platform === 'win32' ? path.dirname(python) : path.dirname(path.dirname(python));
-    await linkRuntime(sourceRuntime, path.join(directory, 'Python'));
+    await prepareRuntime(path.join(directory, 'Python'));
     const snapshotPython = path.join(directory, 'Python', process.platform === 'win32' ? 'python.exe' : 'bin/python3');
     const record = { id, phase: 'aplicando', owner: worker.owner };
     assert.equal(await handoffOwner(record, snapshotPython), 'active');
@@ -153,8 +157,7 @@ test('los mirrors limpian un terminal antiguo tras cambiar UUID y conservan acti
     const own = await identifyCurrentProcess({ pythonExecutable: python });
     const old = { id: randomUUID(), phase: 'completada', owner: worker.owner };
     const oldDirectory = await ensureHandoffDirectory(root, old.id);
-    const sourceRuntime = process.platform === 'win32' ? path.dirname(python) : path.dirname(path.dirname(python));
-    await linkRuntime(sourceRuntime, path.join(oldDirectory, 'Python'));
+    await prepareRuntime(path.join(oldDirectory, 'Python'));
     await writeHandoff(root, old);
     assert.equal(JSON.parse(await fs.readFile(path.join(oldDirectory, 'registro.json'), 'utf8')).id, old.id);
     const kept = [

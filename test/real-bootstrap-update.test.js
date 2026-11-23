@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { copyPosixTestPython } from './helpers/posix-test-python.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -54,7 +55,6 @@ test('real interrupted product restores itself through installed bootstrap and i
   await fs.copyFile(path.join(repo, 'packaging', 'iniciadores', 'arranque.cjs'), path.join(system, 'arranque.cjs'));
   const node = path.join(system, 'Componentes', 'Node', target, ...(process.platform === 'win32' ? ['node.exe'] : ['bin', 'node']));
   const pythonDirectory = path.join(system, 'Componentes', 'Python', target);
-  const sourceDirectory = process.platform === 'win32' ? path.dirname(pythonSource) : path.dirname(path.dirname(pythonSource));
   await fs.mkdir(path.dirname(node), { recursive: true });
   await fs.copyFile(process.execPath, node);
   await fs.chmod(node, 0o755);
@@ -62,8 +62,13 @@ test('real interrupted product restores itself through installed bootstrap and i
   // de miles de archivos (site-packages, documentación, Tcl) que se copiarían y sellarían
   // dos veces sin aportar nada al ensayo, y agotarían el plazo.
   const skipped = new Set(['site-packages', 'test', 'tests', '__pycache__', 'Doc', 'Scripts', 'include', 'libs', 'share', 'tcl', 'Tools']);
-  await fs.cp(sourceDirectory, pythonDirectory, { recursive: true,
-    filter: (from) => from === sourceDirectory || !skipped.has(path.basename(from)) });
+  if (process.platform === 'win32') {
+    const sourceDirectory = path.dirname(pythonSource);
+    await fs.cp(sourceDirectory, pythonDirectory, { recursive: true,
+      filter: file => !skipped.has(path.basename(file)) });
+  } else {
+    await copyPosixTestPython(pythonSource, pythonDirectory);
+  }
   await fs.writeFile(path.join(motor, 'fixture-release.txt'), 'Original revision; fictional data only.\n');
   await seal(root, 0);
   await fs.cp(root, incoming, { recursive: true });
