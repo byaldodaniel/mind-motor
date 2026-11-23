@@ -148,6 +148,16 @@ for (const variant of ['disco local', 'DriveFS']) {
         const indexes = (await fs.readdir(base)).filter(name => /^folder-index-[a-f0-9]{64}\.json$/u.test(name));
         assert.equal(indexes.length, 1);
         const indexFile = path.join(base, indexes[0]);
+        await fs.unlink(indexFile);
+        const unindexed = await call('crear', { ruta: 'SinIndice.txt', contenido: 'Contenido.' });
+        assert.equal(unindexed.indice, 'not-indexed');
+        const seed = await call('leer', { ruta: 'Semilla.txt' });
+        const edited = await call('modificar', { ruta: 'Semilla.txt', version: seed.version, contenido: 'Semilla nueva.\n' });
+        assert.equal(edited.indice, 'not-indexed');
+        const restored = await call('editar', { ruta: 'Semilla.txt', ediciones: [{ buscar: 'Semilla nueva.', reemplazar: 'Texto inicial ficticio.' }] });
+        assert.equal(restored.indice, 'not-indexed');
+        await assert.rejects(fs.stat(indexFile), { code: 'ENOENT' });
+        assert.deepEqual((await search('Semilla')).resultados.map(item => item.ruta), ['Semilla.txt']);
         const indexBefore = await fs.readFile(indexFile);
         await fs.mkdir(path.join(folder, 'Visible', 'Segundo'), { recursive: true });
         await fs.writeFile(path.join(folder, 'Visible', 'Segundo', 'Interior.txt'), 'Prueba');

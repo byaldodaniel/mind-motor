@@ -437,6 +437,36 @@ test('valida opciones, ámbitos y el ciclo de vida', async (t) => {
   await assert.rejects(h.observer.observe(scope.id), { code: 'OBSERVER_CLOSED' });
 });
 
+test('retirar una carpeta cancela su recorrido inicial mientras espera recursos', async (t) => {
+  const { root, motor, scope } = await fixture(t);
+  const nextFolder = path.join(root, 'Segunda carpeta');
+  await fs.mkdir(nextFolder);
+  const next = await motor.authorizeFolder(nextFolder);
+  let waiting, scanSignal;
+  const started = new Promise(resolve => { waiting = resolve; });
+  const h = harness(t, {
+    ...motor,
+    async indexFolder(id, options) {
+      if (id !== scope.id) return motor.indexFolder(id, options);
+      scanSignal = options.signal;
+      waiting();
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('El recorrido no recibió la cancelación.')), 4000);
+        scanSignal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(scanSignal.reason);
+        }, { once: true });
+      });
+    },
+  });
+  const first = h.observer.observe(scope.id);
+  await started;
+  assert.equal(await h.observer.unobserve(scope.id), true);
+  assert.equal(scanSignal.aborted, true);
+  assert.equal((await first).mode, 'stopped');
+  assert.equal((await h.observer.observe(next.id)).mode, 'watching');
+});
+
 test('el módulo solo observa: no abre ni lee originales y solo consulta su raíz', async () => {
   const source = await fs.readFile(fileURLToPath(new URL('../src/index-observer.js', import.meta.url)), 'utf8');
   const imports = [...source.matchAll(/^import .+ from '([^']+)';$/gm)].map((match) => match[0]);

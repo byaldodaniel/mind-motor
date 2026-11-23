@@ -12,7 +12,7 @@ import test from 'node:test';
 import { productPaths, productRuntime, resolveLayout } from '../../src/layout.js';
 import { openSession } from '../../src/session.js';
 import { releaseOf } from '../../src/package-descriptor.js';
-import { UNIVERSAL_TARGETS } from '../../src/product-files.js';
+import { NATIVE_TARGETS } from '../../src/product-files.js';
 import { updateConsentPaths } from '../../src/update-consent.js';
 import { updateStatePaths, writeUpdateState } from '../../src/update-state.js';
 import { extractR3, r3Commit } from './r3-fixture.mjs';
@@ -267,7 +267,7 @@ async function fakeProduct(root) {
   const installation = path.join(root, 'Instalación ficticia');
   const manifest = { format: 'mind-product', version: 1, mindVersion: '1.0.4', packageRevision: 3,
     layoutVersion: 2, updateProtocolVersion: 2, platform: process.platform,
-    arch: process.arch, targets: UNIVERSAL_TARGETS, files: {}, links: {} };
+    arch: process.arch, files: {}, links: {} };
   const paths = productPaths(installation, manifest);
   const runtime = productRuntime(installation, manifest);
   await fs.mkdir(paths.motorDirectory, { recursive: true });
@@ -400,7 +400,7 @@ test('5C: actualización firmada local, consentimiento MCP, código y fallo segu
   const fakeZip = Buffer.from('Contenido de ensayo, deliberadamente sin un descriptor ni un ZIP válido.');
   const hash = sha256(fakeZip);
   const feed = { format: 'mind-update', version: 2, ...releaseOf({ ...product.manifest, mindVersion: '1.0.5' }),
-    manifestSha256: 'a'.repeat(64), packages: [{ platform: 'win32', arch: 'x64', targets: UNIVERSAL_TARGETS,
+    manifestSha256: 'a'.repeat(64), packages: [{ platform: 'win32', arch: 'x64', targets: NATIVE_TARGETS,
       url: 'https://github.com/ensayo/mind-ficticio/releases/download/v1.0.5/mind.zip', sha256: hash, bytes: fakeZip.length }] };
   const setOffer = async () => {
     const payload = Buffer.from(JSON.stringify(feed));
@@ -410,8 +410,23 @@ test('5C: actualización firmada local, consentimiento MCP, código y fallo segu
       envelope: { payload: payload.toString('base64'), signature: sign(null, payload, product.privateKey).toString('base64') },
     });
   };
-  await setOffer();
   const consult = () => client.call(...bound('mind', 'actualizacion_consultar', {}));
+  feed.mindVersion = product.manifest.mindVersion;
+  await setOffer();
+  const conflicting = await consult();
+  assert.equal(conflicting.fase, 'estado-no-verificable');
+  assert.equal(conflicting.ultimo_error.codigo, 'UPDATE_MANIFEST_ALTERED');
+  assert.equal(conflicting.disponible, null);
+  await client.call('actualizacion_aplicar', {}, 'UPDATE_MANIFEST_ALTERED');
+  feed.manifestSha256 = sha256(manifestBytes);
+  await setOffer();
+  const matching = await consult();
+  assert.equal(matching.fase, 'al-dia');
+  assert.equal(matching.ultimo_error, null);
+  assert.equal(matching.disponible, null);
+  feed.mindVersion = '1.0.5';
+  feed.manifestSha256 = 'a'.repeat(64);
+  await setOffer();
   assert.equal((await consult()).disponible.mindVersion, '1.0.5');
   const firstNotice = await client.call('destinos_consultar');
   assert.equal(firstNotice.aviso_actualizacion.version, '1.0.5');

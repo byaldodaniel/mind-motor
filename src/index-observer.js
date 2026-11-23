@@ -269,6 +269,7 @@ export function createIndexObserver({
     if (state.stopped) return;
     state.stopped = true;
     state.stopReason = reason;
+    state.controller.abort(new MotorError('OBSERVATION_STOPPED', 'La carpeta dejó de observarse.'));
     state.dirty = false;
     clearTimers(state);
     closeWatchers(state);
@@ -441,7 +442,7 @@ export function createIndexObserver({
     state.dirty = false;
     state.running = (async () => {
       try {
-        const result = await motor.indexFolder(state.id, { priority, signal, hints });
+        const result = await motor.indexFolder(state.id, { priority, signal: state.signal, hints });
         if (state.stopped) return;
         const index = await motor.readFolderIndex(state.id);
         if (state.stopped) return;
@@ -607,7 +608,8 @@ export function createIndexObserver({
     });
   }
 
-  async function start(folderId) {
+  async function start(folderId, controller) {
+    const folderSignal = AbortSignal.any([signal, controller.signal]);
     const listed = await motor.listAuthorizedFolders();
     const folder = listed.find((item) => item.id === folderId);
     if (!folder) {
@@ -615,8 +617,9 @@ export function createIndexObserver({
     }
     const baseline = await motor.readFolderIndex(folderId);
     if (closed || signal?.aborted) throw new MotorError('OBSERVER_CLOSED', 'El observador está cerrado.');
+    folderSignal.throwIfAborted();
     const state = {
-      id: folderId, root: folder.path, strategy: mode, mode: 'starting',
+      id: folderId, root: folder.path, strategy: mode, mode: 'starting', controller, signal: folderSignal,
       watchers: new Map(), timer: null, periodic: null, running: null,
       dirty: false, reasons: new Set(), hints: new Set(), overflow: false, immediate: false,
       firstEventAt: 0, lastEventAt: 0, lastRunEndedAt: 0, failures: 0,
@@ -628,6 +631,7 @@ export function createIndexObserver({
     };
     state.rootIdentity = await rootIdentity(state);
     if (closed || signal?.aborted) throw new MotorError('OBSERVER_CLOSED', 'El observador está cerrado.');
+    folderSignal.throwIfAborted();
     folders.set(folderId, state);
     ensureAuthorizationWatch();
     // La observación empieza antes del recorrido inicial: lo que cambie durante él
@@ -651,10 +655,14 @@ export function createIndexObserver({
       if (closed) throw new MotorError('OBSERVER_CLOSED', 'El observador está cerrado.');
       if (folders.has(folderId)) return status(folders.get(folderId));
       if (!starting.has(folderId)) {
-        const pending = start(folderId).finally(() => starting.delete(folderId));
-        starting.set(folderId, pending);
+        const controller = new AbortController();
+        const promise = start(folderId, controller).finally(() => {
+          starting.delete(folderId);
+          if (folders.size === 0 && starting.size === 0) releaseAuthorizationWatch();
+        });
+        starting.set(folderId, { controller, promise });
       }
-      return starting.get(folderId);
+      return starting.get(folderId).promise;
     },
 
     /** Reconciliación solicitada por el anfitrión; omite la espera de agrupación. */
@@ -710,11 +718,13 @@ export function createIndexObserver({
     /** Deja de observar; el índice publicado se conserva. */
     async unobserve(folderId) {
       validateScopeId(folderId);
-      await starting.get(folderId)?.catch(() => {});
+      const pending = starting.get(folderId);
       const state = folders.get(folderId);
-      if (!state) return false;
-      stop(state, 'unobserved');
-      await state.running;
+      if (!state && !pending) return false;
+      if (state) stop(state, 'unobserved');
+      else pending.controller.abort(new MotorError('OBSERVATION_STOPPED', 'La carpeta dejó de observarse.'));
+      // A queued initial scan may be waiting for idle resources; cancel it before joining it.
+      await Promise.allSettled([pending?.promise, state?.running]);
       return true;
     },
 
@@ -729,7 +739,7 @@ export function createIndexObserver({
       }
       releaseAuthorizationWatch();
       signal?.removeEventListener('abort', abort);
-      await Promise.allSettled([...starting.values(), ...inFlight, ...running]);
+      await Promise.allSettled([...Array.from(starting.values(), entry => entry.promise), ...inFlight, ...running]);
     },
   });
 }

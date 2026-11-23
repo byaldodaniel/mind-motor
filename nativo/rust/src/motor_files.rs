@@ -777,6 +777,23 @@ pub(crate) fn reconcile_index_by_id(
     reconcile_folder_index(base, &folder, confirm_owner)
 }
 
+pub(crate) fn refresh_index_after_write(
+    base: &str, folder_id: &str,
+    confirm_owner: impl Fn() -> Result<(), &'static str>,
+) -> Result<bool, Fault> {
+    // Writing a single file must not build a first index for the entire root.
+    // The next explicit search can build it, including for a temporary client scope.
+    let folder = access::folders(base)?
+        .into_iter()
+        .find(|f| f.id == folder_id)
+        .ok_or_else(|| Fault::new("FOLDER_NOT_AUTHORIZED", "La carpeta no está autorizada."))?;
+    forget_scan(base, &folder);
+    if load_persisted_index(base, &folder)?.is_none() {
+        return Ok(false);
+    }
+    reconcile_folder_index(base, &folder, confirm_owner).map(|_| true)
+}
+
 pub(crate) fn ensure_folder_index(
     base: &str, folder: &Folder,
     confirm_owner: impl Fn() -> Result<(), &'static str>,
@@ -1141,8 +1158,9 @@ fn edit_text(
     let report = text_write::write_bytes(&scope.root, &scope.relative, next.as_bytes(), MAX_TEXT, Some(expected_hash), confirm)
         .map_err(|code| Fault::new(code, "La publicación segura se detuvo. Revisa permisos, destino y versión."))?;
     let _ = motor_properties::rebind(base, &scope, &report, &confirm_owner);
-    let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
-        Ok(_) => "ok",
+    let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+        Ok(true) => "ok",
+        Ok(false) => "not-indexed",
         Err(_) => "needs-reconciliation",
     };
     Ok(json!({
@@ -1200,7 +1218,7 @@ fn write(
     if directory {
         only(args, &["accion", "carpeta", "ruta"])?;
         organize::create_directory(&scope.root, &scope.relative, confirm).map_err(filesystem)?;
-        let _ = reconcile_index_by_id(base, &scope.id, &confirm_owner);
+        let _ = refresh_index_after_write(base, &scope.id, &confirm_owner);
         return Ok(json!({
             "estado": "creada",
             "carpeta": scope.id,
@@ -1226,8 +1244,9 @@ fn write(
     let report = text_write::write_bytes(&scope.root, &scope.relative, content.as_bytes(), MAX_TEXT, expected, confirm)
         .map_err(filesystem)?;
     let _ = motor_properties::rebind(base, &scope, &report, &confirm_owner);
-    let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
-        Ok(_) => "ok",
+    let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+        Ok(true) => "ok",
+        Ok(false) => "not-indexed",
         Err(_) => "needs-reconciliation",
     };
     let mut result = json!({
@@ -1260,8 +1279,9 @@ pub(crate) fn write_output_text(
     let bytes = content.as_bytes();
     match text_write::write_bytes(&scope.root, &scope.relative, bytes, MAX_TEXT, None, confirm) {
         Ok(_) => {
-            let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
-                Ok(_) => "updated",
+            let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+                Ok(true) => "updated",
+                Ok(false) => "not-indexed",
                 Err(_) => "needs-reconciliation",
             };
             return Ok(json!({
@@ -1300,8 +1320,9 @@ pub(crate) fn write_output_text(
     };
     text_write::write_bytes(&scope.root, &scope.relative, bytes, MAX_TEXT, Some(&expected), confirm_mod)
         .map_err(|code| Fault::new(code, "No se pudo actualizar el archivo generado."))?;
-    let index_state = match reconcile_index_by_id(base, &scope.id, &confirm_owner) {
-        Ok(_) => "updated",
+    let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+        Ok(true) => "updated",
+        Ok(false) => "not-indexed",
         Err(_) => "needs-reconciliation",
     };
     Ok(json!({

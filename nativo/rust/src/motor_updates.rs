@@ -140,16 +140,17 @@ impl Updater {
             let current = Release::read(&installed(root)?)?;
             let mut next = state(root)?;
             if next != previous { return Ok(()); }
+            let found = found.and_then(|offer| Ok((is_new_release(root, &current, &offer)?, offer)));
             let interval = if found.is_ok() { 6 * 3_600_000 } else { 30 * 60_000 };
             next["nextCheckAt"] = iso(now + interval);
             next["updatedAt"] = iso(now);
             // El estado puede venir de una versión anterior: refleja siempre la entrega instalada.
             next["installedRelease"] = json!(current);
             match found {
-                Ok(offer) => {
+                Ok((newer, offer)) => {
                     next["lastCheckedAt"] = iso(now);
                     next["lastError"] = Value::Null;
-                    if offer.release.newer_than(&current) {
+                    if newer {
                         next["phase"] = json!("disponible");
                         next["envelope"] = offer.envelope;
                         next["release"] = json!(offer.release);
@@ -162,7 +163,9 @@ impl Updater {
                     }
                 }
                 Err(error) => {
-                    if next["phase"].is_null() { next["phase"] = json!("fallida"); }
+                    if error.code == "UPDATE_MANIFEST_ALTERED" {
+                        next["phase"] = json!("estado-no-verificable");
+                    } else if next["phase"].is_null() { next["phase"] = json!("fallida"); }
                     next["lastError"] = json!({"code":error.code,"kind":if error.code == "UPDATE_CONNECTION_FAILED" {"conexion"} else {"integridad"},
                         "message":error.message,"at":iso(now)});
                 }
@@ -187,11 +190,14 @@ impl Updater {
             Err(error) => {
                 if error.code != "UPDATE_NOT_AVAILABLE" {
                     result["fase"] = json!("estado-no-verificable");
-                    result["ultimo_error"] = json!({"codigo":error.code,"mensaje":error.message});
+                    result["ultimo_error"] = json!({"codigo":error.code,"tipo":"integridad","mensaje":error.message});
+                } else if !state["envelope"].is_null()
+                    && state["phase"].as_str().is_some_and(|phase| OFFER_PHASES.contains(&phase)) {
+                    result["fase"] = json!("al-dia");
                 }
                 result["resumen"] = json!(if !result["ultimo_error"].is_null() {
                     "No se pudo verificar si hay una entrega nueva."
-                } else if state["phase"] == "al-dia" {
+                } else if result["fase"] == "al-dia" {
                     "Mind está al día."
                 } else {
                     "No hay una entrega nueva disponible ahora."
@@ -290,8 +296,19 @@ fn offer(root: &str) -> Result<Offer> {
     let state = state(root)?;
     if !state["phase"].as_str().is_some_and(|phase| OFFER_PHASES.contains(&phase)) || state["envelope"].is_null() { return Err(no_offer()); }
     let offer = Offer::verify(&Channel::load(root)?, &state["envelope"])?;
-    if !offer.release.newer_than(&Release::read(&installed(root)?)?) { return Err(no_offer()); }
+    if !is_new_release(root, &Release::read(&installed(root)?)?, &offer)? { return Err(no_offer()); }
     Ok(offer)
+}
+
+fn is_new_release(root: &str, current: &Release, offer: &Offer) -> Result<bool> {
+    if offer.release.mind_version == current.mind_version && offer.release.package_revision == current.package_revision {
+        let bytes = read(root, MANIFEST, MAX_DOCUMENT)?
+            .ok_or_else(|| fail("UPDATE_NOT_INSTALLATION", "Falta el manifiesto instalado."))?;
+        if offer.feed["manifestSha256"] != sha(&bytes) {
+            return Err(fail("UPDATE_MANIFEST_ALTERED", "El canal ofrece otro manifiesto con la misma versión y revisión."));
+        }
+    }
+    Ok(offer.release.newer_than(current))
 }
 
 fn notice(offer: &Offer) -> String {

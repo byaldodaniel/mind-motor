@@ -935,7 +935,7 @@ impl Motor {
         text_write::write_bytes(&scope.root, &scope.relative, markdown(record).as_bytes(), MAX_MARKDOWN,
             expected.as_deref(), || self.confirm(target, scope))
             .map(|_| ()).map_err(filesystem)?;
-        let _ = motor_files::reconcile_index_by_id(&self.base, &scope.id, || self.owner.check());
+        let _ = motor_files::refresh_index_after_write(&self.base, &scope.id, || self.owner.check());
         Ok(())
     }
 }

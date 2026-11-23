@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    motor_files::{read_base_stored, reconcile_index_by_id, write_base_json},
+    motor_files::{read_base_stored, refresh_index_after_write, write_base_json},
     motor_native::{invalid, only, Fault},
     motor_owner::timestamp,
     motor_permissions::{self as access, Scope, OUTPUT_TYPES},
@@ -77,7 +77,7 @@ pub(crate) fn call(
                 confirm_owner()?;
                 confirm_scope(base, &scope, &["escribir", "encontrar"])
             })?;
-            let _ = reconcile_index_by_id(base, &scope.id, &confirm_owner);
+            let _ = refresh_index_after_write(base, &scope.id, &confirm_owner);
             Ok(json!({"estado": "registrado", "resultado": result}))
         }
         "resultado_importar" => {
@@ -268,7 +268,7 @@ pub(crate) fn copy(
         confirm_scope(base, source, &["leer"])?;
         confirm_scope(base, target, &["escribir"])
     }).map_err(file_fault)?;
-    let _ = reconcile_index_by_id(base, &target.id, confirm);
+    let _ = refresh_index_after_write(base, &target.id, confirm);
     Ok(copied)
 }
 
