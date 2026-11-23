@@ -99,9 +99,13 @@ impl Bridge {
     async fn health(&self)->Option<Connector>{ healthy(&self.config.base, &self.client).await }
     async fn wake(&self)->Result<Connector>{
         if let Some(c)=self.health().await{return Ok(c)}
-        let mut command=std::process::Command::new(&self.config.launch);command.args(&self.config.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        #[cfg(windows)]{use std::os::windows::process::CommandExt;command.creation_flags(0x08000200);}
-        let mut child=command.spawn().map_err(|e|Failure::new("MOTOR_START_FAILED",format!("Mind no pudo iniciarse: {e}")))?;
+        #[cfg(windows)]
+        let spawned = crate::update_handoff::spawn_background_child(Path::new(&self.config.launch),
+            &self.config.args.iter().map(String::as_str).collect::<Vec<_>>(), &[]);
+        #[cfg(not(windows))]
+        let spawned = std::process::Command::new(&self.config.launch).args(&self.config.args)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let mut child = spawned.map_err(|e|Failure::new("MOTOR_START_FAILED",format!("Mind no pudo iniciarse: {e}")))?;
         let until=Instant::now()+Duration::from_secs(25);
         loop{if let Some(c)=self.health().await{return Ok(c)}if let Ok(Some(status))=child.try_wait(){if !status.success(){return Err(Failure::new("MOTOR_START_FAILED",format!("Mind no pudo iniciarse (salida {status}).")))}}
             if Instant::now()>=until{return Err(Failure::new("MOTOR_START_TIMEOUT","El Motor no respondió después de iniciarse."))}sleep(Duration::from_millis(50)).await;

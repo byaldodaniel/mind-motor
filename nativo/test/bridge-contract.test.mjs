@@ -165,7 +165,7 @@ async function startFakeMotor(env, { onToolCall, onInitialized, healthRelease = 
 }
 
 /** Ejecuta el puente en proceso con streams en memoria, como lo usaría un cliente stdio. */
-function startBridge(env, { cwd = env.root, workspacePaths = [], relaunch = null, log } = {}) {
+function startBridge(env, { cwd = env.root, workspacePaths = [], launch, relaunch = null, log } = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const waiting = new Map();
@@ -174,10 +174,13 @@ function startBridge(env, { cwd = env.root, workspacePaths = [], relaunch = null
   let nextId = 1;
   let buffer = '';
   
-  const args=['bridge','--base',env.base,'--cwd',cwd,'--paths',JSON.stringify(workspacePaths),'--launch-command',process.execPath,'--launch-arg',env.layout.entrypoint,'--launch-arg',env.base];
+  const motor = launch ?? { command: process.execPath, args: [env.layout.entrypoint, env.base] };
+  const args=['bridge','--base',env.base,'--cwd',cwd,'--paths',JSON.stringify(workspacePaths),'--launch-command',motor.command];
+  for (const arg of motor.args) args.push('--launch-arg', arg);
   if(env.layout.manifest?.packageRevision)args.push('--package-revision',String(env.layout.manifest.packageRevision),'--motor-version','1.0.4');
   if(relaunch){args.push('--relaunch-command',relaunch.command);for(const a of relaunch.args??[])args.push('--relaunch-arg',a);}
   const child=spawn(NATIVE,args,{cwd:PILOT,stdio:['pipe','pipe','pipe'],windowsHide:true,env:process.env});
+  const outputEnded = Promise.all([child.stdout, child.stderr].map(stream => new Promise(resolve => stream.once('end', resolve))));
   let stderr='';child.stderr.on('data',c=>{stderr+=c;log?.('info',c.toString());});
   child.stdin.on('error',()=>{});
   input.pipe(child.stdin);child.stdout.pipe(output);
@@ -231,6 +234,7 @@ function startBridge(env, { cwd = env.root, workspacePaths = [], relaunch = null
   return {
     request,
     notify,
+    outputEnded,
     notifications,
     stray,
     async initialize() {
@@ -307,6 +311,29 @@ test('puente: envía el ámbito en X-Mind-Workspace solo en initialize y nada an
     assert.ok(others.every((entry) => entry.headers['x-mind-workspace'] === undefined));
   } finally {
     await bridge.close();
+  }
+});
+
+test('puente: el primer cliente recibe EOF mientras el segundo sigue usando el Motor', { timeout: 30000 }, async t => {
+  const env = await createTempRoot(t);
+  const launch = { command: NATIVE, args: ['motor', '--base', env.base, '--conector'] };
+  const first = startBridge(env, { launch });
+  let second;
+  try {
+    await first.initialize();
+    const state = client => client.call('estado').then(reply => reply.result.structuredContent.motor_central.pid);
+    const pid = await state(first);
+    assert.ok(Number.isInteger(pid) && pid > 0);
+    second = startBridge(env, { launch });
+    await second.initialize();
+    assert.equal(await state(second), pid);
+    await first.close();
+    const ended = await Promise.race([first.outputEnded.then(() => true), delay(3000, false, { ref: false })]);
+    assert.equal(await state(second), pid, 'el Motor sigue disponible después de cerrar el primer puente');
+    assert.ok(ended, 'stdout y stderr del primer cliente deben entregar EOF con el Motor todavía activo');
+  } finally {
+    await first.close();
+    await second?.close();
   }
 });
 

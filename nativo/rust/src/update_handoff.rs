@@ -112,8 +112,35 @@ fn spawn_background(program: &Path, args: &[&str], environment: &[(&str, &str)])
 }
 
 #[cfg(windows)]
+pub(crate) struct BackgroundChild(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl BackgroundChild {
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        use std::os::windows::{io::AsRawHandle, process::ExitStatusExt};
+        use windows_sys::Win32::{Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{GetExitCodeProcess, WaitForSingleObject}};
+        let handle = self.0.as_raw_handle();
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_TIMEOUT => Ok(None),
+            WAIT_OBJECT_0 => {
+                let mut code = 0;
+                if unsafe { GetExitCodeProcess(handle, &mut code) } == 0 { return Err(io::Error::last_os_error()); }
+                Ok(Some(std::process::ExitStatus::from_raw(code)))
+            }
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+}
+
+#[cfg(windows)]
 fn spawn_background(program: &Path, args: &[&str], environment: &[(&str, &str)]) -> io::Result<()> {
-    use std::{env, ffi::{OsStr, OsString}, os::windows::ffi::OsStrExt, ptr};
+    spawn_background_child(program, args, environment).map(drop)
+}
+
+#[cfg(windows)]
+pub(crate) fn spawn_background_child(program: &Path, args: &[&str], environment: &[(&str, &str)]) -> io::Result<BackgroundChild> {
+    use std::{env, ffi::{OsStr, OsString}, os::windows::{ffi::OsStrExt, io::{FromRawHandle, OwnedHandle}}, ptr};
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::Threading::{CreateProcessW, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
@@ -179,9 +206,8 @@ fn spawn_background(program: &Path, args: &[&str], environment: &[(&str, &str)])
     }
     unsafe {
         CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
+        Ok(BackgroundChild(OwnedHandle::from_raw_handle(process.hProcess)))
     }
-    Ok(())
 }
 
 pub(crate) fn loopback() -> Result<reqwest::Client> {
