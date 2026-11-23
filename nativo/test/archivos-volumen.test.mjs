@@ -148,6 +148,20 @@ for (const variant of ['disco local', 'DriveFS']) {
         const indexes = (await fs.readdir(base)).filter(name => /^folder-index-[a-f0-9]{64}\.json$/u.test(name));
         assert.equal(indexes.length, 1);
         const indexFile = path.join(base, indexes[0]);
+        const readIndex = async () => JSON.parse(await fs.readFile(indexFile, 'utf8'));
+        if (process.platform === 'win32') {
+          const sameFolder = await readIndex();
+          sameFolder.root = sameFolder.root.toUpperCase();
+          await fs.writeFile(indexFile, JSON.stringify(sameFolder, null, 2) + '\n');
+          assert.equal((await call('crear', { ruta: 'MismaRaiz.txt', contenido: 'Prueba' })).indice, 'ok');
+        }
+        const otherFolder = await readIndex();
+        otherFolder.root = path.join(sandbox, 'OtraRaiz');
+        await fs.writeFile(indexFile, JSON.stringify(otherFolder, null, 2) + '\n');
+        assert.equal((await call('crear', { ruta: 'RaizSinIndice.txt', contenido: 'Prueba' })).indice, 'not-indexed');
+        assert.equal((await readIndex()).root, otherFolder.root);
+        assert.equal((await search('RaizSinIndice')).total, 1);
+        assert.equal(path.relative(folder, (await readIndex()).root), '');
         await fs.unlink(indexFile);
         const unindexed = await call('crear', { ruta: 'SinIndice.txt', contenido: 'Contenido.' });
         assert.equal(unindexed.indice, 'not-indexed');
@@ -167,6 +181,11 @@ for (const variant of ['disco local', 'DriveFS']) {
         assert.deepEqual((await explore(2)).entradas.map(entry => entry.ruta), ['Visible/Segundo', 'Visible/Segundo/Interior.txt']);
         assert.deepEqual(await fs.readFile(indexFile), indexBefore, 'explorar conserva el índice anterior');
         assert.equal((await call('leer', { ruta: 'Semilla.txt' })).contenido, 'Texto inicial ficticio.\n');
+        const unknownParent = await call('crear', { ruta: 'Visible/Segundo/SinPadreIndexado.txt', contenido: 'Ficticio.' });
+        assert.equal(unknownParent.estado, 'creado');
+        assert.equal(unknownParent.indice, 'needs-reconciliation');
+        assert.deepEqual(await fs.readFile(indexFile), indexBefore, 'se conserva un índice sin el padre confirmado');
+
         const created = await call('crear', { ruta: 'Nueva.txt', contenido: 'Uno.\n' });
         assert.equal(created.estado, 'creado');
         assert.equal(created.indice, 'ok');
@@ -199,6 +218,7 @@ for (const variant of ['disco local', 'DriveFS']) {
         assert.equal(fileEntry.size, Buffer.byteLength('Tres.\n'));
         assert.deepEqual((await search('Interior')).resultados.map(item => item.ruta), ['Visible/Segundo/Interior.txt']);
         const reconciled = JSON.parse(await fs.readFile(indexFile, 'utf8'));
+        assert.ok(reconciled.entries.some(entry => entry.path === 'Visible/Segundo/SinPadreIndexado.txt'));
         assert.deepEqual(published(reconciled), published(incremental), 'los metadatos puntuales coinciden con el recorrido');
 
 

@@ -230,17 +230,18 @@ test('el segundo control bloquea un arranque y relee el ejecutable después del 
   await fs.mkdir(path.dirname(runtime.nodeExecutable), { recursive: true });
   await fs.writeFile(runtime.nodeExecutable, 'ejecutable ficticio');
   await fs.writeFile(path.join(root, 'Sistema/mind-producto.json'), JSON.stringify(manifest));
-  let openGate, controls = 0, launched = false;
-  const gate = new Promise(resolve => { openGate = resolve; });
+  let controls = 0, launched = false;
+  const gate = Promise.withResolvers();
+  const reached = Promise.withResolvers();
   const expected = Object.assign(new Error('lanzamiento observado'), { code: 'ENSAYO' });
   const request = ensureCentralMotor({ layout: { root, baseDirectory: root, runtime: { nodeExecutable: 'obsoleto' } },
-    waitForUpdate: async () => { controls++; if (controls === 1) return { waited: false }; await gate; return { waited: true }; },
+    waitForUpdate: async () => { if (++controls === 1) return { waited: false }; reached.resolve(); await gate.promise; return { waited: true }; },
     launch: async options => { launched = true; assert.equal(options.executable, runtime.nodeExecutable); assert.equal(options.env.MIND_PYTHON, runtime.pythonExecutable); throw expected; } });
   const observed = assert.rejects(request, expected);
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await Promise.race([reached.promise, request]);
   assert.equal(controls, 2);
   assert.equal(launched, false);
-  openGate();
+  gate.resolve();
   await observed;
   assert.equal(launched, true);
 });

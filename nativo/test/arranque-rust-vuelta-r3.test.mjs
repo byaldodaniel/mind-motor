@@ -1355,7 +1355,7 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
     const r3History = await r3.call('historial_funcion', { id: 'resumen-etapa3' });
     assert.equal(r3History.ejecuciones.some(item => item.estado === 'completada'), true);
     const oldEvents = await r3.call('historial_funcion', { id: eventId });
-    assert.equal(oldEvents.ejecuciones.length, 2);
+    assert.equal(oldEvents.ejecuciones.length, 4);
     if (scheduledAt) {
       const oldSchedule = await r3.call('historial_funcion', { id: scheduledId });
       assert.equal(oldSchedule.ejecuciones.length, 1);

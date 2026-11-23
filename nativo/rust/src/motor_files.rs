@@ -16,7 +16,7 @@ use crate::{
     motor_owner::timestamp,
     motor_properties,
     motor_permissions::{self as access, Folder, Scope},
-    motor_workspace::relative_parts,
+    motor_workspace::{relative_parts, same_path},
     office_read,
     organize::{self, Expected},
     scan, text_write,
@@ -349,7 +349,7 @@ fn valid_persisted_index(data: &Value, folder: &Folder) -> bool {
     data["format"] == "mind-folder-index"
         && matches!(data["version"].as_u64(), Some(2 | 3))
         && data["scopeId"].as_str() == Some(folder.id.as_str())
-        && data["root"].as_str().is_some_and(|r| !r.is_empty() && !r.contains('\0'))
+        && data["root"].as_str().is_some_and(|root| same_path(&folder.root, Path::new(root)))
         && data["generation"].as_u64().is_some_and(|g| g >= 1)
         && data["createdAt"].as_str().and_then(iso_to_millis).is_some()
         && data["updatedAt"].as_str().and_then(iso_to_millis).is_some()
@@ -789,7 +789,6 @@ pub(crate) fn refresh_index_after_write(
     if folder.root != scope.root || folder.generation != scope.generation { return Err(uncertain()); }
     if !access::registered_folders(base)?.contains(&folder) { return Ok(false); }
     let Some((mut index, previous)) = load_persisted_index(base, &folder)? else { return Ok(false); };
-    if index["root"].as_str() != Some(folder.root.as_str()) { return Err(uncertain()); }
     let generation = index["generation"].as_u64().filter(|n| *n < MAX_SAFE_INTEGER).ok_or_else(uncertain)?;
     let entries = index["entries"].as_array_mut().ok_or_else(uncertain)?;
     // Older persisted indexes also use JavaScript's UTF-16 ordering. A corrupt or unsorted
