@@ -10,7 +10,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use {super::verify_text, std::io::Write};
 
 use uuid::Uuid;
@@ -40,7 +40,8 @@ fn same(file: &File, parent: &File, name: &CString) -> io::Result<bool> {
     }))
 }
 
-fn open_at(parent: &File, name: &CString, flags: i32, mode: libc::mode_t) -> io::Result<File> {
+// Darwin's mode_t is narrower than the C variadic argument to openat.
+fn open_at(parent: &File, name: &CString, flags: i32, mode: libc::c_uint) -> io::Result<File> {
     let flags = flags | libc::O_CLOEXEC | libc::O_NOFOLLOW;
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, mode) };
     os_result(fd)?;
@@ -152,7 +153,7 @@ pub(super) fn create_stream(
     Ok(report(&temp.file, None).unwrap_or_else(|_| Report::size_only(size)))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn preserve_metadata(file: &File, info: &std::fs::Metadata) -> Result<()> {
     if info.mode() & 0o200 == 0 {
         return Err("ACCESS_DENIED");
@@ -160,6 +161,11 @@ fn preserve_metadata(file: &File, info: &std::fs::Metadata) -> Result<()> {
     if info.mode() & 0o7000 != 0 || info.uid() != unsafe { libc::geteuid() } {
         return Err("METADATA_NOT_PRESERVABLE");
     }
+    platform_metadata(file)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_metadata(file: &File) -> Result<()> {
     let mut tags = vec![0u8; 65_536];
     let size = unsafe { libc::flistxattr(file.as_raw_fd(), tags.as_mut_ptr().cast(), tags.len()) };
     if size < 0 {
@@ -177,35 +183,74 @@ fn preserve_metadata(file: &File, info: &std::fs::Metadata) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+fn platform_metadata(file: &File) -> Result<()> {
+    use std::{ffi::c_void, ptr};
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
+        fn acl_free(acl: *mut c_void) -> libc::c_int;
+    }
+
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
+    let fd = file.as_raw_fd();
+    let mut info = MaybeUninit::<libc::stat>::uninit();
+    os_result(unsafe { libc::fstat(fd, info.as_mut_ptr()) })
+        .map_err(|_| "METADATA_NOT_PRESERVABLE")?;
+    if unsafe { info.assume_init().st_flags } != 0 {
+        return Err("METADATA_NOT_PRESERVABLE");
+    }
+    let attributes = unsafe {
+        libc::flistxattr(fd, ptr::null_mut(), 0, libc::XATTR_SHOWCOMPRESSION)
+    };
+    if attributes != 0 {
+        return Err("METADATA_NOT_PRESERVABLE");
+    }
+    let acl = unsafe { acl_get_fd_np(fd, ACL_TYPE_EXTENDED) };
+    if !acl.is_null() {
+        unsafe { acl_free(acl) };
+        return Err("METADATA_NOT_PRESERVABLE");
+    }
+    // Darwin returns ENOENT for a descriptor with no extended ACL.
+    if io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+        return Err("METADATA_NOT_PRESERVABLE");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn written_attributes(file: &File, original: &std::fs::Metadata) -> Result<()> {
     let mode = (original.mode() & 0o777) as libc::mode_t;
-    os_result(unsafe { libc::fchmod(file.as_raw_fd(), mode) })
-        .map_err(|_| "METADATA_NOT_PRESERVABLE")?;
     let group = file.metadata().map_err(|_| "METADATA_NOT_PRESERVABLE")?.gid();
     if group != original.gid() {
         os_result(unsafe { libc::fchown(file.as_raw_fd(), !0, original.gid()) })
             .map_err(|_| "METADATA_NOT_PRESERVABLE")?;
     }
+    os_result(unsafe { libc::fchmod(file.as_raw_fd(), mode) })
+        .map_err(|_| "METADATA_NOT_PRESERVABLE")?;
+    let result = file.metadata().map_err(|_| "METADATA_NOT_PRESERVABLE")?;
+    if result.uid() != original.uid() || result.gid() != original.gid() || result.mode() & 0o777 != original.mode() & 0o777 {
+        return Err("METADATA_NOT_PRESERVABLE");
+    }
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 type Snapshot = (u64, u64, u64, i64, i64, i64, i64);
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn snapshot(info: &std::fs::Metadata) -> Snapshot {
     (info.dev(), info.ino(), info.len(), info.mtime(), info.mtime_nsec(), info.ctime(), info.ctime_nsec())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn matches_snapshot(info: libc::stat, old: Snapshot) -> bool {
     info.st_mode & libc::S_IFMT == libc::S_IFREG && info.st_nlink == 1
         && (info.st_dev as u64, info.st_ino as u64, info.st_size as u64, info.st_mtime as i64,
             info.st_mtime_nsec as i64, info.st_ctime as i64, info.st_ctime_nsec as i64) == old
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn modify_text(
     parent: &File, name: &str, data: &[u8], limit: usize, expected: &str,
     confirm: impl FnOnce() -> Result<()>,
@@ -238,6 +283,8 @@ pub(super) fn modify_text(
     written_attributes(&temp.file, &info)?;
     temp.file.write_all(data).and_then(|_| temp.file.sync_all())
         .map_err(|error| mapped(error, true))?;
+    #[cfg(target_os = "macos")]
+    platform_metadata(&temp.file)?;
     let still_named = named(parent, &name).map_err(|error| mapped(error, true))?
         .is_some_and(|info| matches_snapshot(info, old));
     let still_held = snapshot(&check_file(&target, parent, true)?) == old;
@@ -252,13 +299,15 @@ pub(super) fn modify_text(
     let _ = parent.sync_all();
     // A non-cooperating Unix writer can race ordinary renameat(). Only
     // report success when we can confirm that we replaced the held inode.
-    if target.metadata().map_err(|_| "MODIFY_UNCONFIRMED")?.nlink() != 0 {
+    if target.metadata().map_err(|_| "MODIFY_UNCONFIRMED")?.nlink() != 0
+        || !same(&temp.file, parent, &name).map_err(|_| "MODIFY_UNCONFIRMED")?
+    {
         return Err("MODIFY_UNCONFIRMED");
     }
     Ok(report(&temp.file, old_identity).unwrap_or_else(|_| Report::size_only(data.len() as u64)))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn modify_text(
     _: &File, _: &str, _: &[u8], _: usize, _: &str, _: impl FnOnce() -> Result<()>,
 ) -> Result<Report> {

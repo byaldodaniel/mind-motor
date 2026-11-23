@@ -77,7 +77,9 @@ fn info(file: &File) -> Result<Info> {
 fn check(file: &File, directory: bool) -> Result<Info> {
     let info = info(file)?;
     if unsafe { GetFileType(file.as_raw_handle()) } != 1 || info.reparse()
-        || info.directory() != directory || (!directory && info.links != 1)
+        || info.directory() != directory
+        || (!directory && (!crate::scan::single_link(file.as_raw_handle(), info.links, info.volume)
+            || (info.links == 0 && info.id().1 == 0)))
     { return Err("UNSAFE_PATH"); }
     Ok(info)
 }

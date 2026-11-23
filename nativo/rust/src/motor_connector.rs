@@ -1,4 +1,5 @@
-use std::{fs, path::Path};
+use std::{fs, io, net::{Ipv4Addr, SocketAddrV4}, path::Path};
+use tokio::net::TcpListener;
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,7 @@ use crate::{bridge, motor_owner::{timestamp, Owner}, motor_permissions, text_wri
 const SECRET: &str = "conector-secreto.json";
 const CONSOLE: &str = "conector-consola.json";
 const STATE: &str = "conector.json";
+const PORT: &str = "conector-puerto.json";
 
 pub(crate) struct Connector {
     base: String,
@@ -24,6 +26,27 @@ pub(crate) struct Connector {
 }
 
 impl Connector {
+    pub(crate) async fn listen(base: &str, publish: bool, preferred: Option<u16>) -> Result<TcpListener, String> {
+        let saved = if publish && preferred.is_none() {
+            let identity = bridge::base_id(Path::new(base)).ok_or("No se pudo identificar la Base del conector.")?;
+            motor_permissions::read_json(base, PORT).map_err(|error| error.to_string())?
+                .filter(|record| record["version"] == 1 && record["baseId"] == identity)
+                .and_then(|record| record["port"].as_u64().and_then(|port| u16::try_from(port).ok()))
+                .filter(|port| *port != 0)
+        } else {
+            None
+        };
+        let endpoint = |port| SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+        if let Some(port) = preferred.or(saved) {
+            match TcpListener::bind(endpoint(port)).await {
+                Ok(listener) => return Ok(listener),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+                Err(error) => return Err(format!("No se pudo abrir el puerto local {port}: {error}")),
+            }
+        }
+        TcpListener::bind(endpoint(0)).await.map_err(|error| error.to_string())
+    }
+
     pub(crate) fn open(base: &str, port: u16, view_port: u16, owner: &Owner, publish: bool) -> Result<Self, String> {
         let base_id = bridge::base_id(Path::new(base)).ok_or("No se pudo identificar la Base del conector.")?;
         let started = timestamp().ok_or("No se pudo leer la hora del sistema.")?;
@@ -63,6 +86,11 @@ impl Connector {
             base: base.into(), base_id, token, console, port, view_port, started, version, revision, launch, published: false,
         };
         if publish {
+            let previous_port = motor_permissions::read_file(base, PORT, 64 * 1024).map_err(|e| e.to_string())?;
+            let saved = json!({"version":1, "baseId":connector.base_id, "port":port});
+            if previous_port.as_deref().and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok()).as_ref() != Some(&saved) {
+                write(base, PORT, &saved, previous_port, owner)?;
+            }
             let previous = motor_permissions::read_file(base, STATE, 64 * 1024).map_err(|e| e.to_string())?;
             write(base, STATE, &json!({
                 "version": 1, "baseId": connector.base_id, "port": port, "puertoVistas": view_port,

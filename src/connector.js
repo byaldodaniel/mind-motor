@@ -355,8 +355,8 @@ function defaultNodeExecutable(layout) {
   return process.execPath;
 }
 
-async function nativeMotorCommand(layout, baseDirectory) {
-  const configured = process.env.MIND_MOTOR_NATIVO_EXE;
+async function nativeMotorCommand(layout, baseDirectory, nativeExecutable) {
+  const configured = nativeExecutable ?? process.env.MIND_MOTOR_NATIVO_EXE ?? layout?.runtime?.nativeExecutable;
   if (!configured || !path.isAbsolute(configured)) {
     throw new MotorError('NATIVE_MOTOR_EXECUTABLE_REQUIRED', 'Indica una ruta absoluta al Motor Rust en MIND_MOTOR_NATIVO_EXE.');
   }
@@ -390,13 +390,14 @@ async function nativeMotorCommand(layout, baseDirectory) {
  * «El primero enciende»: reutiliza el Motor Central vivo en <10 ms o lo despierta en
  * segundo plano sin ventanas y espera hasta que publique su puerto y salud.
  */
-export async function ensureCentralMotor({ layout, baseDirectory, startupTimeoutMs = 20_000, launch = launchIndependent, waitForUpdate = waitForHandoff } = {}) {
+export async function ensureCentralMotor({ layout, baseDirectory, startupTimeoutMs = 20_000, launch = launchIndependent, waitForUpdate = waitForHandoff, nativeExecutable } = {}) {
   const targetBase = layout?.baseDirectory ?? baseDirectory;
   if (typeof targetBase !== 'string' || !path.isAbsolute(targetBase)) {
     throw new MotorError('INVALID_BASE', 'La ruta de la Base debe ser absoluta.');
   }
   await assertNotRestoring(targetBase, { pythonExecutable: layout?.pythonExecutable });
-  const native = process.env.MIND_MOTOR_NATIVO === '1';
+  const native = Boolean(nativeExecutable) || process.env.MIND_MOTOR_NATIVO === '1'
+    || (layout?.manifest?.mindVersion === '1.0.5' && ['win32', 'linux', 'darwin'].includes(process.platform));
   const check = async () => {
     const ready = await checkHealthyConnector(targetBase);
     if (native && ready && ready.health.backend !== 'rust') {
@@ -426,7 +427,7 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
     if (ready) return { ...ready, spawned: false };
   }
 
-  const command = native ? await nativeMotorCommand(layout, targetBase) : {
+  const command = native ? await nativeMotorCommand(layout, targetBase, nativeExecutable) : {
     executable: defaultNodeExecutable(layout),
     args: [defaultEntrypoint(layout), 'motor', '--base', targetBase],
   };
@@ -438,7 +439,7 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
   // ejecutor de la instalación que seguirá existiendo tras limpiar ese snapshot.
   if (layout?.pythonExecutable) motorEnvironment.MIND_PYTHON = layout.pythonExecutable;
   if (native) {
-    motorEnvironment.MIND_MOTOR_NATIVO_VERSION = MOTOR_VERSION;
+    motorEnvironment.MIND_MOTOR_NATIVO_VERSION = layout?.manifest?.mindVersion ?? MOTOR_VERSION;
     motorEnvironment.MIND_MOTOR_NATIVO_REVISION = String(layout?.manifest?.packageRevision ?? 0);
   }
   const launched = await launch({

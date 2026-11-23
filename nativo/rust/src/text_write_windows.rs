@@ -10,6 +10,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{verify_text, Report, Result};
+use crate::scan::{fat32_flags, single_link};
 
 type Handle = *mut c_void;
 
@@ -159,6 +160,10 @@ pub(crate) fn acquire(
 }
 
 pub(crate) fn rename(file: &File, parent: &File, name: &str, replace: bool) -> io::Result<()> {
+    rename_file(file, parent, name, if replace { 3 } else { 0 }, if replace { 65 } else { 10 })
+}
+
+fn rename_file(file: &File, parent: &File, name: &str, flags: u32, class: u32) -> io::Result<()> {
     let name = component(name)?;
     let name_bytes = name.len() * size_of::<u16>();
     let bytes = (offset_of!(Rename, name) + name_bytes).max(size_of::<Rename>());
@@ -166,11 +171,11 @@ pub(crate) fn rename(file: &File, parent: &File, name: &str, replace: bool) -> i
     let mut buffer = vec![0usize; bytes.div_ceil(size_of::<usize>())];
     let record = buffer.as_mut_ptr().cast::<Rename>();
     unsafe {
-        ptr::addr_of_mut!((*record).flags).write(if replace { 0x1 | 0x2 } else { 0 });
+        ptr::addr_of_mut!((*record).flags).write(flags);
         ptr::addr_of_mut!((*record).root).write(parent.as_raw_handle());
         ptr::addr_of_mut!((*record).length).write(name_bytes as u32);
         ptr::copy_nonoverlapping(name.as_ptr(), ptr::addr_of_mut!((*record).name).cast(), name.len());
-        checked_status(set_information(file, buffer.as_mut_ptr().cast(), bytes as u32, if replace { 65 } else { 10 }))
+        checked_status(set_information(file, buffer.as_mut_ptr().cast(), bytes as u32, class))
     }
 }
 
@@ -203,7 +208,9 @@ fn query<T: Default>(file: &File, class: i32) -> io::Result<T> {
 fn checked_file(file: &File, volume: u32, replace: bool) -> Result<Info> {
     let info = raw_info(file).map_err(|err| mapped(err, replace))?;
     if unsafe { GetFileType(file.as_raw_handle()) } != 1
-        || info.attributes & (REPARSE_POINT | DIRECTORY) != 0 || info.links != 1 || info.volume != volume
+        || info.attributes & (REPARSE_POINT | DIRECTORY) != 0 || info.volume != volume
+        || !single_link(file.as_raw_handle(), info.links, info.volume)
+        || (info.links == 0 && info.identity().1 == 0)
     {
         return Err("UNSAFE_PATH");
     }
@@ -358,8 +365,8 @@ fn inherited_acl(file: &File) -> bool {
 fn confirm_original(parent: &File, name: &str, original: &Info) -> Result<()> {
     let named = acquire(parent, name, SYNC | READ_ATTR, SHARE_ALL, OPEN, 0, 0)
         .map_err(|_| "VERSION_CONFLICT")?;
-    let info = raw_info(&named).map_err(|_| "VERSION_CONFLICT")?;
-    if info.identity() != original.identity() || info.attributes != original.attributes || info.links != 1 {
+    let info = checked_file(&named, original.volume, true).map_err(|_| "VERSION_CONFLICT")?;
+    if info.identity() != original.identity() || info.attributes != original.attributes || info.links != original.links {
         return Err("VERSION_CONFLICT");
     }
     Ok(())
@@ -370,17 +377,25 @@ pub(super) fn modify_text(
     confirm: impl FnOnce() -> Result<()>,
 ) -> Result<Report> {
     let parent_info = raw_info(parent).map_err(|err| mapped(err, true))?;
-    // Hold the original without FILE_SHARE_WRITE while verifying and publishing.
+    const NAMED_STREAMS: u32 = 0x0004_0000;
+    const PERSISTENT_ACLS: u32 = 0x0000_0008;
+    let exclude_delete = fat32_flags(parent.as_raw_handle(), parent_info.volume).is_some();
+    // Exclude writes on every volume and DELETE on FAT32, including DriveFS.
     let target = acquire(
         parent, name, SYNC | 0x20000 | READ_ATTR | 1 | WRITE_DATA,
-        1 | 4, OPEN, 0, 0,
+        if exclude_delete { 1 } else { 1 | 4 }, OPEN, 0, 0,
     ).map_err(|err| mapped(err, true))?;
     let original = checked_file(&target, parent_info.volume, true)?;
     verify_text(&target, limit, expected)?;
     if original.attributes & 1 != 0 {
         return Err("ACCESS_DENIED");
     }
-    if original.attributes & !SAFE_ATTRS != 0 || !single_stream(&target) || !inherited_acl(&target) {
+    let capabilities = fat32_flags(target.as_raw_handle(), original.volume);
+    let no_streams = capabilities.is_some_and(|flags| flags & NAMED_STREAMS == 0);
+    let no_acls = capabilities.is_some_and(|flags| flags & PERSISTENT_ACLS == 0);
+    if original.attributes & !SAFE_ATTRS != 0
+        || (!no_streams && !single_stream(&target)) || (!no_acls && !inherited_acl(&target))
+    {
         return Err("METADATA_NOT_PRESERVABLE");
     }
     let initial = query::<Basic>(&target, 0).map_err(|err| mapped(err, true))?;
@@ -396,12 +411,36 @@ pub(super) fn modify_text(
     if query::<Basic>(&target, 0).map_err(|_| "VERSION_CONFLICT")?.changed != initial.changed {
         return Err("VERSION_CONFLICT");
     }
-    rename(&temp.file, parent, name, true).map_err(|err| mapped(err, true))?;
+    let classic = match rename(&temp.file, parent, name, true) {
+        Ok(()) => false,
+        Err(error) if matches!(error.raw_os_error(), Some(1 | 50 | 87 | 120 | 124))
+            && exclude_delete && original.links == 0 && capabilities.is_some() =>
+        {
+            confirm_original(parent, name, &original)?;
+            rename_file(&temp.file, parent, name, 1, 10).map_err(|err| mapped(err, true))?;
+            true
+        }
+        Err(error) => return Err(mapped(error, true)),
+    };
     temp.published = true;
 
-    let old = query::<Standard>(&target, 1).map_err(|_| "MODIFY_UNCONFIRMED")?;
-    if old.links != 0 && old.delete_pending == 0 {
-        return Err("MODIFY_UNCONFIRMED");
+    if classic {
+        // A zero link count cannot confirm replacement on this provider.
+        let named = acquire(parent, name, SYNC | READ_ATTR, SHARE_ALL, OPEN, 0, 0)
+            .map_err(|_| "MODIFY_UNCONFIRMED")?;
+        let current = checked_file(&named, original.volume, true).map_err(|_| "MODIFY_UNCONFIRMED")?;
+        let replacement = raw_info(&temp.file).map_err(|_| "MODIFY_UNCONFIRMED")?;
+        let previous = raw_info(&target).map_err(|_| "MODIFY_UNCONFIRMED")?;
+        if current.identity() != replacement.identity() || current.identity() == previous.identity()
+            || previous.identity() != original.identity()
+        {
+            return Err("MODIFY_UNCONFIRMED");
+        }
+    } else {
+        let old = query::<Standard>(&target, 1).map_err(|_| "MODIFY_UNCONFIRMED")?;
+        if old.delete_pending == 0 && (original.links == 0 || old.links != 0) {
+            return Err("MODIFY_UNCONFIRMED");
+        }
     }
     let (volume, index) = original.identity();
     Ok(metadata(&temp.file, Some(format!("nt:{volume}:{index}")))

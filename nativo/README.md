@@ -2,11 +2,12 @@
 
 Código de la pieza nativa que, por etapas, asumirá el Motor completo de Mind:
 un solo proceso `Mind`, sin Node, Python ni ONNX, para Windows, macOS y Linux
-en x64 y ARM64. Mientras dura la transición, el Motor de `src/` (r3) sigue
-siendo el único escritor de la Base.
+en x64 y ARM64. El Motor activo conserva el escritor único de la Base.
+El Motor de `src/` permite volver a `v1.0.4-r3` con la misma Base.
 
 Modos del ejecutable Rust:
 
+- `motor`: Motor autónomo con una Base, un escritor y un conector MCP opcional.
 - `bridge`: puente MCP stdio ↔ Streamable HTTP hacia el Motor Central.
 - `scan`: enumeración segura de un directorio por petición JSONL.
 - `anfitrion`: entrada HTTP privada al Motor Central y alojamiento local opcional de vistas.
@@ -34,9 +35,28 @@ Windows, con `cargo` en el PATH o con la toolchain portátil del piloto:
 .\nativo\rust\build.ps1 -Toolchain 'D:\ruta\a\toolchain\rust'
 ```
 
-Salida: `nativo/rust/target/release/mind-native-rust-pilot.exe`.
-Los seis destinos se compilan en CI (`.github/workflows/nativo.yml`), cada uno
-con el SDK de su sistema.
+Salida de Windows: `nativo/rust/target/release/mind-native-rust-pilot.exe`.
+Con `--target`, el ejecutable se guarda bajo `target/<triple>/release/`.
+
+El workflow manual `.github/workflows/nativo.yml` compila y ejecuta las
+pruebas en la arquitectura de cada destino. SQLite se compila desde C con
+`rusqlite` y la característica `bundled`.
+
+| Destino | Target de CI | Compilador C |
+|---|---|---|
+| win32-x64 | `x86_64-pc-windows-msvc` | MSVC y SDK de Windows |
+| win32-arm64 | `aarch64-pc-windows-msvc` | MSVC ARM64 y SDK de Windows |
+| linux-x64 | `x86_64-unknown-linux-musl` | `musl-gcc` |
+| linux-arm64 | `aarch64-unknown-linux-musl` | `musl-gcc` |
+| darwin-x64 | `x86_64-apple-darwin` | Clang y SDK de macOS |
+| darwin-arm64 | `aarch64-apple-darwin` | Clang y SDK de macOS |
+
+En la validación local de la Etapa 6 se compiló y ejecutó el release Windows x64
+(`x86_64-pc-windows-gnu`) con `--locked --offline`. Pasó
+`cargo check --locked --offline` con SQLite embebido para Linux y macOS en x64
+y ARM64. El check de Windows ARM64 pasó con el C compilado por Zig/MinGW.
+El enlace de Windows con MSVC y la ejecución nativa de los destinos cruzados
+quedan pendientes de CI.
 
 ## Probar
 
@@ -50,6 +70,23 @@ npm test
 `MIND_NATIVE_EXE` está definido. Las Bases ficticias se crean en
 `%TEMP%\mind-nativo-runs` (o `MIND_NATIVO_RUNS`), fuera del Motor: r3 rechaza
 una Base dentro de su programa. Nunca usar una Base personal.
+
+Para probar archivos y papelera con el Motor autónomo, ejecuta
+`node --test nativo/test/archivos-volumen.test.mjs` con `MIND_NATIVE_EXE`.
+En macOS cubre el rechazo de ACL, flags y atributos extendidos que se perderían
+al sustituir el archivo. En Windows comprueba el rechazo de enlaces duros y
+junctions en disco local.
+
+En Windows, para incluir DriveFS, define `MIND_TEST_DRIVEFS_ROOT='G:\Mi unidad'`.
+La prueba usa una Base en `%TEMP%\mind-nativo-runs`, crea y retira una única
+subcarpeta de archivos ficticios en el volumen y comprueba la papelera de Mind.
+Admite el cero de enlaces de DriveFS solo después de confirmar por descriptor
+FAT32 sin soporte de enlaces duros y un archivo fuera de eliminación.
+El reemplazo clásico solo se intenta con el original abierto sin compartir
+escritura ni borrado y se comprueba por identidad del archivo publicado.
+En el DriveFS montado en `G:` se verificaron indexación, búsqueda, lectura,
+creación, modificación, edición, movimiento, renombrado, borrado y restauración.
+Al terminar se comprobó que la carpeta ficticia se había eliminado.
 
 Si el contrato falla, el Motor cambió algo que la pieza nativa debe respetar.
 Si el cambio es intencionado: `node nativo/contracts/r3/capturar.mjs --escribir`.

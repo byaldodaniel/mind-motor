@@ -1493,10 +1493,11 @@ fn write_startup_error(fault: &Fault) {
     }
 }
 
-fn boot_args(args: &[String]) -> Result<(PathBuf, bool, Layout), String> {
+fn boot_args(args: &[String]) -> Result<(PathBuf, bool, Layout, Option<u16>), String> {
     let mut layout = Layout::default();
     let mut root = None;
     let mut publish = false;
+    let mut port = None;
     let mut args = args.iter();
     while let Some(flag) = args.next() {
         let target = match flag.as_str() {
@@ -1505,21 +1506,26 @@ fn boot_args(args: &[String]) -> Result<(PathBuf, bool, Layout), String> {
             "--raiz-instalacion" => &mut layout.installation,
             "--datos-usuario" => &mut layout.user_data,
             "--conector" if !publish => { publish = true; continue; }
-            _ => return Err("motor --base ABS [--conector]".into()),
+            "--port" if port.is_none() => {
+                port = Some(args.next().and_then(|value| value.parse::<u16>().ok())
+                    .filter(|port| *port != 0).ok_or("--port debe estar entre 1 y 65535.")?);
+                continue;
+            }
+            _ => return Err("motor --base ABS [--conector] [--port N]".into()),
         };
         let value = args.next().map(PathBuf::from).filter(|path| path.is_absolute())
             .ok_or("Indica una ruta absoluta para motor.")?;
         if target.replace(value).is_some() { return Err("Opción repetida al arrancar el motor.".into()); }
     }
     let root = root.ok_or("motor --base ABS")?;
-    Ok((root, publish, layout))
+    Ok((root, publish, layout, port))
 }
 
 pub(crate) async fn run(args: &[String]) -> Result<(), String> {
-    if !cfg!(any(windows, target_os = "linux")) {
-        return Err("El arranque autónomo requiere escritura segura en Windows o Linux.".into());
+    if !cfg!(any(windows, target_os = "linux", target_os = "macos")) {
+        return Err("El arranque autónomo requiere escritura segura en Windows, Linux o macOS.".into());
     }
-    let (root, publish, layout) = boot_args(args)?;
+    let (root, publish, layout, preferred_port) = boot_args(args)?;
     if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
         if let Ok(parent_real) = parent.canonicalize() {
             if let Some(lock_path) = motor_owner::restore_lock_path(&parent_real.join(name)) {
@@ -1538,6 +1544,8 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     let base = canonical.to_str().ok_or("La ruta no es Unicode válido.")?;
     #[cfg(windows)]
     let base = base.strip_prefix("\\\\?\\").unwrap_or(base);
+    let listener = Connector::listen(base, publish, preferred_port).await?;
+    let port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let view_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let view_port = view_listener.local_addr().map_err(|error| error.to_string())?.port();
     let views = Views::new(view_port);
@@ -1545,8 +1553,6 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         write_startup_error(&error);
         error.to_string()
     })?);
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .build().map_err(|error| error.to_string())?;
     let services = Arc::new(Services::new(Path::new(base), port, view_port, client, MOTOR_SECRET)?);

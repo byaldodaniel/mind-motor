@@ -16,20 +16,62 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { destino: win32-x64,    ejecutor: windows-latest, target: x86_64-pc-windows-msvc,     ejecutar: true,  exe: mind-native.exe }
-          - { destino: win32-arm64,  ejecutor: windows-latest, target: aarch64-pc-windows-msvc,    ejecutar: false, exe: mind-native.exe }
-          - { destino: darwin-arm64, ejecutor: macos-14,       target: aarch64-apple-darwin,       ejecutar: true,  exe: mind-native }
-          - { destino: darwin-x64,   ejecutor: macos-14,       target: x86_64-apple-darwin,        ejecutar: false, exe: mind-native }
-          - { destino: linux-x64,    ejecutor: ubuntu-24.04,   target: x86_64-unknown-linux-musl,  ejecutar: true,  exe: mind-native }
-          - { destino: linux-arm64,  ejecutor: ubuntu-24.04,   target: aarch64-unknown-linux-musl, ejecutar: false, exe: mind-native }
+          - { destino: win32-x64,    ejecutor: windows-2025,     target: x86_64-pc-windows-msvc,    exe: mind-native.exe }
+          - { destino: win32-arm64,  ejecutor: windows-11-arm,   target: aarch64-pc-windows-msvc,   exe: mind-native.exe }
+          - { destino: darwin-x64,   ejecutor: macos-15-intel,   target: x86_64-apple-darwin,       exe: mind-native }
+          - { destino: darwin-arm64, ejecutor: macos-15,         target: aarch64-apple-darwin,      exe: mind-native }
+          - { destino: linux-x64,    ejecutor: ubuntu-24.04,     target: x86_64-unknown-linux-musl, exe: mind-native }
+          - { destino: linux-arm64,  ejecutor: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, exe: mind-native }
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Toolchain Rust
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
-          rustc --version
+          target='${{ matrix.target }}'
+          host="${target%-musl}"
+          if [[ "$target" == *-linux-musl ]]; then host="$host-gnu"; fi
+          toolchain="stable-$host"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" "$target"
+          rustc +"$toolchain" --version
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verificar MSVC para SQLite embebido
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $component = if ('${{ matrix.target }}' -like 'aarch64-*') {
+            'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+          } else {
+            'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+          }
+          $installation = & $vswhere -latest -products '*' -requires $component -property installationPath
+          if (-not $installation) { throw "Falta MSVC para ${{ matrix.target }}" }
+      - name: Compilador C para SQLite embebido
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          case '${{ matrix.target }}' in
+            *-apple-darwin)
+              echo "CC=$(xcrun --find clang)" >> "$GITHUB_ENV"
+              echo "AR=$(xcrun --find ar)" >> "$GITHUB_ENV"
+              echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+              ;;
+            *-linux-musl)
+              sudo apt-get update
+              sudo apt-get install -y musl-tools
+              echo "CC=musl-gcc" >> "$GITHUB_ENV"
+              echo "AR=ar" >> "$GITHUB_ENV"
+              ;;
+          esac
       - name: Opciones de compilación reproducible y enlazador
         shell: bash
         run: |
@@ -38,7 +80,7 @@ jobs:
           case '${{ matrix.target }}' in
             *-windows-msvc) FLAGS="$FLAGS -C link-arg=/Brepro" ;;
             *-linux-musl)
-              LLD="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+              LLD="$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/rust-lld"
               T="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
               echo "CARGO_TARGET_${T}_LINKER=$LLD" >> "$GITHUB_ENV"
               FLAGS="$FLAGS -C linker-flavor=ld.lld -C link-self-contained=yes" ;;
@@ -55,22 +97,15 @@ jobs:
           mkdir -p salida/${{ matrix.destino }}
           cp "$src" salida/${{ matrix.destino }}/${{ matrix.exe }}
           node -e "const fs=require('fs'),c=require('crypto');const f=process.argv[1];const b=fs.readFileSync(f);fs.writeFileSync('salida/${{ matrix.destino }}/resultado.json',JSON.stringify({destino:'${{ matrix.destino }}',target:'${{ matrix.target }}',compilado:true,ejecutado:false,bytes:b.length,sha256:c.createHash('sha256').update(b).digest('hex')},null,2))" "salida/${{ matrix.destino }}/${{ matrix.exe }}"
-      - uses: actions/setup-node@v4
-        if: matrix.ejecutar
-        with:
-          node-version: 24.22.1
-      - uses: actions/setup-python@v5
-        if: matrix.ejecutar
-        with:
-          python-version: '3.12'
       - name: Probar contrato r3 y ejecutable
-        if: matrix.ejecutar
         shell: bash
         env:
           MIND_AGENT_STARTUP: '0'
         run: |
-          export MIND_NATIVE_EXE="$PWD/salida/${{ matrix.destino }}/${{ matrix.exe }}"
-          node --test --test-concurrency=1 nativo/test/contrato-r3.test.mjs nativo/test/bridge-contract.test.mjs nativo/test/bridge-boundary.test.mjs nativo/test/invalid-mcp.test.mjs nativo/test/scan.test.mjs
+          export MIND_NATIVE_EXE="$(node -p 'require("node:path").resolve(process.argv[1])' "salida/${{ matrix.destino }}/${{ matrix.exe }}")"
+          node --test --test-concurrency=1 nativo/test/contrato-r3.test.mjs nativo/test/bridge-contract.test.mjs nativo/test/bridge-boundary.test.mjs nativo/test/invalid-mcp.test.mjs nativo/test/scan.test.mjs \
+            nativo/test/archivos-volumen.test.mjs nativo/test/clientes-conexion.test.mjs \
+            nativo/test/arranque-rust-vuelta-r3.test.mjs nativo/test/servicios-sqlite.test.mjs
           node -e "const f='salida/${{ matrix.destino }}/resultado.json';const j=JSON.parse(require('fs').readFileSync(f));j.ejecutado=true;require('fs').writeFileSync(f,JSON.stringify(j,null,2))"
       - uses: actions/upload-artifact@v4
         if: always()

@@ -289,6 +289,45 @@ fn is_stale_process(pid: u32, process_birth: &str) -> bool {
     format!("linux:{}:{birth}", boot.trim()) != process_birth
 }
 
+#[cfg(target_os = "macos")]
+fn darwin_process_birth(pid: libc::pid_t) -> Option<String> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size)
+    };
+    if read != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    (info.pbi_pid == pid as u32).then(|| {
+        format!("darwin:{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn identity() -> Option<(String, String)> {
+    let mut hostname = [0u8; 256];
+    if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } != 0 {
+        return None;
+    }
+    let length = hostname.iter().position(|&byte| byte == 0)?;
+    let host = std::str::from_utf8(&hostname[..length]).ok()?;
+    Some((host.to_owned(), darwin_process_birth(unsafe { libc::getpid() })?))
+}
+
+#[cfg(target_os = "macos")]
+fn is_stale_process(pid: u32, process_birth: &str) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false; };
+    if pid <= 0 {
+        return false;
+    }
+    if let Some(birth) = darwin_process_birth(pid) {
+        return birth != process_birth;
+    }
+    (unsafe { libc::kill(pid, 0) == -1 }) && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 #[cfg(unix)]
 pub(crate) fn timestamp() -> Option<String> {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -305,11 +344,11 @@ pub(crate) fn timestamp() -> Option<String> {
         time.tm_min, time.tm_sec, elapsed.subsec_millis()))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn identity() -> Option<(String, String)> {
     None
 }
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn is_stale_process(_pid: u32, _process_birth: &str) -> bool {
     false
 }

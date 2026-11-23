@@ -62,7 +62,7 @@ pub(crate) fn reader_component(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) use platform::acquire_native as windows_acquire;
+pub(crate) use platform::{acquire_native as windows_acquire, fat32_flags, single_link};
 
 #[cfg(windows)]
 mod platform {
@@ -82,6 +82,10 @@ mod platform {
         fn GetFileType(handle:Handle)->u32;
         fn GetFileInformationByHandle(handle:Handle,info:*mut c_void)->i32;
         fn GetFileInformationByHandleEx(handle:Handle,class:i32,info:*mut c_void,size:u32)->i32;
+        fn GetVolumeInformationByHandleW(
+            handle: Handle, label: *mut u16, label_len: u32, serial: *mut u32,
+            max_component: *mut u32, flags: *mut u32, filesystem: *mut u16, filesystem_len: u32,
+        ) -> i32;
         fn GetDriveTypeW(root:*const u16)->u32;
         fn GetLastError()->u32;
     }
@@ -149,6 +153,37 @@ mod platform {
         }
     }
 
+    pub(crate) fn fat32_flags(handle: Handle, expected_volume: u32) -> Option<u32> {
+        const FILE_SUPPORTS_HARD_LINKS: u32 = 0x0040_0000;
+        let (mut serial, mut flags) = (0, 0);
+        // DriveFS rejects a short volume-information buffer even for the name FAT32.
+        let mut filesystem = [0u16; 261];
+        let found = unsafe {
+            GetVolumeInformationByHandleW(handle, ptr::null_mut(), 0, &mut serial,
+                ptr::null_mut(), &mut flags, filesystem.as_mut_ptr(), filesystem.len() as u32)
+        };
+        let fat32 = [b'F' as u16, b'A' as u16, b'T' as u16, b'3' as u16, b'2' as u16, 0];
+        (found != 0 && serial == expected_volume && filesystem.starts_with(&fat32)
+            && flags & FILE_SUPPORTS_HARD_LINKS == 0).then_some(flags)
+    }
+
+    pub(crate) fn single_link(handle: Handle, links: u32, volume: u32) -> bool {
+        if links == 1 {
+            return true;
+        }
+        if links != 0 || fat32_flags(handle, volume).is_none() {
+            return false;
+        }
+        // DriveFS can report zero for a live file. Confirm that it is not being deleted.
+        #[repr(C)]
+        #[derive(Default)]
+        struct Standard { allocation: i64, eof: i64, links: u32, delete_pending: u8, directory: u8 }
+        let mut standard = Standard::default();
+        (unsafe { GetFileInformationByHandleEx(handle, 1, (&mut standard as *mut Standard).cast(),
+            mem::size_of::<Standard>() as u32) } != 0)
+            && standard.links == 0 && standard.delete_pending == 0 && standard.directory == 0
+    }
+
     fn reader_open(parent: Handle, name: &str, directory: bool, share: u32) -> Result<(OwnedHandle, u32), &'static str> {
         // Open the reparse point itself and inspect its held handle before use.
         let access = 0x100080 | if directory { 0x20 } else { 1 };
@@ -157,7 +192,7 @@ mod platform {
         if unsafe { GetFileType(handle.as_raw_handle()) } != 1
             || info.attributes & 0x400 != 0
             || (info.attributes & 0x10 != 0) != directory
-            || (!directory && info.links != 1)
+            || (!directory && !single_link(handle.as_raw_handle(), info.links, info.volume))
         {
             return Err("UNSAFE_PATH");
         }

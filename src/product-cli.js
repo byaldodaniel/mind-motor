@@ -15,7 +15,8 @@ const USAGE = `Mind ${MOTOR_VERSION}
 Uso: mind <orden> [opciones]
 
 Para el usuario:
-  preparar                   Prepara la conexión y el inicio automático en los agentes detectados.
+  preparar [--nativo | --volver-a-r3]
+                             Prepara la conexión y el inicio automático en los agentes detectados.
   inicio                     Lee instrucciones y destinos al iniciar una conversación.
   estado                     Resumen de la Base, las carpetas y sus permisos.
   despertar                  Enciende o reutiliza el Motor Central en segundo plano.
@@ -277,12 +278,28 @@ export async function main(args, io = {}) {
     if (!['version', '--version', 'actualizar', 'corregir', 'despertar', 'apagar', 'motor'].includes(command)) {
       const { prepareProductMcp } = await import('./product-mcp.js');
       try {
-        const result = await prepareProductMcp();
         const installation = await productInstallation();
+        const explicit = command === 'preparar';
+        const rollback = explicit && parameters[0] === '--volver-a-r3';
+        if (explicit && (parameters.length > Number(rollback) || (rollback && options.nativo))) {
+          throw new MotorError('INVALID_ARGUMENTS', 'Usa preparar [--nativo | --volver-a-r3].');
+        }
+        const { clientConnectionMode } = await import('./client-connections.js');
+        const mode = clientConnectionMode(installation.manifest, rollback ? 'r3' : explicit && options.nativo ? 'nativo' : undefined);
+        const result = mode === 'nativo' ? { estado: 'mcp-http-global' } : await prepareProductMcp();
         let startup = {estado:'no_aplica',clientes:[]};
-        if (installation.root) {
+        if (installation.root && (mode !== 'nativo' || explicit)) {
           const { prepareAgentStartup } = await import('./agent-startup.js');
-          startup = await prepareAgentStartup({root:installation.root,runtime:productRuntime(installation.root,installation.manifest),createMissing:true});
+          const runtime = productRuntime(installation.root, installation.manifest);
+          let baseDirectory = options.base ?? process.env.MIND_BASE;
+          if (mode === 'nativo' && process.env.MIND_AGENT_STARTUP !== '0') {
+            const layout = await resolveLayout({ base: baseDirectory });
+            const { ensureCentralMotor } = await import('./connector.js');
+            if (!runtime.nativeExecutable) throw new MotorError('NATIVE_MOTOR_EXECUTABLE_REQUIRED', 'Falta el Motor nativo de esta instalación.');
+            const active = await ensureCentralMotor({ layout, nativeExecutable: runtime.nativeExecutable });
+            baseDirectory = active.baseDirectory;
+          }
+          startup = await prepareAgentStartup({ root: installation.root, runtime, manifest: installation.manifest, createMissing: true, mode, baseDirectory });
         }
         if (command === 'preparar') {
           print({conexion:result,inicio:startup,indicacion:'Las instrucciones se cargan en conversaciones nuevas de los clientes detectados.'});
