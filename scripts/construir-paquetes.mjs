@@ -455,8 +455,11 @@ export async function buildNativePackage({ output, binaries, targets = NATIVE_TA
   };
   try {
     await putFile('LEEME.md', path.join(PACKAGING, 'plantilla', 'LEEME-nativo.md'));
+    // Un agente abierto en la carpeta lee estas instrucciones y conecta Mind sin ayuda del usuario.
+    await putFile('AGENTS.md', path.join(PACKAGING, 'plantilla', 'AGENTS-nativo.md'));
+    for (const name of ['CLAUDE.md', 'GEMINI.md']) await putFile(name, path.join(PACKAGING, 'plantilla', name));
     await putFile('Sistema/Licencias/Mind.txt', path.join(ROOT, 'LICENSE'));
-    for (const name of ['mind.cmd','mind','Autorizar Mind.cmd','Autorizar Mind.command']) {
+    for (const name of ['mind.cmd','mind','Autorizar Mind.cmd','Autorizar Mind.command','Conectar Mind.cmd','Conectar Mind.command']) {
       await putFile('Sistema/' + name, path.join(PACKAGING, 'iniciadores-nativos', name), name.endsWith('.cmd') ? 0o644 : 0o755);
     }
     const trusted = JSON.parse(await fsp.readFile(path.join(ROOT, 'src/update-channel.json'), 'utf8'));

@@ -56,7 +56,17 @@ Inicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autor
         println!("{}", json!({"mind":product.release.mind_version,"revision":product.release.package_revision,"motor":"rust","destino":target()}));
         return Ok(());
     }
+    if operation == "preparar" {
+        if args.len() != 1 { return Err(fail("INVALID_ARGUMENTS", "Usa preparar sin argumentos.")); }
+        let answer = if std::env::var("MIND_AGENT_STARTUP").as_deref() == Ok("0") { json!({"estado":"omitido"}) }
+            else { product_profiles::prepare(&product.root, &product.base, product_profiles::Mode::Explicit)? };
+        println!("{answer}");
+        return Ok(());
+    }
     if operation == "mcp" {
+        // Revisa las conexiones de los clientes sin retrasar al que acaba de lanzar este puente.
+        let (root, base) = (product.root.clone(), product.base.clone());
+        std::thread::spawn(move || product_profiles::heal(&root, &base));
         let scope = match &args[1..] {
             [flag, path] if flag == "--carpeta" => Some(physical(Path::new(path))?),
             [] => cwd(),
@@ -73,6 +83,7 @@ Inicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autor
         }
         return bridge::run(&bridge_args).await.map_err(|error| fs_error("MOTOR_UNAVAILABLE", error));
     }
+    product_profiles::heal(&product.root, &product.base);
     let client = update::loopback()?;
     if operation == "apagar" {
         let answer = if let Some(existing) = bridge::healthy(Path::new(&product.base), &client).await {
@@ -94,8 +105,6 @@ Inicio, estado, herramienta NOMBRE JSON, despertar, apagar, preparar, mcp, autor
     let connection = product.connect(&client).await?;
     let answer = match (operation, tail) {
         ("despertar", []) => json!({"estado":"listo","pid":connection.health["pid"],"puerto":connection.port}),
-        ("preparar", []) if std::env::var("MIND_AGENT_STARTUP").as_deref() == Ok("0") => json!({"estado":"omitido"}),
-        ("preparar", []) => product_profiles::prepare(&product.root, &product.base, connection.port, &connection.token)?,
         ("estado" | "inicio", []) => update::rpc(&client, &connection, &json!({"accion":operation,"cwd":cwd()})).await?,
         ("herramienta", [tool, raw]) => {
             let args: Value = serde_json::from_str(raw).map_err(|error| fs_error("INVALID_ARGUMENTS", error))?;

@@ -479,6 +479,7 @@ pub(crate) async fn run_worker(root: &str, id: &str, source: Option<File>, resta
         else { put(&root, HANDOFF, &job)?; }
         return Err(error);
     }
+    crate::product_profiles::heal(&root, &base);
     if restart { let _ = start_program(&root, &base); }
     Ok(job)
 }

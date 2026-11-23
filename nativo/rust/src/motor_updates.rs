@@ -143,6 +143,8 @@ impl Updater {
             let interval = if found.is_ok() { 6 * 3_600_000 } else { 30 * 60_000 };
             next["nextCheckAt"] = iso(now + interval);
             next["updatedAt"] = iso(now);
+            // El estado puede venir de una versión anterior: refleja siempre la entrega instalada.
+            next["installedRelease"] = json!(current);
             match found {
                 Ok(offer) => {
                     next["lastCheckedAt"] = iso(now);

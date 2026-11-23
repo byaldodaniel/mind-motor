@@ -1553,6 +1553,7 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
     let view_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await.map_err(|e| e.to_string())?;
     let view_port = view_listener.local_addr().map_err(|error| error.to_string())?.port();
     let views = Views::new(view_port);
+    let installation = layout.installation.clone();
     let motor = Arc::new(Motor::open(base.to_owned(), layout, publish, Arc::clone(&views)).map_err(|error| {
         write_startup_error(&error);
         error.to_string()
@@ -1561,6 +1562,12 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         .build().map_err(|error| error.to_string())?;
     let services = Arc::new(Services::new(Path::new(base), port, view_port, client, MOTOR_SECRET)?);
     let connector = Connector::open(base, port, view_port, &motor.owner, publish)?;
+    // Un Motor de instalación revisa al arrancar las conexiones de los clientes
+    // (también tras una actualización o al mover la copia).
+    if let Some(root) = installation.filter(|_| publish).and_then(|path| crate::update_package::physical(&path).ok()) {
+        let base = base.to_owned();
+        tokio::task::spawn_blocking(move || crate::product_profiles::heal(&root, &base));
+    }
     if !publish {
         println!("{}", json!({
             "pid": std::process::id(), "port": port, "puertoVistas": view_port,

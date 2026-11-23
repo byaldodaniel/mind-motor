@@ -98,8 +98,28 @@ La receta universal se arma a partir de los seis artefactos de
 SHA-256. El ZIP se genera con `scripts/construir-paquetes.mjs --binarios
 ARTEFACTOS --salida SALIDA --clave-publicacion CLAVE`. Los iniciadores
 `Sistema/mind.cmd` y `Sistema/mind` seleccionan el ejecutable Rust de la
-plataforma. `preparar` configura por HTTP local los perfiles detectados.
-No se copian Node, Python ni ONNX. El workflow manual `paquetes.yml`
+plataforma. No se copian Node, Python ni ONNX.
+
+### Conexión de los clientes sin configuración
+
+Cada cliente detectado (Codex, Claude Code, Gemini CLI y Antigravity) recibe
+una entrada `mind` por stdio: el ejecutable nativo de la instalación con
+`producto mcp`. La entrada no guarda puerto ni credencial. El puente lee el
+conector de la Base y despierta el Motor cuando hace falta, así que sigue
+sirviendo tras reiniciar el equipo, cambiar de puerto o actualizar. Cada chat
+suma un puente de ~1 MB de memoria propia; el Motor sigue siendo uno.
+
+`preparar` (o el iniciador «Conectar Mind») escribe esas entradas y el bloque
+de arranque. La misma revisión se repite sola, sin escribir en stdout, al
+arrancar el Motor de una instalación, al abrir cada puente, en cada orden de
+consola y al terminar una actualización. Adopta las entradas de Mind que
+apuntan a esta instalación o a una que ya no existe: Node de 1.0.4 (también la
+subtabla `[mcp_servers.mind.env]` de Codex), HTTP acreditado de 1.0.5 r1 y
+copias movidas. No toca entradas ajenas ni las de otra copia de Mind que siga
+instalada; `preparar`, por ser una petición expresa, sí sustituye esta última.
+`MIND_AGENT_STARTUP=0` omite todas estas escrituras. El paquete incluye
+`AGENTS.md`, `CLAUDE.md` y `GEMINI.md`: un agente abierto en la carpeta
+conecta la instalación sin ayuda del usuario. El workflow manual `paquetes.yml`
 usa `--ensayo` para generar un canal ficticio con la misma clave efímera
 que firma el ZIP y lo verifica antes de guardar el artefacto.
 
