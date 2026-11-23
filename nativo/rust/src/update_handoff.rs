@@ -402,10 +402,29 @@ fn attest_group(root: &str, name: &str, old: &BTreeMap<String, String>, depth: u
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Step { name: String, old: bool }
-fn move_path(parent: &str, from: &str, to: &str) -> Result<()> {
+async fn move_path(parent: &str, from: &str, to: &str, name: &str) -> Result<()> {
     if let Some((directory, _)) = to.rsplit_once('/') { ensure(parent, directory)?; }
-    organize::move_entry(parent, from, to, None, |_| Ok(())).map(|_| ())
-        .map_err(|code| fs_error("UPDATE_TRANSACTION_FAILED", code))
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut identity = None;
+    loop {
+        let moved = organize::move_entry(parent, from, to, None, |opened| {
+            if identity.as_ref().is_some_and(|expected| expected != &opened) {
+                return Err("ENTRY_CHANGED");
+            }
+            identity = Some(opened);
+            Ok(())
+        });
+        match moved {
+            Ok(_) => return Ok(()),
+            // An open descendant can temporarily prevent Windows from renaming a directory.
+            // Retry only a rejected move of the same verified entry. UNCONFIRMED may have moved it.
+            Err("ACCESS_DENIED" | "FILE_IN_USE") if cfg!(windows) && identity.is_some()
+                && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(100))).await;
+            }
+            Err(code) => return Err(fail("UPDATE_TRANSACTION_FAILED", format!("No se pudo mover {name} ({code})."))),
+        }
+    }
 }
 fn component(path: &Path) -> Result<&str> {
     path.file_name().and_then(|name| name.to_str()).filter(|name| scan::reader_component(name))
@@ -455,12 +474,12 @@ fn paths(root: &str, work: &Path, step: &Step) -> Result<(String, String, String
     };
     Ok((parent, from, to))
 }
-fn reverse(root: &str, work: &Path, steps: &[Step]) -> Result<()> {
+async fn reverse(root: &str, work: &Path, steps: &[Step]) -> Result<()> {
     for step in steps.iter().rev() {
         let (parent, from, to) = paths(root, work, step)?;
         if absent(&Path::new(&parent).join(&from))? {
             if absent(&Path::new(&parent).join(&to))? { return Err(fail("UPDATE_RECOVERY_REQUIRED", "Faltan los dos lados de un movimiento del diario.")); }
-            move_path(&parent, &to, &from)?;
+            move_path(&parent, &to, &from, &step.name).await?;
         }
     }
     Ok(())
@@ -543,7 +562,7 @@ async fn apply(root: &str, base: &str, work: &Path, job: &mut Value, source: Opt
     let transaction = async {
         for step in &steps {
             let (parent, from, to) = paths(root, work, step)?;
-            move_path(&parent, &from, &to)?;
+            move_path(&parent, &from, &to, &step.name).await?;
         }
         save(root, job, "verificando")?;
         for (file, expected) in &package.files {
@@ -563,7 +582,7 @@ async fn apply(root: &str, base: &str, work: &Path, job: &mut Value, source: Opt
         save(root, job, "completada")
     }.await;
     if let Err(error) = transaction {
-        reverse(root, work, &steps).map_err(|_| fail("UPDATE_RECOVERY_REQUIRED", "Se conserva el diario para deshacer el cambio parcial."))?;
+        reverse(root, work, &steps).await.map_err(|_| fail("UPDATE_RECOVERY_REQUIRED", "Se conserva el diario para deshacer el cambio parcial."))?;
         return Err(error);
     }
     Ok(())
@@ -622,7 +641,7 @@ pub(crate) async fn recover(args: &[String]) -> Result<Value> {
     if base_marker(&base)? != job["baseIdentity"] { return Err(busy()); }
     let (_lease, _owner) = quiet(&root, &base).await?;
     save(&root, &mut job, "aplicando")?;
-    reverse(&root, &work, &steps).map_err(|_| fail("UPDATE_RECOVERY_REQUIRED", "Se conserva el diario para completar la recuperación."))?;
+    reverse(&root, &work, &steps).await.map_err(|_| fail("UPDATE_RECOVERY_REQUIRED", "Se conserva el diario para completar la recuperación."))?;
     job["result"] = json!({"status":"revertida","baseDirectory":base});
     job["error"] = json!({"code":"UPDATE_REVERTED","message":"Se restauró el programa anterior desde la consola."});
     job["finishedAt"] = iso(now_ms());

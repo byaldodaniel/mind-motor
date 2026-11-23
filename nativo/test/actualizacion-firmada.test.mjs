@@ -167,3 +167,39 @@ test('1.0.4-r3 → 1.0.5 con Ed25519, quietud, Base intacta y vuelta a r3', {
   await legacyClient.close();
   t.diagnostic('Firma ajena, ZIP alterado y petición sin confirmación rechazados. Base y Markdown conservados entre los dos motores.');
 });
+
+test('Windows espera un descriptor temporal en Componentes y revierte si permanece abierto', {
+  skip: process.platform !== 'win32' || !binary || !python,
+  timeout: 120000,
+}, async t => {
+  const f = await lab(t);
+  const manifest = await fs.readFile(f.manifestFile);
+  const marker = path.join(f.root, 'descriptor-listo');
+  const holder = f.launch(python, ['-I', '-B', '-c', [
+    'import pathlib, sys',
+    'with open(sys.argv[1], "rb") as handle:',
+    '    pathlib.Path(sys.argv[2]).touch()',
+    '    sys.stdin.readline()',
+  ].join('\n'), f.node, marker], { stdio: ['pipe', 'pipe', 'pipe'] });
+  await eventually(() => fs.access(marker).then(() => true, () => false));
+
+  const blocked = await f.migrate().finished;
+  assert.notEqual(blocked.code, 0);
+  assert.match(blocked.stderr, /UPDATE_TRANSACTION_FAILED.*Sistema\/Componentes.*(?:ACCESS_DENIED|FILE_IN_USE)/u);
+  assert.deepEqual(await fs.readFile(f.manifestFile), manifest);
+  const previous = await readJson(f.reportFile);
+  assert.equal(previous.phase, 'fallida');
+
+  const retry = f.migrate();
+  await eventually(async () => {
+    const state = await readJson(f.reportFile);
+    if (state.id !== previous.id && state.phase === 'fallida') assert.fail(JSON.stringify(state.error));
+    return state.id !== previous.id && state.phase === 'aplicando';
+  });
+  await delay(350);
+  holder.child.stdin.end();
+  assert.equal((await holder.finished).code, 0);
+  const completed = await retry.finished;
+  assert.equal(completed.code, 0, completed.stderr);
+  assert.equal(JSON.parse(completed.stdout).phase, 'completada');
+});
