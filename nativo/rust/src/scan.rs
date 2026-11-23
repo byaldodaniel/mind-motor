@@ -49,6 +49,18 @@ pub(crate) fn open_directory(root: &str, relative: &str) -> Result<std::fs::File
     platform::open_directory(root, relative)
 }
 
+// Confirm only the named entry, using metadata relative to its held parent.
+pub(crate) fn entry_exists(root: &str, relative: &str) -> bool {
+    if !relative.split('/').all(reader_component) {
+        return false;
+    }
+    let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    #[cfg(any(windows, unix))]
+    { platform::entry_exists(root, parent, name).unwrap_or(false) }
+    #[cfg(not(any(windows, unix)))]
+    { false }
+}
+
 pub(crate) fn reader_component(name: &str) -> bool {
     let base = name.split('.').next().unwrap_or("").to_ascii_lowercase();
     let reserved = matches!(base.as_str(), "con" | "prn" | "aux" | "nul")
@@ -230,6 +242,15 @@ mod platform {
         Ok((directory, volume))
     }
 
+    pub(super) fn entry_exists(root: &str, parent: &str, name: &str) -> Result<bool, &'static str> {
+        let (directory, volume) = reader_directory(root, parent)?;
+        let file = acquire(directory.as_raw_handle(), name, 0x100080, 0x200020, 7).map_err(reader_error)?;
+        let info = metadata(&file).map_err(reader_error)?;
+        Ok(info.volume == volume && info.attributes & 0x400 == 0
+            && unsafe { GetFileType(file.as_raw_handle()) } == 1
+            && (info.attributes & 0x10 != 0 || single_link(file.as_raw_handle(), info.links, volume)))
+    }
+
     pub(super) fn open_directory(root: &str, relative: &str) -> Result<File, &'static str> {
         reader_directory(root, relative).map(|(directory, _)| File::from(directory))
     }
@@ -354,6 +375,17 @@ mod platform {
             directory = next;
         }
         Ok((directory, volume))
+    }
+
+    pub(super) fn entry_exists(root: &str, parent: &str, name: &str) -> Result<bool, &'static str> {
+        let (directory, volume) = reader_directory(root, parent)?;
+        let name = CString::new(name).map_err(|_| "UNSAFE_PATH")?;
+        let mut info: libc::stat = unsafe { mem::zeroed() };
+        if unsafe { libc::fstatat(directory.as_raw_fd(), name.as_ptr(), &mut info, libc::AT_SYMLINK_NOFOLLOW) } < 0 {
+            return Ok(false);
+        }
+        let kind = info.st_mode & libc::S_IFMT;
+        Ok(info.st_dev == volume.st_dev && (kind == libc::S_IFDIR || (kind == libc::S_IFREG && info.st_nlink == 1)))
     }
 
     pub(super) fn open_directory(root: &str, relative: &str) -> Result<std::fs::File, &'static str> {

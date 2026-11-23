@@ -913,10 +913,15 @@ impl Motor {
                 access::resolve_file(&self.base, Some(&scope.id), &parts, &["organizar"])
                     .map(|_| ()).map_err(|error| error.code)
             };
-            if let Err(code) = organize::create_directory(&scope.root, &parts, allowed) {
+            match organize::create_directory(&scope.root, &parts, allowed) {
+                Ok(()) => {
+                    let directory = access::Scope { relative: parts.clone(), ..scope.clone() };
+                    let _ = motor_files::refresh_index_after_write(&self.base, &directory,
+                        motor_files::IndexChange::CreateDirectory, allowed);
+                }
                 // Another program may have made the directory after our read.
-                if code != "FILE_EXISTS" { return Err(filesystem(code)); }
-                scan::open_directory(&scope.root, &parts).map_err(filesystem)?;
+                Err("FILE_EXISTS") => { scan::open_directory(&scope.root, &parts).map_err(filesystem)?; }
+                Err(code) => return Err(filesystem(code)),
             }
         }
         Ok(())
@@ -935,7 +940,9 @@ impl Motor {
         text_write::write_bytes(&scope.root, &scope.relative, markdown(record).as_bytes(), MAX_MARKDOWN,
             expected.as_deref(), || self.confirm(target, scope))
             .map(|_| ()).map_err(filesystem)?;
-        let _ = motor_files::refresh_index_after_write(&self.base, &scope.id, || self.owner.check());
+        let _ = motor_files::refresh_index_after_write(&self.base, scope, if previous.is_none() {
+            motor_files::IndexChange::CreateFile
+        } else { motor_files::IndexChange::ModifyFile }, || self.confirm(target, scope));
         Ok(())
     }
 }

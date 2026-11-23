@@ -118,6 +118,22 @@ fn describe(entry: &Entry) -> Result<Value> {
     Ok(data)
 }
 
+// Read the published object through a descriptor, without listing its directory.
+pub(crate) fn index_metadata(root: &str, path: &str, directory: bool) -> Result<Value> {
+    let file = if directory { open_directory(root, path)? } else { crate::scan::open_reader(root, path)? };
+    let mut data = fs::metadata(&file, directory)?;
+    let Identity(device, inode) = fs::identity(&file)?;
+    #[cfg(windows)]
+    if inode != 0 { data["identity"] = json!(format!("nt:{device}:{inode}")); }
+    #[cfg(unix)]
+    {
+        data["identity"] = json!(format!("posix:{device}:{inode}"));
+        // The POSIX directory scanner exposes modification and change times only.
+        data["createdMs"] = Value::Null;
+    }
+    Ok(data)
+}
+
 fn check_expected(entry: &Entry, metadata: &Value, expected: Option<Expected>) -> Result<()> {
     let Some(expected) = expected else { return Ok(()); };
     if expected.kind.as_deref().is_some_and(|value| value != entry.kind())

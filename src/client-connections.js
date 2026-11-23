@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { productPaths } from './layout.js';
+import { productPaths, usesNativeMotor } from './layout.js';
 import { checkHealthyConnector } from './connector.js';
 
 const problem = code => Object.assign(new Error('La conexion requiere revision; se conserva el archivo.'), { code });
@@ -302,7 +302,7 @@ const TRANSPORT_FIELDS = new Set([
 ]);
 
 export function clientConnectionMode(manifest, mode) {
-  const selected = mode ?? (manifest?.mindVersion === '1.0.5' ? 'nativo' : 'legacy');
+  const selected = mode ?? (usesNativeMotor(manifest) ? 'nativo' : 'legacy');
   if (!['nativo', 'r3', 'legacy'].includes(selected)) throw problem('CLIENT_CONNECTION_MODE');
   return selected;
 }

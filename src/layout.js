@@ -43,6 +43,14 @@ async function readManifest(file) {
   return data;
 }
 
+/** Los paquetes de transición 1.0.5 podían incluir el ejecutable sin declarar runtime. */
+export function usesNativeMotor(manifest, platform = process.platform, arch = process.arch) {
+  if (manifest?.runtime === 'rust') return true;
+  if (manifest?.runtime || manifest?.mindVersion !== '1.0.5') return false;
+  const executable = platform === 'win32' ? 'mind-native.exe' : 'mind-native';
+  return Object.hasOwn(manifest.files ?? {}, `Sistema/Componentes/Nativo/${platform}-${arch}/${executable}`);
+}
+
 /** Los ejecutores conservan rutas por destino y están listos al extraer el ZIP. */
 export function productRuntime(root, manifest, platform = process.platform, arch = process.arch) {
   const target = `${platform}-${arch}`;

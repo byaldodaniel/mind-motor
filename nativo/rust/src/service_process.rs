@@ -112,14 +112,39 @@ impl ServiceProcess {
         tokio::time::timeout_at(deadline, self.child.wait()).await
             .map_err(|_| "El proceso de la aplicación no confirmó su cierre.".to_owned())?
             .map_err(|error| format!("No se pudo confirmar el cierre: {error}"))?;
-        loop {
-            match self.tree.active() {
-                Ok(false) => return Ok(()),
-                Ok(true) if Instant::now() < deadline => sleep(PROBE_INTERVAL).await,
-                Ok(true) => return Err("El grupo de procesos de la aplicación sigue activo.".into()),
-                Err(error) => return Err(format!("No se pudo comprobar el cierre del grupo: {error}")),
-            }
+        confirm_group_exit(deadline, || self.tree.active()).await
+    }
+}
+
+async fn confirm_group_exit(deadline: Instant, mut active: impl FnMut() -> io::Result<bool>) -> Result<(), String> {
+    loop {
+        match active() {
+            Ok(false) => return Ok(()),
+            Ok(true) if Instant::now() >= deadline =>
+                return Err("El grupo de procesos de la aplicación sigue activo.".into()),
+            Ok(true) => {}
+            // Darwin can report EPERM while the group's last members are zombies.
+            // Only a subsequent negative probe confirms the group has disappeared.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && Instant::now() < deadline => {}
+            Err(error) => return Err(format!("No se pudo comprobar el cierre del grupo: {error}")),
         }
+        tokio::time::sleep_until(deadline.min(Instant::now() + PROBE_INTERVAL)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn group_exit_requires_confirmation_after_permission_denied() {
+        let mut probes = [Err(io::ErrorKind::PermissionDenied.into()), Ok(true), Ok(false)].into_iter();
+        assert!(confirm_group_exit(Instant::now() + STOP_TIMEOUT, || probes.next().unwrap()).await.is_ok());
+        assert!(probes.next().is_none());
+
+        let error = confirm_group_exit(Instant::now(), || Err(io::ErrorKind::PermissionDenied.into())).await.unwrap_err();
+        assert!(error.contains("No se pudo comprobar"));
+        assert!(confirm_group_exit(Instant::now(), || Ok(true)).await.is_err());
     }
 }
 

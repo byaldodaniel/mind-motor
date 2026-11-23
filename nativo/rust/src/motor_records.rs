@@ -404,6 +404,8 @@ fn parse_since(value: &str) -> Option<i64> {
 
 struct LocatorIndex {
     folder: crate::motor_permissions::Folder,
+    findable: bool,
+    indexed: bool,
     existing: std::collections::BTreeSet<String>,
     removed: std::collections::BTreeMap<String, Value>,
 }
@@ -413,7 +415,11 @@ fn locator_indexes(base: &str) -> Result<Vec<LocatorIndex>, Fault> {
     let now = timestamp().as_deref().and_then(motor_files::iso_to_millis).unwrap_or_default();
     let mut indexes = Vec::new();
     for folder in access::folders(base)? {
-        if !access::folder_access(base, &folder)?.contains(&"encontrar") { continue; }
+        let findable = access::folder_access(base, &folder)?.contains(&"encontrar");
+        if !findable {
+            indexes.push(LocatorIndex { folder, findable, indexed: false, existing: Default::default(), removed: Default::default() });
+            continue;
+        }
         let index = motor_files::load_persisted_index(base, &folder).ok().flatten().map(|(data, _)| data);
         let existing: std::collections::BTreeSet<_> = index.as_ref().into_iter()
             .flat_map(|index| index["entries"].as_array().into_iter().flatten())
@@ -421,7 +427,7 @@ fn locator_indexes(base: &str) -> Result<Vec<LocatorIndex>, Fault> {
             .filter(|path| !access::excluded(&folder, &path.split('/').collect::<Vec<_>>())).collect();
         let removed = motor_files::list_removed_for_folder(base, &folder, None, now, &existing)
             .into_iter().filter_map(|entry| Some((entry["ruta"].as_str()?.to_owned(), entry["eliminado"].clone()))).collect();
-        indexes.push(LocatorIndex { folder, removed, existing: existing.into_iter().map(str::to_owned).collect() });
+        indexes.push(LocatorIndex { folder, findable, indexed: index.is_some(), removed, existing: existing.into_iter().map(str::to_owned).collect() });
     }
     Ok(indexes)
 }
@@ -435,17 +441,25 @@ fn entry_out(record: &Value, indexes: &[LocatorIndex]) -> Value {
             if let Some(locator) = reference["locator"].as_str().filter(|path| !is_web_locator(path)) {
                 let path = std::path::Path::new(locator);
                 let relative = locator.replace('\\', "/");
-                let candidates: Vec<_> = indexes.iter().filter_map(|index| {
+                let mut candidates: Vec<_> = indexes.iter().filter_map(|index| {
                     let name = if path.is_absolute() {
                         let parts = crate::motor_workspace::relative_parts(std::path::Path::new(&index.folder.root), path)?;
-                        if parts.is_empty() { return None; }
                         parts.join("/")
                     } else {
                         relative.strip_prefix("./").unwrap_or(&relative).trim_start_matches('/').to_owned()
                     };
                     Some((index, name))
                 }).collect();
-                if candidates.iter().any(|(index, name)| index.existing.contains(name)) {
+                if path.is_absolute() {
+                    // The most specific registered folder owns this location, including when access was revoked.
+                    candidates.sort_by_key(|(index, _)| std::cmp::Reverse(index.folder.root.len()));
+                    candidates.truncate(1);
+                }
+                let resolved = candidates.len() == 1;
+                candidates.retain(|(index, name)| index.findable && !name.is_empty()
+                    && !crate::motor_permissions::excluded(&index.folder, &name.split('/').collect::<Vec<_>>()));
+                if candidates.iter().any(|(index, name)| index.existing.contains(name)
+                    || (resolved && !index.indexed && crate::scan::entry_exists(&index.folder.root, name))) {
                     output["estado"] = json!("existe");
                 } else if let Some(removed) = candidates.iter().find_map(|(index, name)| index.removed.get(name)) {
                     output["estado"] = json!("eliminado");

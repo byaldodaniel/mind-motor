@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     motor_consent::remove_base_file,
     motor_destinations::{confirm_scope, file_fault},
-    motor_files::{absolute_path, read_base_stored, reconcile_folder_index, refresh_index_after_write, write_base_json, IndexDiff},
+    motor_files::{absolute_path, read_base_stored, reconcile_folder_index, refresh_index_after_write, write_base_json, IndexChange, IndexDiff},
     motor_native::{digest, invalid, only, Fault},
     motor_owner::timestamp,
     motor_permissions::{self as access, Folder},
@@ -365,7 +365,10 @@ fn generate(
     } else {
         create_file(&scope, &csv, confirm)?
     };
-    if status != "sin-cambios" { let _ = refresh_index_after_write(base, &destination.id, owner); }
+    if status != "sin-cambios" {
+        let change = if status == "creado" { IndexChange::CreateFile } else { IndexChange::ModifyFile };
+        let _ = refresh_index_after_write(base, &scope, change, owner);
+    }
     Ok((status, rows, version, absolute_path(&destination.root, &scope.relative)))
 }
 

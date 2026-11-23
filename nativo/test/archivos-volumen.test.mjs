@@ -167,19 +167,40 @@ for (const variant of ['disco local', 'DriveFS']) {
         assert.deepEqual((await explore(2)).entradas.map(entry => entry.ruta), ['Visible/Segundo', 'Visible/Segundo/Interior.txt']);
         assert.deepEqual(await fs.readFile(indexFile), indexBefore, 'explorar conserva el índice anterior');
         assert.equal((await call('leer', { ruta: 'Semilla.txt' })).contenido, 'Texto inicial ficticio.\n');
-        assert.equal((await call('crear', { ruta: 'Nueva.txt', contenido: 'Uno.\n' })).estado, 'creado');
+        const created = await call('crear', { ruta: 'Nueva.txt', contenido: 'Uno.\n' });
+        assert.equal(created.estado, 'creado');
+        assert.equal(created.indice, 'ok');
         const first = await call('leer', { ruta: 'Nueva.txt' });
         if (!virtual && process.platform !== 'win32') await fs.chmod(path.join(folder, 'Nueva.txt'), 0o640);
         const before = await fs.stat(path.join(folder, 'Nueva.txt'));
-        assert.equal((await call('modificar', { ruta: 'Nueva.txt', version: first.version, contenido: 'Dos.\n' })).estado, 'modificado');
+        const modified = await call('modificar', { ruta: 'Nueva.txt', version: first.version, contenido: 'Dos.\n' });
+        assert.equal(modified.estado, 'modificado');
+        assert.equal(modified.indice, 'ok');
         if (process.platform !== 'win32') {
           const after = await fs.stat(path.join(folder, 'Nueva.txt'));
           assert.equal(after.mode & 0o777, before.mode & 0o777);
           assert.equal(after.gid, before.gid);
         }
         await call('modificar', { ruta: 'Nueva.txt', version: first.version, contenido: 'Anterior' }, 'VERSION_CONFLICT');
-        assert.equal((await call('editar', { ruta: 'Nueva.txt', ediciones: [{ buscar: 'Dos.', reemplazar: 'Tres.' }] })).estado, 'modificado');
+        const patch = await call('editar', { ruta: 'Nueva.txt', ediciones: [{ buscar: 'Dos.', reemplazar: 'Tres.' }] });
+        assert.equal(patch.estado, 'modificado');
+        assert.equal(patch.indice, 'ok');
         assert.equal(await fs.readFile(path.join(folder, 'Nueva.txt'), 'utf8'), 'Tres.\n');
+        assert.equal((await call('crear', { accion: 'carpeta', ruta: 'Archivo' })).estado, 'creada');
+        const incremental = JSON.parse(await fs.readFile(indexFile, 'utf8'));
+        const baseline = JSON.parse(indexBefore);
+        assert.equal(incremental.updatedAt, baseline.updatedAt, 'una escritura conserva la fecha del último recorrido');
+        assert.equal(incremental.generation, baseline.generation + 4);
+        assert.equal(incremental.entries.some(entry => entry.path.startsWith('Visible')), false,
+          'escribir no incorpora un subárbol ajeno descubierto en el disco');
+        const published = index => index.entries.filter(entry => ['Archivo', 'Nueva.txt'].includes(entry.path));
+        const [directoryEntry, fileEntry] = published(incremental);
+        assert.equal(directoryEntry.type, 'directory');
+        assert.equal(fileEntry.size, Buffer.byteLength('Tres.\n'));
+        assert.deepEqual((await search('Interior')).resultados.map(item => item.ruta), ['Visible/Segundo/Interior.txt']);
+        const reconciled = JSON.parse(await fs.readFile(indexFile, 'utf8'));
+        assert.deepEqual(published(reconciled), published(incremental), 'los metadatos puntuales coinciden con el recorrido');
+
 
         if (!virtual) {
           await fs.link(path.join(folder, 'Nueva.txt'), path.join(folder, 'EnlaceDuro.txt'));
@@ -208,7 +229,6 @@ for (const variant of ['disco local', 'DriveFS']) {
           assert.equal(await fs.readFile(filename, 'utf8'), 'Tres.\n');
         }
 
-        assert.equal((await call('crear', { accion: 'carpeta', ruta: 'Archivo' })).estado, 'creada');
         assert.equal((await call('organizar', { accion: 'renombrar', ruta: 'Nueva.txt', nuevo_nombre: 'Final.txt' })).estado, 'renombrado');
         const moved = { accion: 'mover', desde: 'Final.txt', hasta: 'Archivo/Final.txt' };
         assert.equal((await call('organizar', moved)).estado, 'movido');

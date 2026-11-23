@@ -29,7 +29,7 @@ async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(RUNS, 'mind-clientes-')));
   const home = path.join(root, 'Perfil'), installation = path.join(root, 'Instalacion'), cwd = path.join(root, 'Proyecto');
   const hidden = path.join(root, 'Reservado');
-  const manifest = { mindVersion: '1.0.5', layoutVersion: 2, packageRevision: 1 };
+  const manifest = { mindVersion: '1.0.5', runtime: 'rust', layoutVersion: 2, packageRevision: 1 };
   const paths = productPaths(installation, manifest), base = paths.baseDirectory, runtime = productRuntime(installation, manifest);
   const codexHome = path.join(home, '.codex');
   const isolated = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: codexHome, GEMINI_CLI_HOME: home, MIND_AGENT_STARTUP: '0' };

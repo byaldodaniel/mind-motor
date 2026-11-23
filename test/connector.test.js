@@ -244,3 +244,32 @@ test('el segundo control bloquea un arranque y relee el ejecutable después del 
   await observed;
   assert.equal(launched, true);
 });
+
+test('el manifiesto después del relevo elige el Motor Rust aunque cambie la versión del producto', async t => {
+  const { productRuntime, usesNativeMotor } = await import('../src/layout.js');
+  const { clientConnectionMode } = await import('../src/client-connections.js');
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mind-cambio-motor-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const current = { format: 'mind-product', version: 1, mindVersion: '1.0.5', platform: process.platform, arch: process.arch,
+    packageRevision: 1, layoutVersion: 2, updateProtocolVersion: 2, files: {} };
+  const incoming = { ...current, mindVersion: '1.0.6', runtime: 'rust' };
+  const runtime = productRuntime(root, incoming);
+  const relative = path.relative(root, runtime.nativeExecutable).split(path.sep).join('/');
+  assert.equal(clientConnectionMode(current), 'legacy');
+  assert.equal(usesNativeMotor({ ...current, files: { [relative]: 'a'.repeat(64) } }), true);
+  assert.equal(clientConnectionMode(incoming), 'nativo');
+  await fs.mkdir(path.dirname(runtime.nativeExecutable), { recursive: true });
+  await fs.writeFile(runtime.nativeExecutable, 'ficticio');
+  await fs.writeFile(path.join(root, 'Sistema/mind-producto.json'), JSON.stringify(incoming));
+  const stop = new Error('Se observó el lanzamiento del Motor correcto.');
+  let checked = 0;
+  await assert.rejects(ensureCentralMotor({ layout: { root, baseDirectory: root, manifest: current },
+    waitForUpdate: async () => ({ waited: ++checked === 2 }),
+    launch: async command => {
+      assert.equal(command.executable, runtime.nativeExecutable);
+      assert.ok(command.args.includes('--raiz-instalacion'));
+      assert.ok(!command.args.includes('--directorio-motor'));
+      throw stop;
+    },
+  }), error => error === stop);
+});

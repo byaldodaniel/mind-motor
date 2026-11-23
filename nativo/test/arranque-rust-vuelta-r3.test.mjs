@@ -385,7 +385,7 @@ async function openStdioMcp(args, envVars, clientInfo) {
 
 test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras un corte', {
   skip: !executable && 'Indica MIND_NATIVE_EXE',
-  timeout: testWindowsScheduler ? 240_000 : 120_000,
+  timeout: testWindowsScheduler ? 272_000 : 152_000,
 }, async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(RUNS, prefix)));
   const base = path.join(root, 'Base');
@@ -1067,8 +1067,25 @@ test('el arranque habitual entrega la Base al Motor Rust y r3 la recupera tras u
   await fs.writeFile(eventOutput, 'Edición manual posterior en el mismo archivo');
   await waitUntil(async () => (await eventHistory()).length === 2, 'La edición posterior del mismo archivo vuelve a activar la función.');
   assert.equal(await fs.readFile(eventOutput, 'utf8'), 'Generado por evento-etapa3');
+  // Las escrituras MCP actualizan el índice antes de responder; la automatización
+  // debe recibir el cambio aunque el siguiente sondeo ya encuentre los mismos datos.
+  const eventInput = 'Entrada-agente.evt';
+  const indexedInput = async () => JSON.parse(await fs.readFile(indexPath, 'utf8')).entries
+    .find(entry => entry.path === eventInput);
+  assert.equal(await indexedInput(), undefined);
+  const createdInput = await first.call('crear', { carpeta: notesId, ruta: eventInput, contenido: 'uno' });
+  assert.equal(createdInput.indice, 'ok');
+  assert.equal((await indexedInput())?.size, Buffer.byteLength('uno'));
+  await waitUntil(async () => (await eventHistory()).length === 3, 'Crear desde MCP activa la función.');
+
+  const changedInput = await second.call('modificar', {
+    carpeta: notesId, ruta: eventInput, ediciones: [{ buscar: 'uno', reemplazar: 'cuatro' }],
+  });
+  assert.equal(changedInput.indice, 'ok');
+  assert.equal((await indexedInput())?.size, Buffer.byteLength('cuatro'));
+  await waitUntil(async () => (await eventHistory()).length === 4, 'Modificar desde MCP vuelve a activar la función.');
   await delay(6500);
-  assert.equal((await eventHistory()).length, 2, 'Cada edición se ejecutó una sola vez');
+  assert.equal((await eventHistory()).length, 4, 'Cada cambio se ejecutó una sola vez');
   assert.ok((await eventHistory()).every(entry => entry.estado === 'completada' && entry.origen === 'evento'));
   await first.call('mind_cambiar', { operacion: 'desactivar_funcion', argumentos: { id: eventId } });
 

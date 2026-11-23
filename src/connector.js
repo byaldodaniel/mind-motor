@@ -12,7 +12,7 @@ import { classifyToolPriority, QUEUE_PRIORITY } from './smart-queue.js';
 import { launchIndependent } from './independent-launch.js';
 import { predatesSystemBoot, systemBootTime, parseOwnerRecord, inspectProcessOwners } from './process-identity.js';
 import { waitForHandoff } from './update-handoff-state.js';
-import { productPaths, productRuntime } from './layout.js';
+import { productPaths, productRuntime, usesNativeMotor } from './layout.js';
 import { readManifestFile } from './product-files.js';
 import { MOTOR_VERSION } from './version.js';
 
@@ -366,7 +366,7 @@ async function nativeMotorCommand(layout, baseDirectory, nativeExecutable) {
     throw new MotorError('NATIVE_MOTOR_EXECUTABLE_UNAVAILABLE', 'El ejecutable configurado del Motor Rust no está disponible.');
   }
   const base = await canonicalBaseDirectory(baseDirectory);
-  const motorDirectory = layout?.motorDirectory ? await canonicalBaseDirectory(layout.motorDirectory) : null;
+  const motorDirectory = layout?.manifest?.runtime !== 'rust' && layout?.motorDirectory ? await canonicalBaseDirectory(layout.motorDirectory) : null;
   if (motorDirectory && contains(motorDirectory, base)) {
     throw new MotorError('BASE_OVERLAPS_MOTOR', 'La Base no puede estar dentro del Motor.');
   }
@@ -396,11 +396,11 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
     throw new MotorError('INVALID_BASE', 'La ruta de la Base debe ser absoluta.');
   }
   await assertNotRestoring(targetBase, { pythonExecutable: layout?.pythonExecutable });
-  const native = Boolean(nativeExecutable) || process.env.MIND_MOTOR_NATIVO === '1'
-    || (layout?.manifest?.mindVersion === '1.0.5' && ['win32', 'linux', 'darwin'].includes(process.platform));
+  const useNative = () => Boolean(nativeExecutable) || process.env.MIND_MOTOR_NATIVO === '1'
+    || usesNativeMotor(layout?.manifest);
   const check = async () => {
     const ready = await checkHealthyConnector(targetBase);
-    if (native && ready && ready.health.backend !== 'rust') {
+    if (useNative() && ready && ready.health.backend !== 'rust') {
       throw new MotorError('NATIVE_MOTOR_BUSY', 'La Base sigue abierta con el Motor anterior. Ciérralo antes de arrancar Rust.');
     }
     return ready;
@@ -427,6 +427,7 @@ export async function ensureCentralMotor({ layout, baseDirectory, startupTimeout
     if (ready) return { ...ready, spawned: false };
   }
 
+  const native = useNative();
   const command = native ? await nativeMotorCommand(layout, targetBase, nativeExecutable) : {
     executable: defaultNodeExecutable(layout),
     args: [defaultEntrypoint(layout), 'motor', '--base', targetBase],

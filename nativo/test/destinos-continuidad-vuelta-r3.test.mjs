@@ -156,7 +156,13 @@ test('5A: destinos, resultados, continuidad y traslado por MCP con vuelta al tag
     revision: 2, proyecto: project, destinos: { carpeta: projectDir },
   })).revision, 3);
 
+  const onlyFind = path.join(unreadable, 'origen.png');
+  const privateFile = path.join(excluded, 'origen.png');
+  const outsideFile = path.join(outside, 'entrega.txt');
+  const absent = path.join(notes, 'inexistente.txt');
+  await fs.writeFile(outsideFile, 'Entrega ficticia.');
   const related = (await client.call('continuidad_registrar', {
+    referencias: [onlyFind, privateFile, outsideFile, absent, reportDir].map(ubicacion => ({ ubicacion })),
     tipo: 'acuerdo', contenido: { resumen: 'Evidencia de Órbita' },
   })).registro;
   const referred = path.join(notes, 'ficha.txt');
@@ -246,6 +252,11 @@ test('5A: destinos, resultados, continuidad y traslado por MCP con vuelta al tag
   assert.deepEqual(queried.relacionados.map(item => item.id), [related.id]);
   assert.equal(queried.registros[0].referencias.find(ref => ref.ubicacion === referred).estado, 'existe');
   assert.equal(queried.registros[0].referencias.find(ref => ref.ubicacion === web).estado, undefined);
+  const states = new Map(queried.relacionados[0].referencias.map(ref => [ref.ubicacion, ref.estado]));
+  assert.equal(states.get(onlyFind), 'existe');
+  assert.equal(states.get(reportDir), 'existe');
+  for (const hidden of [privateFile, outsideFile, absent]) assert.equal(states.get(hidden), 'desconocido');
+  await assert.rejects(fs.stat(path.join(base, 'folder-index-' + folder.id + '.json')), { code: 'ENOENT' });
   const byDate = await client.call('continuidad_consultar', { ids: [id], desde: '2000-01-01T04:00:00-05:00' });
   assert.equal(byDate.mostrados, 1);
   await client.call('continuidad_consultar', { desde: '2000-01-01T04:00:00+€1' }, 'INVALID_ARGUMENTS');

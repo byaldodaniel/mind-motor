@@ -403,6 +403,17 @@ pub(crate) fn index_summary(base: &str, folder: &Folder) -> Value {
     }
 }
 
+fn index_entry(path: &str, kind: &str, metadata: &Value) -> Value {
+    let time = |key: &str| metadata[key].as_i64().and_then(millis_to_iso);
+    json!({
+        "path": path, "type": kind, "state": "indexed", "reason": Value::Null,
+        "size": if kind == "file" { json!(metadata["size"].as_u64().unwrap_or(0)) } else { Value::Null },
+        "modifiedAt": time("modifiedMs"), "changedAt": time("changedMs"),
+        "createdAt": metadata["createdMs"].as_i64().filter(|ms| *ms > 0).and_then(millis_to_iso),
+        "identity": metadata["identity"].as_str(),
+    })
+}
+
 fn scan_folder_tree(folder: &Folder, prefix: &str, depth: usize) -> Result<(Vec<Value>, Vec<Value>), Fault> {
     let mut entries = Vec::new();
     let mut issues = Vec::new();
@@ -446,30 +457,7 @@ fn scan_folder_tree(folder: &Folder, prefix: &str, depth: usize) -> Result<(Vec<
                             "La carpeta supera el límite de entradas indexables.",
                         ));
                     }
-                    let size = if kind == "file" {
-                        json!(item["size"].as_u64().unwrap_or(0))
-                    } else {
-                        Value::Null
-                    };
-                    let modified_at = item["modifiedMs"].as_i64().and_then(millis_to_iso);
-                    let changed_at = item["changedMs"].as_i64().and_then(millis_to_iso);
-                    let created_at = item["createdMs"].as_i64().filter(|ms| *ms > 0).and_then(millis_to_iso);
-                    let identity = item
-                        .get("identity")
-                        .and_then(Value::as_str)
-                        .map(|s| json!(s))
-                        .unwrap_or(Value::Null);
-                    entries.push(json!({
-                        "changedAt": changed_at,
-                        "createdAt": created_at,
-                        "identity": identity,
-                        "modifiedAt": modified_at,
-                        "path": path,
-                        "reason": Value::Null,
-                        "size": size,
-                        "state": "indexed",
-                        "type": kind,
-                    }));
+                    entries.push(index_entry(&path, kind, &item));
                     if kind == "directory" && level + 1 < depth {
                         queue.push_back((path, level + 1));
                     }
@@ -777,21 +765,85 @@ pub(crate) fn reconcile_index_by_id(
     reconcile_folder_index(base, &folder, confirm_owner)
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum IndexChange {
+    CreateDirectory,
+    CreateFile,
+    ModifyFile,
+    ObserveFile,
+}
+
 pub(crate) fn refresh_index_after_write(
-    base: &str, folder_id: &str,
+    base: &str, scope: &Scope, change: IndexChange,
     confirm_owner: impl Fn() -> Result<(), &'static str>,
 ) -> Result<bool, Fault> {
-    // Writing a single file must not build a first index for the entire root.
-    // The next explicit search can build it, including for a temporary client scope.
-    let folder = access::folders(base)?
-        .into_iter()
-        .find(|f| f.id == folder_id)
-        .ok_or_else(|| Fault::new("FOLDER_NOT_AUTHORIZED", "La carpeta no está autorizada."))?;
+    let required: &[&str] = match change {
+        IndexChange::CreateDirectory => &["organizar"],
+        IndexChange::ObserveFile => &["escribir", "encontrar"],
+        _ => &["escribir"],
+    };
+    let folder = access::resolve_folder(base, Some(&scope.id), required)?;
+    // A known write is not a full scan. The next search must still discover external changes.
     forget_scan(base, &folder);
-    if load_persisted_index(base, &folder)?.is_none() {
-        return Ok(false);
+    let uncertain = || Fault::new("INDEX_NEEDS_RECONCILIATION", "La entrada requiere una reconciliación del índice.");
+    if folder.root != scope.root || folder.generation != scope.generation { return Err(uncertain()); }
+    if !access::registered_folders(base)?.contains(&folder) { return Ok(false); }
+    let Some((mut index, previous)) = load_persisted_index(base, &folder)? else { return Ok(false); };
+    if index["root"].as_str() != Some(folder.root.as_str()) { return Err(uncertain()); }
+    let generation = index["generation"].as_u64().filter(|n| *n < MAX_SAFE_INTEGER).ok_or_else(uncertain)?;
+    let entries = index["entries"].as_array_mut().ok_or_else(uncertain)?;
+    // Older persisted indexes also use JavaScript's UTF-16 ordering. A corrupt or unsorted
+    // list cannot be patched safely: preserve it until an explicit reconciliation.
+    let mut previous_path: Option<&str> = None;
+    for entry in entries.iter() {
+        let path = entry["path"].as_str().filter(|path| !path.is_empty()).ok_or_else(uncertain)?;
+        if previous_path.is_some_and(|p| !p.encode_utf16().cmp(path.encode_utf16()).is_lt()) {
+            return Err(uncertain());
+        }
+        previous_path = Some(path);
     }
-    reconcile_folder_index(base, &folder, confirm_owner).map(|_| true)
+    let locate = |path: &str| entries.binary_search_by(|entry| {
+        entry["path"].as_str().unwrap_or_default().encode_utf16().cmp(path.encode_utf16())
+    });
+    let path = scope.relative.as_str();
+    for (end, _) in path.match_indices('/') {
+        let parent = locate(&path[..end]).ok().map(|pos| &entries[pos]).ok_or_else(uncertain)?;
+        if parent["type"] != "directory" || parent["state"] != "indexed" { return Err(uncertain()); }
+    }
+    let directory = change == IndexChange::CreateDirectory;
+    let kind = if directory { "directory" } else { "file" };
+    verify(base, scope, required)?;
+    let metadata = organize::index_metadata(&scope.root, path, directory)
+        .map_err(|code| Fault::new(code, "No se pudieron verificar los metadatos de la entrada publicada."))?;
+    let next = index_entry(path, kind, &metadata);
+    let added = match locate(path) {
+        Ok(pos) => {
+            if entries[pos] == next { return Ok(true); }
+            if matches!(change, IndexChange::CreateFile | IndexChange::CreateDirectory)
+                || entries[pos]["type"] != kind || entries[pos]["state"] != "indexed" { return Err(uncertain()); }
+            entries[pos] = next;
+            false
+        }
+        Err(pos) => {
+            if change == IndexChange::ModifyFile || entries.len() >= MAX_INDEX_ENTRIES { return Err(uncertain()); }
+            entries.insert(pos, next);
+            true
+        }
+    };
+    index["generation"] = json!(generation + 1);
+    // updatedAt records the last full scan, including external arrivals and deletions.
+    write_base_json(base, &index_file(&folder.id), &index, Some(&previous), || {
+        confirm_owner()?;
+        verify(base, scope, required).map_err(|error| error.code)
+    })?;
+    forget_scan(base, &folder);
+    push_diff(base, IndexDiff {
+        folder_id: folder.id, seq: NEXT_DIFF_SEQ.fetch_add(1, Ordering::AcqRel),
+        added: if added { vec![path.to_owned()] } else { Vec::new() },
+        modified: if added { Vec::new() } else { vec![path.to_owned()] },
+        removed: Vec::new(),
+    });
+    Ok(true)
 }
 
 pub(crate) fn ensure_folder_index(
@@ -1158,7 +1210,7 @@ fn edit_text(
     let report = text_write::write_bytes(&scope.root, &scope.relative, next.as_bytes(), MAX_TEXT, Some(expected_hash), confirm)
         .map_err(|code| Fault::new(code, "La publicación segura se detuvo. Revisa permisos, destino y versión."))?;
     let _ = motor_properties::rebind(base, &scope, &report, &confirm_owner);
-    let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+    let index_state = match refresh_index_after_write(base, &scope, IndexChange::ModifyFile, &confirm_owner) {
         Ok(true) => "ok",
         Ok(false) => "not-indexed",
         Err(_) => "needs-reconciliation",
@@ -1218,7 +1270,7 @@ fn write(
     if directory {
         only(args, &["accion", "carpeta", "ruta"])?;
         organize::create_directory(&scope.root, &scope.relative, confirm).map_err(filesystem)?;
-        let _ = refresh_index_after_write(base, &scope.id, &confirm_owner);
+        let _ = refresh_index_after_write(base, &scope, IndexChange::CreateDirectory, &confirm_owner);
         return Ok(json!({
             "estado": "creada",
             "carpeta": scope.id,
@@ -1244,7 +1296,7 @@ fn write(
     let report = text_write::write_bytes(&scope.root, &scope.relative, content.as_bytes(), MAX_TEXT, expected, confirm)
         .map_err(filesystem)?;
     let _ = motor_properties::rebind(base, &scope, &report, &confirm_owner);
-    let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+    let index_state = match refresh_index_after_write(base, &scope, if creating { IndexChange::CreateFile } else { IndexChange::ModifyFile }, &confirm_owner) {
         Ok(true) => "ok",
         Ok(false) => "not-indexed",
         Err(_) => "needs-reconciliation",
@@ -1279,7 +1331,7 @@ pub(crate) fn write_output_text(
     let bytes = content.as_bytes();
     match text_write::write_bytes(&scope.root, &scope.relative, bytes, MAX_TEXT, None, confirm) {
         Ok(_) => {
-            let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+            let index_state = match refresh_index_after_write(base, &scope, IndexChange::CreateFile, &confirm_owner) {
                 Ok(true) => "updated",
                 Ok(false) => "not-indexed",
                 Err(_) => "needs-reconciliation",
@@ -1320,7 +1372,7 @@ pub(crate) fn write_output_text(
     };
     text_write::write_bytes(&scope.root, &scope.relative, bytes, MAX_TEXT, Some(&expected), confirm_mod)
         .map_err(|code| Fault::new(code, "No se pudo actualizar el archivo generado."))?;
-    let index_state = match refresh_index_after_write(base, &scope.id, &confirm_owner) {
+    let index_state = match refresh_index_after_write(base, &scope, IndexChange::ModifyFile, &confirm_owner) {
         Ok(true) => "updated",
         Ok(false) => "not-indexed",
         Err(_) => "needs-reconciliation",

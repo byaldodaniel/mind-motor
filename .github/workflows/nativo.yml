@@ -90,6 +90,9 @@ jobs:
       - name: Compilar
         shell: bash
         run: cargo build --release --locked --manifest-path nativo/rust/Cargo.toml --target ${{ matrix.target }}
+      - name: Probar lógica interna de Rust
+        shell: bash
+        run: cargo test --release --locked --manifest-path nativo/rust/Cargo.toml --target ${{ matrix.target }}
       - name: Registrar binario
         shell: bash
         run: |

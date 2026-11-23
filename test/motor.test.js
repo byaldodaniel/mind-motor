@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, symlink } from 'node:fs/promises';
+import { cp, copyFile, mkdtemp, mkdir, readFile, writeFile, readdir, rm, symlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -24,16 +24,17 @@ async function fixture(t) {
   return { root, base };
 }
 
-function cli(base, ...args) {
-  return spawnSync(process.execPath, [cliPath, '--base', base, ...args], {
+const cli = (...args) => runCli(cliPath, ...args);
+
+function runCli(entry, base, ...args) {
+  return spawnSync(process.execPath, [entry, '--base', base, ...args], {
     cwd: developmentDirectory, encoding: 'utf8', timeout: 10_000,
   });
 }
 
-async function snapshot(directory = motorDirectory, prefix = '') {
+async function snapshot(directory, prefix = '') {
   const result = {};
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (entry.name === '.git') continue;
     const name = path.join(prefix, entry.name);
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) Object.assign(result, await snapshot(absolute, name));
@@ -62,19 +63,24 @@ test('escribe, recupera y reemplaza texto Unicode sin dejar temporales', async (
 });
 
 test('el registro persiste entre procesos terminados y no modifica el Motor', async (t) => {
-  const { base } = await fixture(t);
-  const before = await snapshot();
-  const status = cli(base, 'status');
+  const { root, base } = await fixture(t);
+  const program = path.join(root, 'Motor');
+  await mkdir(program);
+  await cp(path.join(motorDirectory, 'src'), path.join(program, 'src'), { recursive: true });
+  await copyFile(path.join(motorDirectory, 'package.json'), path.join(program, 'package.json'));
+  const run = (...args) => runCli(path.join(program, 'src', 'cli.js'), base, ...args);
+  const before = await snapshot(program);
+  const status = run('status');
   assert.equal(status.status, 0, status.stderr);
   assert.equal(JSON.parse(status.stdout).status, 'ready');
-  const write = cli(base, 'write', 'reinicio', 'persistente');
+  const write = run('write', 'reinicio', 'persistente');
   assert.equal(write.status, 0, write.stderr);
   assert.equal(write.signal, null);
   // spawnSync solo retorna al terminar el proceso escritor; otro proceso lee.
-  const read = cli(base, 'read', 'reinicio');
+  const read = run('read', 'reinicio');
   assert.equal(read.status, 0, read.stderr);
   assert.deepEqual(JSON.parse(read.stdout), { id: 'reinicio', value: 'persistente' });
-  assert.deepEqual(await snapshot(), before);
+  assert.deepEqual(await snapshot(program), before);
   assert.deepEqual(await readdir(base), ['record-reinicio.json']);
 });
 
