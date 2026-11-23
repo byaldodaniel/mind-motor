@@ -6,6 +6,7 @@ name: Ejecutable nativo (seis destinos)
 # Windows cuentan varias veces contra la cuota de Actions.
 on:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -102,10 +103,16 @@ jobs:
         env:
           MIND_AGENT_STARTUP: '0'
         run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            export MIND_PYTHON="$(python -c 'import sys; print(sys.executable)' | tr -d '\r')"
+          else
+            export MIND_PYTHON="$(command -v python3)"
+          fi
           export MIND_NATIVE_EXE="$(node -p 'require("node:path").resolve(process.argv[1])' "salida/${{ matrix.destino }}/${{ matrix.exe }}")"
           node --test --test-concurrency=1 nativo/test/contrato-r3.test.mjs nativo/test/bridge-contract.test.mjs nativo/test/bridge-boundary.test.mjs nativo/test/invalid-mcp.test.mjs nativo/test/scan.test.mjs \
             nativo/test/archivos-volumen.test.mjs nativo/test/clientes-conexion.test.mjs \
-            nativo/test/arranque-rust-vuelta-r3.test.mjs nativo/test/servicios-sqlite.test.mjs
+            nativo/test/arranque-rust-vuelta-r3.test.mjs nativo/test/servicios-sqlite.test.mjs \
+            nativo/test/actualizacion-firmada.test.mjs
           node -e "const f='salida/${{ matrix.destino }}/resultado.json';const j=JSON.parse(require('fs').readFileSync(f));j.ejecutado=true;require('fs').writeFileSync(f,JSON.stringify(j,null,2))"
       - uses: actions/upload-artifact@v4
         if: always()

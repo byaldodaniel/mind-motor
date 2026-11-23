@@ -1,19 +1,14 @@
 #!/usr/bin/env node
 // Construye el ZIP universal de Mind para Windows, macOS y Linux.
 //
-//   node scripts/construir-paquetes.mjs [--plataforma <id> ...] [--salida <carpeta>]
-//                                       [--cache <carpeta>] [--sumas-oficiales] [--conservar-carpeta]
+//   node scripts/construir-paquetes.mjs --binarios ARTEFACTOS --clave-publicacion CLAVE --salida SALIDA
 //
-// El ZIP incluye un Motor y los runtimes de todas las plataformas publicadas.
-// --plataforma permite construir los paquetes nativos de diagnóstico.
-// Ninguno contiene una Base: se crea en el primer uso.
-//
-// Reproducible: los runtimes se descargan de las URL de packaging/componentes.json
-// y se rechazan si su SHA-256 no coincide; el Motor sale de los archivos
-// versionados en git; las entradas se ordenan y la fecha de todas es la del
-// commit (o SOURCE_DATE_EPOCH). Dos construcciones del mismo commit producen
-// paquetes idénticos byte a byte.
+// El ZIP nativo reúne los seis binarios Rust comprobados. --ensayo usa un canal
+// ficticio con la clave de la prueba. --legado conserva el constructor de los
+// paquetes históricos y sus runtimes. La Base se crea en el primer uso.
+// La fecha de las entradas proviene del commit o de SOURCE_DATE_EPOCH.
 import { spawn, execFileSync } from 'node:child_process';
+import { createPublicKey } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -24,7 +19,7 @@ import {
   readArchive, extractEntries, writeTarGz, writeZip, compareBytes, normalizedMode, resolveLinkTarget, safeRelativePath,
 } from '../src/archive.js';
 import {
-  hashFile, scanTree, validateManifest, validUniversalTargets, verifyTree, describeProblems, MANIFEST_NAME, MANIFEST_RELATIVE_PATH, manifestRelativePath,
+  hashFile, scanTree, validateManifest, validUniversalTargets, NATIVE_TARGETS, UNIVERSAL_TARGETS, verifyTree, describeProblems, MANIFEST_NAME, MANIFEST_RELATIVE_PATH, manifestRelativePath,
 } from '../src/product-files.js';
 import { copySemanticBundle } from '../src/semantic-bundle.js';
 import { stageNativeTarget } from '../src/native-bundle.js';
@@ -44,6 +39,7 @@ export const TARGETS = Object.freeze({
   'darwin-arm64': { platform: 'darwin', arch: 'arm64', format: 'tar.gz' },
   'darwin-x64': { platform: 'darwin', arch: 'x64', format: 'tar.gz' },
   'win32-x64': { platform: 'win32', arch: 'x64', format: 'zip' },
+  'win32-arm64': { platform: 'win32', arch: 'arm64', format: 'zip' },
 });
 
 /** Archivos del Motor que viajan en el paquete (solo los versionados en git). */
@@ -442,7 +438,118 @@ async function buildUniversal(targets, { components, cache, output, mtime, versi
   }
 }
 
-async function main(argv) {
+export async function buildNativePackage({ output, binaries, targets = NATIVE_TARGETS, privateKey, channel,
+  version = '1.0.5', packageRevision = 1, mtime, keepStage = false }) {
+  if (!privateKey) fail('El paquete nativo exige una clave Ed25519 para el descriptor firmado.');
+  if (targets.length !== 1 && (targets.length !== NATIVE_TARGETS.length || !NATIVE_TARGETS.every(id => targets.includes(id)))) {
+    fail('La entrega universal nativa requiere exactamente los seis destinos Rust.');
+  }
+  for (const id of targets) if (!NATIVE_TARGETS.includes(id)) fail('Destino nativo desconocido.');
+  await fsp.mkdir(output, { recursive: true });
+  const stage = path.join(output, '.construccion-nativa');
+  await fsp.mkdir(stage);
+  const modes = new Map();
+  const putFile = async (relative, source, mode = 0o644) => {
+    await copyFile(source, path.join(stage, ...relative.split('/')), { crlf: relative.endsWith('.cmd'), mode });
+    modes.set(relative, mode);
+  };
+  try {
+    await putFile('LEEME.md', path.join(PACKAGING, 'plantilla', 'LEEME-nativo.md'));
+    await putFile('Sistema/Licencias/Mind.txt', path.join(ROOT, 'LICENSE'));
+    for (const name of ['mind.cmd','mind','Autorizar Mind.cmd','Autorizar Mind.command']) {
+      await putFile('Sistema/' + name, path.join(PACKAGING, 'iniciadores-nativos', name), name.endsWith('.cmd') ? 0o644 : 0o755);
+    }
+    const trusted = JSON.parse(await fsp.readFile(path.join(ROOT, 'src/update-channel.json'), 'utf8'));
+    const channelFile = path.join(stage, 'Sistema', 'canal-actualizaciones.json');
+    await fsp.writeFile(channelFile, JSON.stringify(channel ?? trusted) + '\n', { flag: 'wx' });
+    const components = [];
+    for (const id of targets) {
+      const name = id.startsWith('win32-') ? 'mind-native.exe' : 'mind-native';
+      const source = binaries[id];
+      if (!source || !(await fsp.lstat(source)).isFile()) fail('Falta el artefacto Rust de ' + id);
+      await verifyNativeArchitecture(source, id);
+      const relative = 'Sistema/Componentes/Nativo/' + id + '/' + name;
+      await putFile(relative, source, 0o755);
+      components.push({ name: 'Mind Rust', version, target: id, sha256: await hashFile(source) });
+    }
+    const universal = targets.length === NATIVE_TARGETS.length;
+    const platform = universal ? TARGETS['win32-x64'] : TARGETS[targets[0]];
+    const name = universal ? `Mind-${version}-universal-r${packageRevision}.zip`
+      : `Mind-${version}-${targets[0]}-r${packageRevision}.zip`;
+    return await archiveStage(stage, { destination: path.join(output, name), modes, write: writeZip,
+      mtime: mtime ?? Number(git(['log','-1','--format=%ct']).trim()), verifyMetadata: true, privateKey,
+      metadata: { mindVersion: version, packageRevision, platform: platform.platform, arch: platform.arch,
+        runtime: 'rust', components, ...(universal ? { targets: [...targets] } : {}) } });
+  } finally {
+    if (!keepStage) await fsp.rm(stage, { recursive: true, force: true });
+  }
+}
+
+async function verifyNativeArchitecture(file, id) {
+  const source = await fsp.open(file, 'r');
+  const head = Buffer.alloc(64);
+  const valid = await (async () => {
+    if ((await source.read(head, 0, head.length, 0)).bytesRead < head.length) return false;
+    const arm = id.endsWith('-arm64');
+    if (id.startsWith('win32-')) {
+      if (head.readUInt16LE(0) !== 0x5a4d) return false;
+      const pe = head.readUInt32LE(60);
+      const machine = Buffer.alloc(6);
+      if (pe >= 1024 * 1024 || (await source.read(machine, 0, machine.length, pe)).bytesRead !== machine.length) return false;
+      return machine.readUInt32LE(0) === 0x4550 && machine.readUInt16LE(4) === (arm ? 0xaa64 : 0x8664);
+    }
+    if (id.startsWith('darwin-')) return head.readUInt32LE(0) === 0xfeedfacf
+      && head.readUInt32LE(4) === (arm ? 0x0100000c : 0x01000007);
+    return head.readUInt32BE(0) === 0x7f454c46 && head[4] === 2 && head[5] === 1
+      && head.readUInt16LE(18) === (arm ? 183 : 62);
+  })().finally(() => source.close());
+  if (!valid) fail('El artefacto no corresponde a ' + id);
+}
+
+async function nativeMain(argv) {
+  const get = flag => argv.flatMap((value, index) => (argv[index - 1] === flag ? [value] : []));
+  const publication = JSON.parse(await fsp.readFile(path.join(PACKAGING, 'publicacion.json'), 'utf8'));
+  if (publication.version !== 1 || publication.paquete !== 'universal' || publication.plataformas?.length !== NATIVE_TARGETS.length
+      || !validUniversalTargets(publication.plataformas)) fail('La receta universal no enumera los seis destinos.');
+  const output = path.resolve(get('--salida')[0] ?? path.join(ROOT,'dist'));
+  const targets = get('--plataforma').length ? get('--plataforma') : publication.plataformas;
+  const key = get('--clave-publicacion')[0];
+  const artifacts = get('--binarios')[0];
+  const version = get('--version-paquete')[0] ?? publication.mindVersion;
+  const packageRevision = Number(get('--revision-paquete')[0] ?? 1);
+  const mtime = Number(process.env.SOURCE_DATE_EPOCH ?? git(['log','-1','--format=%ct']).trim());
+  if (!key || !artifacts || !/^\d+\.\d+\.\d+$/u.test(version) || !Number.isSafeInteger(packageRevision) || packageRevision < 1
+      || !Number.isSafeInteger(mtime) || mtime < 1) fail('Indica --binarios ARTEFACTOS y --clave-publicacion CLAVE con una versión y revisión válidas.');
+  if (git(['status','--porcelain','--','nativo/rust','packaging','scripts/construir-paquetes.mjs','src/update-channel.json']).trim()) {
+    fail('La entrega requiere código registrado en Git. Para el laboratorio usa buildNativePackage con una clave efímera.');
+  }
+  const binaries = {};
+  for (const id of targets) {
+    if (!NATIVE_TARGETS.includes(id)) fail('Destino nativo desconocido.');
+    const directory = path.join(path.resolve(artifacts),id);
+    const file = path.join(directory,id.startsWith('win32-') ? 'mind-native.exe' : 'mind-native');
+    const evidence = JSON.parse(await fsp.readFile(path.join(directory,'resultado.json'),'utf8'));
+    if (evidence.destino !== id || evidence.compilado !== true || evidence.ejecutado !== true
+        || evidence.bytes !== (await fsp.stat(file)).size || evidence.sha256 !== await hashFile(file)) fail('Falta evidencia del artefacto probado de ' + id);
+    binaries[id] = file;
+  }
+  const privateKey = await fsp.readFile(key, 'utf8');
+  const signer = createPublicKey(privateKey);
+  if (signer.asymmetricKeyType !== 'ed25519') fail('La entrega exige una clave Ed25519.');
+  const official = JSON.parse(await fsp.readFile(path.join(ROOT, 'src/update-channel.json'), 'utf8'));
+  const channel = argv.includes('--ensayo') ?
+    { repository: 'ensayo/mind-ficticio', publicKey: signer.export({ type: 'spki', format: 'pem' }) } : official;
+  const spki = { type: 'spki', format: 'der' };
+  if (!signer.export(spki).equals(createPublicKey(channel.publicKey).export(spki))) {
+    fail('La clave de firma no coincide con el canal. Usa --ensayo con una clave efímera.');
+  }
+  const result = await buildNativePackage({output,binaries,targets,version,packageRevision,mtime,privateKey,channel,
+    keepStage:argv.includes('--conservar-carpeta')});
+  await fsp.writeFile(path.join(output,'SHA256SUMS'),`${result.sha256}  ${result.name}
+`);
+}
+
+async function legacyMain(argv) {
   const values = (flag) => argv.flatMap((value, index) => (argv[index - 1] === flag ? [value] : []));
   const output = path.resolve(values('--salida')[0] ?? path.join(ROOT, 'dist'));
   const cache = path.resolve(values('--cache')[0] ?? path.join(ROOT, '.cache', 'descargas'));
@@ -451,7 +558,7 @@ async function main(argv) {
   if (publication.version !== 1 || publication.paquete !== 'universal' || !validUniversalTargets(publication.plataformas)) {
     fail('packaging/publicacion.json no describe el paquete universal completo.');
   }
-  const targets = requested.length > 0 ? requested : publication.plataformas;
+  const targets = requested.length > 0 ? requested : UNIVERSAL_TARGETS;
   for (const id of targets) if (!TARGETS[id]) fail(`Plataforma desconocida: ${id}. Opciones: ${Object.keys(TARGETS).join(', ')}`);
 
   const components = JSON.parse(await fsp.readFile(path.join(PACKAGING, 'componentes.json'), 'utf8'));
@@ -486,7 +593,9 @@ async function main(argv) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2)).catch((error) => {
+  const args = process.argv.slice(2);
+  const legacy = args.includes('--legado');
+  (legacy ? legacyMain(args.filter(arg => arg !== '--legado')) : nativeMain(args)).catch((error) => {
     process.stderr.write(`Error: ${error?.message ?? error}\n`);
     process.exitCode = 1;
   });

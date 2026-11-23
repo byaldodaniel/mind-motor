@@ -16,7 +16,7 @@ const fixture=await fs.mkdtemp(path.join(RUNS,'measure-'+label+'-'));const base=
 await Promise.all(Array.from({length:256},(_,i)=>fs.writeFile(path.join(directory,'entry-'+String(i).padStart(4,'0')+'.txt'),'fixture')));
 const token='c'.repeat(64),baseId=baseIdOf(base);let sessions=0;
 const server=http.createServer((req,res)=>{const u=new URL(req.url,'http://127.0.0.1');const port=server.address().port;
- if(u.pathname==='/health'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,baseId,port,proof:healthProof(token,u.searchParams.get('nonce'),baseId,port)}));return;}
+ if(u.pathname==='/health'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,baseId,port,pid:process.pid,proof:healthProof(token,u.searchParams.get('nonce'),baseId,port)}));return;}
  if(req.headers.authorization!=='Bearer '+token){res.writeHead(401);res.end();return;}
  if(req.method==='GET'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');return;}
  if(req.method==='DELETE'){res.end('{}');return;}

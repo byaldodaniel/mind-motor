@@ -91,6 +91,78 @@ Al terminar se comprobó que la carpeta ficticia se había eliminado.
 Si el contrato falla, el Motor cambió algo que la pieza nativa debe respetar.
 Si el cambio es intencionado: `node nativo/contracts/r3/capturar.mjs --escribir`.
 
+## Etapa 7 · Instalación Rust y entrega firmada
+
+La receta universal se arma a partir de los seis artefactos de
+`nativo.yml`. Cada artefacto declara el destino, el número de bytes y su
+SHA-256. El ZIP se genera con `scripts/construir-paquetes.mjs --binarios
+ARTEFACTOS --salida SALIDA --clave-publicacion CLAVE`. Los iniciadores
+`Sistema/mind.cmd` y `Sistema/mind` seleccionan el ejecutable Rust de la
+plataforma. `preparar` configura por HTTP local los perfiles detectados.
+No se copian Node, Python ni ONNX. El workflow manual `paquetes.yml`
+usa `--ensayo` para generar un canal ficticio con la misma clave efímera
+que firma el ZIP y lo verifica antes de guardar el artefacto.
+
+El actualizador Rust contrasta el canal y el descriptor con la clave de
+confianza instalada. Verifica SHA-256 del ZIP, del manifiesto y de cada
+archivo antes de ejecutar el Motor nuevo. Espera quietud antes de sustituir
+el programa. La Base queda fuera del diario de movimientos. El programa
+previo queda junto a la instalación, en el directorio de relevo.
+
+Para reproducir la migración, define `MIND_NATIVE_EXE` y `MIND_PYTHON`
+para el entorno de pruebas y ejecuta
+`node --test nativo/test/actualizacion-firmada.test.mjs`. El ensayo parte
+del tag `v1.0.4-r3`, firma con una clave efímera y ejecuta el migrador Rust
+desde fuera de la instalación ficticia. El migrador recibe la Base y el
+sobre firmado, y verifica el ZIP con la clave instalada en r3. La vuelta
+usa `actualizar-recuperar INSTALACION --confirmar` con el diario local.
+
+La medición se reproduce en Windows x64 con `node nativo/medicion/etapa7.mjs`
+y las mismas variables. Parte de la misma Base ficticia. El ensayo de r3
+usa el código del tag auténtico con runtimes locales y prescinde de E5.
+Los tamaños corresponden a ZIP de laboratorio de un destino. La latencia
+en frío arranca un Motor detenido. En caliente se mide `estado` con 13
+llamadas HTTP y siete de consola. La aplicación que comunica con SQLite
+se inicia como servicio ficticio y se mide aparte del Motor. En r3 se
+midieron reposo y sesiones, sin casos equivalentes de vista o servicio.
+
+### Resultado local en Windows x64
+
+| Medición | r3 | 1.0.5 |
+| --- | ---: | ---: |
+| Reposo (procesos / MiB RSS) | 1 / 60,93 | 1 / 5,74 |
+| Una sesión (procesos / MiB RSS) | 2 / 78,48 | 1 / 6,14 |
+| Dos sesiones (procesos / MiB RSS) | 2 / 78,55 | 1 / 6,15 |
+| Vista abierta y cerrada (MiB RSS) | — | 6,58 y 6,58 |
+| Motor con servicio SQLite (MiB RSS) | — | 7,16 |
+| Catálogo MCP (herramientas / bytes de respuesta) | 54 / 44306 | 13 / 10985 |
+| ZIP de laboratorio (MiB) | 37,44 | 4,17 |
+| Arranque HTTP en frío (ms) | 619,59 | 165,85 |
+| Primera sesión HTTP (ms) | 34,30 | 4,09 |
+| HTTP en caliente (p50 / p95, ms) | 19,07 / 31,17 | 7,79 / 16,28 |
+| Consola en frío (ms) | 1708,50 | 172,28 |
+| Consola en caliente (p50 / p95, ms) | 248,85 / 263,36 | 46,99 / 49,07 |
+
+El Motor Rust mantuvo un PID en todos los escenarios. El servicio ficticio
+añadió un proceso separado de 53,48 MiB RSS.
+Las muestras están en [etapa7-windows-x64.json](evidence/etapa7-windows-x64.json).
+El perfil aislado de Codex se probó por MCP. La medición de tokens se
+omitió porque ese perfil carecía de credenciales del modelo.
+
+El release Windows x64 GNU se compiló con `--locked --offline` y cero
+advertencias. La batería nativa registró 41 aprobadas, cero fallidas y dos
+omitidas (DriveFS sin volumen configurado y E5 sin modelo). Las 22
+pruebas de empaquetado, firma y manifiestos pasaron. El ensayo firmado
+conservó la Base, el Markdown y los permisos byte a byte al migrar y
+al volver a r3. Rechazó una firma ajena, un ZIP alterado y una aplicación
+sin consentimiento.
+
+Pasaron los checks offline de Windows ARM64 (target MSVC), Linux musl
+x64 y ARM64, y macOS x64 y ARM64. El enlace de los binarios de esos cinco
+destinos, su ejecución en el sistema de destino y el ZIP universal de
+seis binarios quedan para CI. El artefacto firmado ejecutado aquí cubre
+Windows x64.
+
 ## Vista compartida (Etapa 3)
 
 Con el Motor de una Base ficticia encendido, inicia el candidato con

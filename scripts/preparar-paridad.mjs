@@ -27,7 +27,7 @@ const candidates = path.join(output, 'candidatos'), upgrades = path.join(output,
 const cache = process.env.MIND_COMPONENT_CACHE ? ['--cache', path.resolve(process.env.MIND_COMPONENT_CACHE)] : [];
 try {
   const build = (directory, revision, official = false) => {
-    script('construir-paquetes', ...(official ? ['--sumas-oficiales'] : []), '--revision-paquete', String(revision), '--clave-publicacion', keyFile, '--salida', directory, ...cache);
+    script('construir-paquetes', '--legado', ...(official ? ['--sumas-oficiales'] : []), '--revision-paquete', String(revision), '--clave-publicacion', keyFile, '--salida', directory, ...cache);
     script('firmar-actualizacion', '--verificar', version, directory, '--clave-ensayo', publicFile);
   };
   build(candidates, 1, true); build(upgrades, 2);

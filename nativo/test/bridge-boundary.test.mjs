@@ -6,7 +6,7 @@ import {baseIdOf} from '../../src/connector.js';
 import {createTempRoot,startBridge,startFakeMotor} from './native-fixtures.mjs';
 test('bridge refuses forged health before sending bearer',{timeout:30000},async t=>{
  const env=await createTempRoot(t);let leaked=0;const token='e'.repeat(64);
- const server=http.createServer((req,res)=>{if(req.headers.authorization)leaked++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,baseId:baseIdOf(env.base),port:server.address().port,proof:'f'.repeat(64)}));});
+ const server=http.createServer((req,res)=>{if(req.headers.authorization)leaked++;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,baseId:baseIdOf(env.base),port:server.address().port,pid:process.pid,proof:'f'.repeat(64)}));});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
  await fs.writeFile(env.base+'/conector.json',JSON.stringify({version:1,baseId:baseIdOf(env.base),port:server.address().port,pid:process.pid}));
  await fs.writeFile(env.base+'/conector-secreto.json',JSON.stringify({version:1,token}));

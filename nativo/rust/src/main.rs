@@ -25,6 +25,8 @@ mod motor_workspace;
 mod native_parent;
 mod office_read;
 mod pending_write;
+mod product_cli;
+mod product_profiles;
 mod organize;
 mod result_copy;
 mod scan;
@@ -33,6 +35,8 @@ mod service_process;
 mod services;
 mod text_read;
 mod text_write;
+mod update_handoff;
+mod update_package;
 mod view_cli;
 mod views;
 use std::io::{self, BufRead, Write};
@@ -60,10 +64,27 @@ fn main() {
             .map_err(|e| e.to_string()).and_then(|rt| rt.block_on(view_cli::run(&args[1..]))),
         Some("servicio") => tokio::runtime::Builder::new_current_thread().enable_all().build()
             .map_err(|e| e.to_string()).and_then(|rt| rt.block_on(service_cli::run(&args[1..]))),
-        Some("version") => {println!("mind-native-rust-pilot 0.1.0"); Ok(())},
+        Some("producto") => run_async(product_cli::run(&args[1..])),
+        Some("relevo-actualizacion") => run_async(async {
+            let [root, id] = &args[1..] else { return Err("Uso: relevo-actualizacion INSTALACION ID".into()); };
+            update_handoff::run_worker(root, id, None, true).await.map(|_| ()).map_err(|error| error.to_string())
+        }),
+        Some("actualizar-firmada" | "actualizar-recuperar") => run_async(async {
+            let answer = if args[0] == "actualizar-firmada" { update_handoff::offline(&args[1..]).await }
+                else { update_handoff::recover(&args[1..]).await };
+            println!("{}", answer.map_err(|error| error.to_string())?);
+            Ok(())
+        }),
+        Some("verificar-instalacion") => update_handoff::verify_installation(&args[1..])
+            .map(|answer| println!("{answer}")).map_err(|error| error.to_string()),
+        Some("version") => {println!("Mind 1.0.5 (Rust)"); Ok(())},
         _ => Err("usage: mind-native-rust-pilot motor --base ABS | bridge --base ABS --cwd ABS --paths JSON --launch-command ABS [--launch-arg ARG] | scan | buscar-significado | leer-texto --parent-pid PID | anfitrion --base ABS [--port N] [--puerto-vistas N] [--servicios-prueba] | vista | servicio".into())
     };
     if let Err(error) = result {eprintln!("{error}");std::process::exit(2)}
+}
+fn run_async(future: impl std::future::Future<Output = Result<(), String>>) -> Result<(), String> {
+    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()
+        .map_err(|error| error.to_string())?.block_on(future)
 }
 fn scanner() -> Result<(),String> {
     let mut input=io::stdin().lock();

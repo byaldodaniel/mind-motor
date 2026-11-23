@@ -29,6 +29,7 @@ export const manifestRelativePath = manifest => (manifest?.layoutVersion ?? 1) >
 export const PLATFORMS = Object.freeze(['win32', 'darwin', 'linux']);
 export const ARCHITECTURES = Object.freeze(['x64', 'arm64']);
 export const UNIVERSAL_TARGETS = Object.freeze(['win32-x64', 'darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64']);
+export const NATIVE_TARGETS = Object.freeze([...UNIVERSAL_TARGETS, 'win32-arm64']);
 const SHA256 = /^[a-f0-9]{64}$/u;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u;
 
@@ -78,8 +79,8 @@ export const isVersion = (value) => typeof value === 'string' && VERSION.test(va
 // La edición universal conserva win32/x64 como identificador de compatibilidad
 // para que Windows 1.0.1 acepte el mismo ZIP que reciben los otros destinos.
 export function validUniversalTargets(targets) {
-  return Array.isArray(targets) && targets.length === UNIVERSAL_TARGETS.length
-    && UNIVERSAL_TARGETS.every(target => targets.includes(target));
+  return Array.isArray(targets) && [UNIVERSAL_TARGETS, NATIVE_TARGETS].some(expected =>
+    targets.length === expected.length && expected.every(target => targets.includes(target)));
 }
 
 export function supportsProductTarget(manifest, platform = process.platform, arch = process.arch) {

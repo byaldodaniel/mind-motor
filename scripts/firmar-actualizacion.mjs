@@ -7,7 +7,7 @@ import os from 'node:os';
 import { createPrivateKey, createPublicKey, sign } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readArchive, extractEntries } from '../src/archive.js';
-import { readManifestFile, hashFile, isVersion, validUniversalTargets } from '../src/product-files.js';
+import { readManifestFile, hashFile, isVersion, NATIVE_TARGETS, UNIVERSAL_TARGETS, validUniversalTargets } from '../src/product-files.js';
 import { productPaths, productRuntime } from '../src/layout.js';
 import { verifyPackageDescriptor, releaseOf } from '../src/package-descriptor.js';
 import { fileURLToPath } from 'node:url';
@@ -75,14 +75,42 @@ try {
   sizes = {};
   for (const relative of Object.keys(manifest.files)) sizes[relative] = (await fs.stat(path.join(installation, ...relative.split('/')))).size;
   if (extracted.some(entry => entry.type === 'symlink')) throw new Error('El ZIP universal no puede depender de enlaces simbólicos.');
-  const paths = productPaths(installation, manifest);
-  const required = [path.relative(installation, paths.entrypoint).split(path.sep).join('/'), 'Sistema/mind', 'Sistema/mind.cmd'];
+  const native = manifest.runtime === 'rust';
+  const targets = native ? NATIVE_TARGETS : UNIVERSAL_TARGETS;
+  if (manifest.targets.length !== targets.length || !targets.every(target => manifest.targets.includes(target))
+      || (native && (publication.plataformas.length !== targets.length
+        || !targets.every(target => publication.plataformas.includes(target))))) {
+    throw new Error('El paquete no enumera todos los destinos de su ejecutor.');
+  }
+  const required = ['Sistema/mind', 'Sistema/mind.cmd'];
   const executables = new Set(['My Mind/Sistema/mind', 'My Mind/Sistema/Autorizar Mind.command']);
-  for (const target of publication.plataformas) {
-    const [platform, arch] = target.split('-'), runtime = productRuntime(installation, manifest, platform, arch);
-    for (const executable of [runtime.nodeExecutable, runtime.pythonExecutable]) {
-      const relative = path.relative(installation, executable).split(path.sep).join('/'); required.push(relative);
-      if (platform !== 'win32') executables.add(`My Mind/${relative}`);
+  if (native) {
+    const channelFile = 'Sistema/canal-actualizaciones.json';
+    required.push(channelFile, 'Sistema/Autorizar Mind.cmd', 'Sistema/Autorizar Mind.command');
+    const channel = JSON.parse(await fs.readFile(path.join(installation, channelFile), 'utf8'));
+    const spki = { type: 'spki', format: 'der' };
+    if (!createPublicKey(channel.publicKey).export(spki).equals(createPublicKey(trustedPublicKey).export(spki))
+        || channel.repository !== (testPublicKeyFile ? 'ensayo/mind-ficticio' : config.repository)) {
+      throw new Error('El canal incluido no coincide con el ancla de confianza.');
+    }
+    if (Object.keys(manifest.files).some(file => /(?:^|\/)(?:Node|Python|Semantica|arranque\.cjs)(?:\/|$)|\.onnx$/iu.test(file))) {
+      throw new Error('El paquete nativo contiene runtimes o modelos anteriores.');
+    }
+    for (const target of targets) {
+      const relative = `Sistema/Componentes/Nativo/${target}/mind-native${target.startsWith('win32') ? '.exe' : ''}`;
+      required.push(relative);
+      if (!target.startsWith('win32')) executables.add(`My Mind/${relative}`);
+    }
+  } else {
+    const paths = productPaths(installation, manifest);
+    required.push(path.relative(installation, paths.entrypoint).split(path.sep).join('/'));
+    for (const target of targets) {
+      const [platform, arch] = target.split('-'), runtime = productRuntime(installation, manifest, platform, arch);
+      for (const executable of [runtime.nodeExecutable, runtime.pythonExecutable]) {
+        const relative = path.relative(installation, executable).split(path.sep).join('/');
+        required.push(relative);
+        if (platform !== 'win32') executables.add(`My Mind/${relative}`);
+      }
     }
   }
   const modes = new Map(extracted.filter(entry => entry.type === 'file').map(entry => [entry.path, entry.mode]));
@@ -96,7 +124,7 @@ if (authorNotes) validateBaseImpact(authorNotes, manifest, previousManifest);
 const novedades = authorNotes ? buildNovedades(authorNotes, deriveComprobado({ manifest, sizes, packageBytes: bytes, previousManifest })) : null;
 const payload = Buffer.from(JSON.stringify({ format: 'mind-update', version: 2, ...releaseOf(manifest), manifestSha256,
   ...(novedades ? { novedades } : {}),
-  packages: [{ platform: 'win32', arch: 'x64', targets: publication.plataformas,
+  packages: [{ platform: 'win32', arch: 'x64', targets: manifest.targets,
     url: `https://github.com/${config.repository}/releases/download/v${version}/${encodeURIComponent(name)}`,
     bytes, sha256: await hashFile(file) }] }));
 if (verifyOnly) process.stdout.write(`Mind ${version}, revisión ${manifest.packageRevision}: ZIP universal firmado y verificado${novedades ? ', novedades válidas' : ''}${testPublicKeyFile ? ' con clave de ensayo (no publicable)' : ''}.\n`);

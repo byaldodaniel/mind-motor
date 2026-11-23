@@ -1,68 +1,36 @@
-name: Mind universal
-# Flujo manual del repositorio privado. Consume su cuota si se ejecuta.
+name: Mind 1.0.5 universal Rust
 on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  construir:
+  nativo:
+    uses: ./.github/workflows/nativo.yml
+  paquete:
+    needs: nativo
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24.22.1
-      - name: Preparar componente semántico fijado
-        run: node scripts/preparar-semantica.mjs
-      - name: Construir ZIP universal de ensayo y comprobar reproducibilidad
-        run: node scripts/preparar-paridad.mjs dist --reproducibilidad
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mind-universal-para-validar
-          path: |
-            dist/candidatos/*.zip
-            dist/ensayo/*.zip
-            dist/matriz.json
-            dist/clave-ensayo-publica.pem
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-  probar:
-    needs: construir
-    # Un entorno ejecuta las pruebas de funcionalidad sobre el ZIP universal.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    env:
-      MIND_TARGET: linux-x64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.22.1
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
-          name: mind-universal-para-validar
-          path: dist
-      - run: npm test
-      - name: Comprobar funcionalidades e integridad del ZIP universal
-        shell: pwsh
+          pattern: nativo-*
+          path: artefactos
+          merge-multiple: true
+      - name: Construir ZIP universal firmado para ensayo
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $actual = node -p "process.platform + '-' + process.arch"
-          if ($actual -ne $env:MIND_TARGET) { throw 'El ejecutor no corresponde al destino' }
-          $matrix = Get-Content dist/matriz.json -Raw | ConvertFrom-Json
-          $archives = @($matrix.paquetes | ForEach-Object { $_.paquete.name + '|' + $_.paquete.sha256 } | Select-Object -Unique)
-          $upgrades = @($matrix.paquetes | ForEach-Object { $_.actualizacion.name + '|' + $_.actualizacion.sha256 } | Select-Object -Unique)
-          if ($archives.Count -ne 1 -or $upgrades.Count -ne 1) { throw 'Los destinos deben compartir el mismo ZIP y huella' }
-          $row = $matrix.paquetes | Where-Object plataforma -eq $env:MIND_TARGET
-          node scripts/probar-paquete.mjs "dist/candidatos/$($row.paquete.name)" "dist/ensayo/$($row.actualizacion.name)" $row.paquete.sha256 $row.actualizacion.sha256 dist/informes --clave-ensayo "dist/$($matrix.claveEnsayo)"
+          mkdir -p dist
+          key="$(mktemp)"
+          trap 'rm -f "$key"' EXIT
+          node --input-type=module -e 'import { generateKeyPairSync } from "node:crypto"; import { writeFileSync } from "node:fs"; const {publicKey,privateKey}=generateKeyPairSync("ed25519"); writeFileSync(process.argv[1],privateKey.export({type:"pkcs8",format:"pem"}),{mode:0o600}); writeFileSync("dist/clave-ensayo-publica.pem",publicKey.export({type:"spki",format:"pem"}));' "$key"
+          node scripts/construir-paquetes.mjs --ensayo --binarios artefactos --salida dist --clave-publicacion "$key"
+          version="$(node -p 'require("./packaging/publicacion.json").mindVersion')"
+          node scripts/firmar-actualizacion.mjs --verificar "$version" dist --clave-ensayo dist/clave-ensayo-publica.pem
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: informe-funcional-universal
-          path: dist/informes/*.json
-          if-no-files-found: warn
+          name: mind-universal-rust-ensayo
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error

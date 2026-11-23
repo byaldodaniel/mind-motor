@@ -1,0 +1,229 @@
+{
+  "formato": 1,
+  "plataforma": "win32-x64",
+  "fecha": "2026-11-23T01:17:34.807Z",
+  "r3Commit": "eabdc3c10ca6e22f3b873b0bbac50a5fe7626f64",
+  "versionNativa": "1.0.5",
+  "alcance": "Dos paquetes de laboratorio Windows x64. r3 usa el tag auténtico y runtimes locales, sin modelo E5. El servicio de medición es una aplicación ficticia ejecutada por separado con Node como cliente de SQLite.",
+  "r3": {
+    "pid": 11820,
+    "reposo": {
+      "mind": {
+        "procesos": 1,
+        "rssBytes": 63893504,
+        "ejecutables": [
+          "node.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "unaSesion": {
+      "mind": {
+        "procesos": 2,
+        "rssBytes": 82288640,
+        "ejecutables": [
+          "node.exe",
+          "python.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "dosSesiones": {
+      "mind": {
+        "procesos": 2,
+        "rssBytes": 82370560,
+        "ejecutables": [
+          "node.exe",
+          "python.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "tools": 54,
+    "catalogoRespuestaBytes": 44306,
+    "catalogoHerramientasBytes": 44262,
+    "msConsolaFria": 1708.5,
+    "msArranqueHttp": 619.59,
+    "msPrimeraSesion": 34.3,
+    "http": {
+      "muestras": [
+        25.23,
+        31.17,
+        20.37,
+        18.79,
+        21,
+        18.94,
+        18.94,
+        18.66,
+        18.43,
+        24.3,
+        22.14,
+        18.04,
+        19.07
+      ],
+      "p50": 19.07,
+      "p95": 31.17
+    },
+    "consola": {
+      "muestras": [
+        243.77,
+        248.73,
+        244.6,
+        250.69,
+        263.36,
+        248.85,
+        249.67
+      ],
+      "p50": 248.85,
+      "p95": 263.36
+    },
+    "zipBytes": 39253858,
+    "vista": null,
+    "trasVista": null,
+    "sqlite": null
+  },
+  "rust": {
+    "pid": 16288,
+    "reposo": {
+      "mind": {
+        "procesos": 1,
+        "rssBytes": 6021120,
+        "ejecutables": [
+          "mind-native.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "unaSesion": {
+      "mind": {
+        "procesos": 1,
+        "rssBytes": 6443008,
+        "ejecutables": [
+          "mind-native.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "dosSesiones": {
+      "mind": {
+        "procesos": 1,
+        "rssBytes": 6447104,
+        "ejecutables": [
+          "mind-native.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "tools": 13,
+    "catalogoRespuestaBytes": 10985,
+    "catalogoHerramientasBytes": 10941,
+    "msConsolaFria": 172.28,
+    "msArranqueHttp": 165.85,
+    "msPrimeraSesion": 4.09,
+    "http": {
+      "muestras": [
+        14.91,
+        16.28,
+        7.75,
+        7.79,
+        6.08,
+        8.81,
+        6.04,
+        9.3,
+        6.07,
+        9.14,
+        6.06,
+        7.95,
+        7.05
+      ],
+      "p50": 7.79,
+      "p95": 16.28
+    },
+    "consola": {
+      "muestras": [
+        47,
+        45.74,
+        45.48,
+        47.07,
+        46.99,
+        49.07,
+        46.73
+      ],
+      "p50": 46.99,
+      "p95": 49.07
+    },
+    "zipBytes": 4377035,
+    "vista": {
+      "mind": {
+        "procesos": 1,
+        "rssBytes": 6901760,
+        "ejecutables": [
+          "mind-native.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "trasVista": {
+      "mind": {
+        "procesos": 1,
+        "rssBytes": 6901760,
+        "ejecutables": [
+          "mind-native.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 0,
+        "rssBytes": 0,
+        "ejecutables": []
+      }
+    },
+    "sqlite": {
+      "mind": {
+        "procesos": 1,
+        "rssBytes": 7507968,
+        "ejecutables": [
+          "mind-native.exe"
+        ]
+      },
+      "servicioDePrueba": {
+        "procesos": 1,
+        "rssBytes": 56078336,
+        "ejecutables": [
+          "node.exe"
+        ]
+      }
+    }
+  },
+  "codex": {
+    "estado": "omitido",
+    "motivo": "El perfil ficticio carece de credenciales de modelo. Se midieron MCP y consola sin cuota."
+  }
+}

@@ -1,8 +1,10 @@
 {
   "version": 1,
   "paquete": "universal",
+  "mindVersion": "1.0.5",
   "plataformas": [
     "win32-x64",
+    "win32-arm64",
     "darwin-arm64",
     "darwin-x64",
     "linux-x64",

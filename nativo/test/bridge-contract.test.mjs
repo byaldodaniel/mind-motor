@@ -87,7 +87,7 @@ async function startFakeMotor(env, { onToolCall, onInitialized, healthRelease = 
     };
     if (url.pathname === '/health') {
       const nonce = url.searchParams.get('nonce');
-      return sendJson(200, { ok: true, baseId, port, ...healthRelease, ...(nonce ? { proof: healthProof(token, nonce, baseId, port) } : {}) });
+      return sendJson(200, { ok: true, baseId, port, pid: process.pid, ...healthRelease, ...(nonce ? { proof: healthProof(token, nonce, baseId, port) } : {}) });
     }
     if (req.headers.authorization !== `Bearer ${token}`) return sendJson(401, { error: 'UNAUTHORIZED' });
     if (url.pathname !== '/mcp') return sendJson(404, { error: 'NOT_FOUND' });

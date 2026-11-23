@@ -31,7 +31,7 @@ impl Config {
     }
 }
 #[derive(Clone)] struct Remote {port:u16,token:String,session:String,generation:Uuid}
-struct Connector {port:u16,token:String,health:Value}
+pub(crate) struct Connector {pub(crate) port:u16,pub(crate) token:String,pub(crate) health:Value}
 struct Reply {status:u16,session:Option<String>,body:Option<Value>}
 struct Relay {child:Child,input:ChildStdin,pending:Arc<Mutex<HashMap<String,Value>>>}
 struct Bridge {config:Config,client:reqwest::Client,output:Mutex<tokio::io::Stdout>,remote:Mutex<Option<Remote>>,connecting:Mutex<()>,init:Mutex<Option<Value>>,initialized:AtomicBool,had:AtomicBool,reduced:AtomicBool,closed:AtomicBool,connection:Uuid,relay:Mutex<Option<Relay>>,relay_attempted:AtomicBool}
@@ -61,6 +61,24 @@ pub(crate) fn base_id(path:&Path)->Option<String>{
     #[cfg(any(windows,target_os="macos"))] {text=text.to_lowercase();}
     Some(format!("{:x}",Sha256::digest(text.as_bytes()))[..16].to_owned())
 }
+pub(crate) async fn healthy(base: &Path, client: &reqwest::Client)->Option<Connector>{
+    let state=regular_json(&base.join("conector.json"))?;let secret=regular_json(&base.join("conector-secreto.json"))?;
+    if state.get("version")?.as_u64()!=Some(1)||secret.get("version")?.as_u64()!=Some(1){return None}
+    let port=u16::try_from(state.get("port")?.as_u64()?).ok()?;if port==0{return None}
+    let expected=base_id(base)?;if state.get("baseId")?.as_str()?!=expected{return None}
+    let token=secret.get("token")?.as_str()?;if token.len()<32{return None}
+    let nonce=Uuid::new_v4().simple().to_string();
+    let response=client.get(format!("http://127.0.0.1:{port}/health?nonce={nonce}")).timeout(Duration::from_millis(800)).send().await.ok()?;
+    if response.status()!=200{return None}let mut stream=response.bytes_stream();let mut bytes=Vec::new();while let Some(chunk)=stream.next().await{let chunk=chunk.ok()?;if bytes.len()+chunk.len()>65536{return None}bytes.extend_from_slice(&chunk);}
+    let health:Value=serde_json::from_slice(&bytes).ok()?;
+    if state.get("pid")?.as_u64()?!=health.get("pid")?.as_u64()?{return None}
+    if health.get("ok")?.as_bool()!=Some(true)||health.get("port")?.as_u64()!=Some(port as u64)||health.get("baseId")?.as_str()?!=expected{return None}
+    let mut mac=Hmac::<Sha256>::new_from_slice(token.as_bytes()).ok()?;mac.update(format!("mind-health-v1\n{nonce}\n{expected}\n{port}").as_bytes());
+    let proof=health.get("proof")?.as_str()?;if proof.len()!=64||!proof.bytes().all(|b|b.is_ascii_hexdigit()){return None}
+    let proof_bytes:Option<Vec<u8>>=(0..64).step_by(2).map(|i|u8::from_str_radix(&proof[i..i+2],16).ok()).collect();mac.verify_slice(&proof_bytes?).ok()?;
+    Some(Connector{port,token:token.to_owned(),health})
+}
+
 struct Events{buffer:Vec<u8>,data:Vec<Vec<u8>>,size:usize}
 impl Events {
     fn new()->Self{Self{buffer:Vec::new(),data:Vec::new(),size:0}}
@@ -78,22 +96,7 @@ impl Events {
 }
 impl Bridge {
     async fn write(&self,value:Value){if self.closed.load(Ordering::SeqCst){return}let mut out=self.output.lock().await;if let Ok(mut data)=serde_json::to_vec(&value){data.push(b'\n');let _=out.write_all(&data).await;let _=out.flush().await;}}
-    async fn health(&self)->Option<Connector>{
-        let state=regular_json(&self.config.base.join("conector.json"))?;let secret=regular_json(&self.config.base.join("conector-secreto.json"))?;
-        if state.get("version")?.as_u64()!=Some(1)||secret.get("version")?.as_u64()!=Some(1){return None}
-        let port=u16::try_from(state.get("port")?.as_u64()?).ok()?;if port==0{return None}
-        let expected=base_id(&self.config.base)?;if state.get("baseId")?.as_str()?!=expected{return None}
-        let token=secret.get("token")?.as_str()?;if token.len()<32{return None}
-        let nonce=Uuid::new_v4().simple().to_string();
-        let response=self.client.get(format!("http://127.0.0.1:{port}/health?nonce={nonce}")).timeout(Duration::from_millis(800)).send().await.ok()?;
-        if response.status()!=200{return None}let mut stream=response.bytes_stream();let mut bytes=Vec::new();while let Some(chunk)=stream.next().await{let chunk=chunk.ok()?;if bytes.len()+chunk.len()>65536{return None}bytes.extend_from_slice(&chunk);}
-        let health:Value=serde_json::from_slice(&bytes).ok()?;
-        if health.get("ok")?.as_bool()!=Some(true)||health.get("port")?.as_u64()!=Some(port as u64)||health.get("baseId")?.as_str()?!=expected{return None}
-        let mut mac=Hmac::<Sha256>::new_from_slice(token.as_bytes()).ok()?;mac.update(format!("mind-health-v1\n{nonce}\n{expected}\n{port}").as_bytes());
-        let proof=health.get("proof")?.as_str()?;if proof.len()!=64||!proof.bytes().all(|b|b.is_ascii_hexdigit()){return None}
-        let proof_bytes:Option<Vec<u8>>=(0..64).step_by(2).map(|i|u8::from_str_radix(&proof[i..i+2],16).ok()).collect();mac.verify_slice(&proof_bytes?).ok()?;
-        Some(Connector{port,token:token.to_owned(),health})
-    }
+    async fn health(&self)->Option<Connector>{ healthy(&self.config.base, &self.client).await }
     async fn wake(&self)->Result<Connector>{
         if let Some(c)=self.health().await{return Ok(c)}
         let mut command=std::process::Command::new(&self.config.launch);command.args(&self.config.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());

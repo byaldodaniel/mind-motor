@@ -1526,6 +1526,10 @@ pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         return Err("El arranque autónomo requiere escritura segura en Windows, Linux o macOS.".into());
     }
     let (root, publish, layout, preferred_port) = boot_args(args)?;
+    if let Some(installation) = &layout.installation {
+        let path = crate::update_package::physical(installation).map_err(|error| error.to_string())?;
+        crate::update_handoff::check_start(&path).map_err(|error| error.to_string())?;
+    }
     if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
         if let Ok(parent_real) = parent.canonicalize() {
             if let Some(lock_path) = motor_owner::restore_lock_path(&parent_real.join(name)) {

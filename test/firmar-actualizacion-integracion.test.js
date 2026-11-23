@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { writeZip } from '../src/archive.js';
-import { UNIVERSAL_TARGETS } from '../src/product-files.js';
+import { NATIVE_TARGETS, UNIVERSAL_TARGETS } from '../src/product-files.js';
 import { createSignedPackageDescriptor } from '../src/package-descriptor.js';
 
 const source = fileURLToPath(new URL('..', import.meta.url));
@@ -32,16 +32,26 @@ async function fixture(t) {
   const builtFrom = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   await fs.writeFile(path.join(root, 'ensayo.pem'), privateKey.export({ type: 'pkcs8', format: 'pem' }));
-  await fs.writeFile(path.join(root, 'src/update-channel.json'), JSON.stringify({ repository: 'ensayo/mind', publicKey: publicKey.export({ type: 'spki', format: 'pem' }) }));
-  async function archive(file, { version = '1.0.5', baseFormatVersion = 2, changed = true } = {}) {
-    const content = { 'Sistema/Programa/Motor/bin/mind.js': changed ? 'console.log("nuevo ficticio");' : 'console.log("anterior ficticio");',
-      'Sistema/mind': '#!/bin/sh\n', 'Sistema/mind.cmd': '@echo off\r\n', 'Sistema/Autorizar Mind.command': '#!/bin/sh\n' };
-    for (const target of UNIVERSAL_TARGETS) {
-      content[`Sistema/Componentes/Node/${target}/${target.startsWith('win32') ? 'node.exe' : 'bin/node'}`] = 'node ficticio';
-      content[`Sistema/Componentes/Python/${target}/${target.startsWith('win32') ? 'python.exe' : 'bin/python3'}`] = 'python ficticio';
+  const channel = { repository: 'ensayo/mind', publicKey: publicKey.export({ type: 'spki', format: 'pem' }) };
+  await fs.writeFile(path.join(root, 'src/update-channel.json'), JSON.stringify(channel));
+  async function archive(file, { version = '1.0.5', baseFormatVersion = 2, changed = true, native = false } = {}) {
+    const content = { 'Sistema/mind': '#!/bin/sh\n', 'Sistema/mind.cmd': '@echo off\r\n',
+      'Sistema/Autorizar Mind.command': '#!/bin/sh\n' };
+    if (native) {
+      content['Sistema/Autorizar Mind.cmd'] = '@echo off\r\n';
+      content['Sistema/canal-actualizaciones.json'] = JSON.stringify(channel);
+      for (const target of NATIVE_TARGETS) {
+        content[`Sistema/Componentes/Nativo/${target}/mind-native${target.startsWith('win32') ? '.exe' : ''}`] = 'Rust ficticio';
+      }
+    } else {
+      content['Sistema/Programa/Motor/bin/mind.js'] = changed ? 'console.log("nuevo ficticio");' : 'console.log("anterior ficticio");';
+      for (const target of UNIVERSAL_TARGETS) {
+        content[`Sistema/Componentes/Node/${target}/${target.startsWith('win32') ? 'node.exe' : 'bin/node'}`] = 'node ficticio';
+        content[`Sistema/Componentes/Python/${target}/${target.startsWith('win32') ? 'python.exe' : 'bin/python3'}`] = 'python ficticio';
+      }
     }
     const manifest = { format: 'mind-product', version: 1, mindVersion: version, platform: 'win32', arch: 'x64',
-      targets: UNIVERSAL_TARGETS, layoutVersion: 2, updateProtocolVersion: 2, packageRevision: 1, baseFormatVersion, builtFrom,
+      targets: native ? NATIVE_TARGETS : UNIVERSAL_TARGETS, ...(native ? { runtime: 'rust' } : {}), layoutVersion: 2, updateProtocolVersion: 2, packageRevision: 1, baseFormatVersion, builtFrom,
       files: Object.fromEntries(Object.entries(content).map(([name, data]) => [name, hash(data)])) };
     const manifestBytes = JSON.stringify(manifest) + '\n';
     const entries = Object.entries({ ...content, 'Sistema/mind-producto.json': manifestBytes,
@@ -92,4 +102,16 @@ test('firmante completo: ZIP universal real, firma efímera y contraste con --an
   assert.equal(noPrevious.status, 0, noPrevious.stderr);
   const noPreviousPayload = JSON.parse(Buffer.from(JSON.parse(await fs.readFile(path.join(f.root, 'sin-anterior.json'), 'utf8')).payload, 'base64'));
   assert.equal(noPreviousPayload.novedades.comprobado.gruposCambiados, null);
+});
+
+test('firmante: el canal v2 identifica los seis destinos del paquete Rust', async t => {
+  const f = await fixture(t);
+  await fs.unlink(f.currentZip);
+  await f.archive(f.currentZip, { baseFormatVersion: 3, native: true });
+  const result = await f.run('sin-cambios', 'canal-nativo.json');
+  assert.equal(result.status, 0, result.stderr);
+  const envelope = JSON.parse(await fs.readFile(path.join(f.root, 'canal-nativo.json'), 'utf8'));
+  const payload = Buffer.from(envelope.payload, 'base64');
+  assert.ok(verify(null, payload, f.publicKey, Buffer.from(envelope.signature, 'base64')));
+  assert.deepEqual(JSON.parse(payload).packages[0].targets, NATIVE_TARGETS);
 });

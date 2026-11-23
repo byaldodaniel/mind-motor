@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+case "$(uname -s)" in Darwin) os=darwin;; Linux) os=linux;; *) printf '%s\n' 'Sistema no compatible.' >&2; exit 1;; esac
+case "$(uname -m)" in x86_64|amd64) arch=x64;; arm64|aarch64) arch=arm64;; *) printf '%s\n' 'Arquitectura no compatible.' >&2; exit 1;; esac
+exe="$DIR/Componentes/Nativo/$os-$arch/mind-native"
+if [ ! -x "$exe" ]; then printf '%s\n' "Falta el Motor Rust para $os-$arch." >&2; exit 1; fi
+exec "$exe" producto "$@"

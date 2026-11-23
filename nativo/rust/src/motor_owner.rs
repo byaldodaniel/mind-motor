@@ -10,6 +10,20 @@ use uuid::Uuid;
 
 use crate::{motor_permissions::read_json, text_write};
 
+pub(crate) fn process_record() -> Option<Value> {
+    let (host, birth) = identity()?;
+    let token = Uuid::new_v4().to_string();
+    Some(json!({"version":2,"host":host,"pid":std::process::id(),
+        "processBirth":birth,"token":token,"instanceToken":token,"startedAt":timestamp()?}))
+}
+
+pub(crate) fn known_stale(record: &Value) -> bool {
+    let Some((host, _)) = identity() else { return false; };
+    record["host"] == host && record["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+        .filter(|&pid| pid > 0).zip(record["processBirth"].as_str().filter(|birth| !birth.is_empty()))
+        .is_some_and(|(pid, birth)| is_stale_process(pid, birth))
+}
+
 const LOCK: &str = "conector.lock";
 const RECOVERY: &str = "conector.lock.recovery";
 
