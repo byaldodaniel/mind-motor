@@ -227,6 +227,16 @@ fn normalizar_ruta_absoluta(crudo: &str) -> Option<String> {
     if !(es_win || es_unc) {
         return None;
     }
+    let s = if cfg!(windows) {
+        s
+    } else {
+        // Path en Unix no distingue los separadores invertidos de un nombre.
+        let recorte = s.trim_end_matches(['\\', '/']);
+        if es_win && recorte.len() == 2 {
+            return Some(s[..3].to_string());
+        }
+        recorte
+    };
     Some(lugares::limpiar(Path::new(s)).to_string_lossy().into_owned())
 }
 
@@ -737,6 +747,7 @@ mod tests {
 
     #[test]
     fn extrae_tres_tipos_e_ignora_web() {
+        assert_eq!(normalizar_ruta_absoluta("D:\\"), Some("D:\\".to_string()));
         let origen = raiz_prueba().join("Proyectos").join("nota.md");
         let md = "\
 - [Guía](../Gu%C3%ADa%20r%C3%A1pida.md#intro \"título\")
