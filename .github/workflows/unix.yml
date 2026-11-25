@@ -1,0 +1,67 @@
+name: Mind en macOS y Linux
+
+on: [workflow_dispatch, push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  mind:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            destino: linux-x64
+          - runner: ubuntu-24.04-arm
+            destino: linux-arm64
+          - runner: macos-15-intel
+            destino: macos-x64
+          - runner: macos-15
+            destino: macos-arm64
+    timeout-minutes: 12
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar Rust
+        run: rustup default 1.100.0
+      - name: Probar y compilar
+        run: |
+          sh programa/build.sh --pruebas
+          sh programa/build.sh
+          './My Mind/Sistema/mind' | grep -Fx 'Mind 1.0.6'
+      - name: Comprobar el vigilante y la consola
+        shell: sh
+        run: |
+          mind="$PWD/My Mind/Sistema/mind"
+          temporal=$(mktemp -d)
+          cd "$temporal"
+          temporal=$(pwd -P)
+          raiz="$temporal/My Mind"
+          lugar="$temporal/Lugar de prueba"
+          mkdir -p "$raiz" "$lugar"
+          printf '# Inicio\n\n- [Lugar](../Lugar%%20de%%20prueba)\n' > "$raiz/Inicio.md"
+          printf '# Guía\n\nContenido inicial.\n' > "$lugar/Guia.md"
+          "$mind" --raiz "My Mind" vigilar &
+          vigilante=$!
+          trap 'kill "$vigilante" 2>/dev/null || true; wait "$vigilante" 2>/dev/null || true; cd /; rm -rf -- "$temporal"' 0
+          esperar() {
+            for intento in $(seq 1 20); do
+              if "$@" >/dev/null 2>&1; then
+                return 0
+              fi
+              kill -0 "$vigilante"
+              sleep 1
+            done
+            "$@"
+          }
+          inicial() { "$mind" --raiz "$raiz" buscar inicial | grep -F 'Guia.md'; }
+          cambio() { "$mind" --raiz "$raiz" buscar marcadorvigia | grep -F 'Nueva.md'; }
+          conexiones() { "$mind" --raiz "$raiz" conexiones "$lugar/Nueva.md" | grep -F 'Guia.md'; }
+          listo() { grep -F 'Contenido al d' "$raiz/Sistema/Base/vigilante.log"; }
+          esperar listo
+          esperar inicial
+          printf 'marcadorvigia\n\n[Guía](Guia.md)\n' > "$lugar/Nueva.md"
+          esperar cambio
+          esperar conexiones
+          "$mind" --raiz "My Mind" vigilar | grep -F 'Ya hay un vigilante'

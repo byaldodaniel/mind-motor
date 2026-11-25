@@ -1,0 +1,18 @@
+[package]
+name = "mind"
+version = "1.0.6"
+edition = "2021"
+publish = false
+
+[dependencies]
+notify = "8"
+regex = "1"
+rusqlite = { version = "0.43.0", default-features = false, features = ["bundled"] }
+unicode-normalization = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
